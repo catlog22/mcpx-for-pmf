@@ -165,7 +165,9 @@ func renderCodeChange(data map[string]any) string {
 	}
 	if diffText != "" {
 		display, truncated := trimDiffForRender(diffText)
-		b.WriteString("\n```diff\n");b.WriteString(display);b.WriteString("\n```\n")
+		b.WriteString("\n```diff\n")
+		b.WriteString(display)
+		b.WriteString("\n```\n")
 		if truncated {
 			resourceURI, _ := diffMeta["resource_uri"].(string)
 			if resourceURI != "" {
