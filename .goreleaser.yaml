@@ -1,0 +1,72 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: mcpx
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: mcpx-server
+    main: ./cmd/mcpx-server
+    binary: mcpx-server
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+      - -X main.date={{.Date}}
+    flags:
+      - -trimpath
+
+archives:
+  - id: default
+    builds:
+      - mcpx-server
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    # Only ship the binary — never pack prd/, docs/superpowers/, tests, etc.
+    files:
+      - none*
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^prd"
+      - "^chore:\\s*docs"
+      - Merge pull request
+      - Merge branch
+
+release:
+  draft: false
+  prerelease: auto
+  name_template: "MCPX {{.Version}}"
+  # Source tarball of the whole git tree is off; release assets are binaries only.
+  # (prd / docs/superpowers stay in git but are not release packages.)
+
+snapshot:
+  version_template: "{{ .Tag }}-next"

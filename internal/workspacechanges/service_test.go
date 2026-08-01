@@ -1,0 +1,167 @@
+package workspacechanges
+
+import (
+	"context"
+	"crypto/sha256"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"mcpx/internal/auth"
+	"mcpx/internal/changeset"
+	"mcpx/internal/remotesession"
+	"mcpx/internal/state"
+)
+
+func TestInspectAttributesRemoteSessionChanges(t *testing.T) {
+	root := t.TempDir()
+	git(t, root, "init")
+	git(t, root, "config", "user.email", "test@example.invalid")
+	git(t, root, "config", "user.name", "MCPX Test")
+	write(t, root, "preexisting.txt", "base\n")
+	write(t, root, "mcpx.txt", "base\n")
+	git(t, root, "add", ".")
+	git(t, root, "commit", "-m", "base")
+
+	// This edit exists before the Remote Session baseline is captured.
+	write(t, root, "preexisting.txt", "changed before session\n")
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	principal := auth.Principal{ID: "principal-test", Kind: "test", SubjectHash: "subject-test"}
+	created, err := remotesession.NewService(store.DB()).Create(ctx, principal, remotesession.CreateInput{
+		WorkspaceName: "test", WorkspacePath: root, Label: "attribution test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store.DB())
+	if err := service.CaptureBaseline(ctx, created.Session.ID, root); err != nil {
+		t.Fatal(err)
+	}
+
+	original := []byte("base\n")
+	digest := sha256.Sum256(original)
+	changeService := changeset.NewService(store.DB())
+	prepared, err := changeService.Prepare(ctx, created.Session.ID, principal.ID, root, "MCPX edit", []changeset.Operation{{
+		Operation: "update", Path: "mcpx.txt", ExpectedSHA256: fmt.Sprintf("%x", digest), Content: "changed by mcpx\n",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := changeService.Apply(ctx, prepared.ID, root); err != nil {
+		t.Fatal(err)
+	}
+	write(t, root, "external.txt", "outside edit\n")
+
+	report, err := service.Inspect(ctx, created.Session.ID, "test", root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attribution := map[string]string{}
+	for _, entry := range report.Entries {
+		attribution[entry.Path] = entry.Attribution
+	}
+	for path, want := range map[string]string{
+		"preexisting.txt": "preexisting",
+		"mcpx.txt":        "mcpx",
+		"external.txt":    "external",
+	} {
+		if got := attribution[path]; got != want {
+			t.Fatalf("%s attribution=%q, want %q; report=%+v", path, got, want, report.Entries)
+		}
+	}
+	if report.UnifiedDiff == "" {
+		t.Fatal("expected tracked Unified Diff")
+	}
+}
+
+func TestInspectAggregatesNestedGitRoots(t *testing.T) {
+	root := t.TempDir()
+	// The aggregate root itself is not a Git repository; a and b are two
+	// nested repositories, mirroring a workspace that hosts multiple repos.
+	for _, sub := range []string{"a", "b"} {
+		subRoot := filepath.Join(root, sub)
+		if err := os.MkdirAll(subRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		git(t, subRoot, "init")
+		git(t, subRoot, "config", "user.email", "test@example.invalid")
+		git(t, subRoot, "config", "user.name", "MCPX Test")
+		write(t, subRoot, "file.txt", "base\n")
+		git(t, subRoot, "add", ".")
+		git(t, subRoot, "commit", "-m", "base")
+		// Untracked file: drives the entries assertion.
+		write(t, subRoot, "dirty.txt", "changed\n")
+		// Tracked modification: drives the unified diff assertion.
+		write(t, subRoot, "file.txt", "base\nchanged\n")
+	}
+
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	principal := auth.Principal{ID: "principal-test", Kind: "test", SubjectHash: "subject-test"}
+	created, err := remotesession.NewService(store.DB()).Create(ctx, principal, remotesession.CreateInput{
+		WorkspaceName: "aggregate", WorkspacePath: root, Label: "multi-root test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store.DB())
+	if err := service.CaptureBaseline(ctx, created.Session.ID, root); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := service.Inspect(ctx, created.Session.ID, "aggregate", root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.GitRoots) != 2 {
+		t.Fatalf("expected 2 git roots, got %+v", report.GitRoots)
+	}
+	for _, gitRoot := range report.GitRoots {
+		if gitRoot.Path != "a" && gitRoot.Path != "b" {
+			t.Fatalf("unexpected git root %q", gitRoot.Path)
+		}
+		if gitRoot.Head == "" {
+			t.Fatalf("git root %q has no head", gitRoot.Path)
+		}
+	}
+	if !strings.Contains(report.GitHead, "a:") || !strings.Contains(report.GitHead, "b:") {
+		t.Fatalf("aggregate head must name both roots: %q", report.GitHead)
+	}
+	paths := map[string]bool{}
+	for _, entry := range report.Entries {
+		paths[entry.Path] = true
+	}
+	if !paths["a/dirty.txt"] || !paths["b/dirty.txt"] {
+		t.Fatalf("entries must include both nested repos: %+v", report.Entries)
+	}
+	if !strings.Contains(report.UnifiedDiff, "### a") || !strings.Contains(report.UnifiedDiff, "### b") {
+		t.Fatalf("unified diff must cover both repos: %q", report.UnifiedDiff)
+	}
+}
+
+func git(t *testing.T, root string, args ...string) {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", root}, args...)...)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, output)
+	}
+}
+
+func write(t *testing.T, root, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -1,0 +1,11 @@
+/bin/
+/dist/
+*.exe
+*.test
+.DS_Store
+.goreleaser.baseline*
+
+# local product docs (not in repo)
+/prd/
+/docs/superpowers/
+/.firecrawl/

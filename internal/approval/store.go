@@ -1,0 +1,239 @@
+package approval
+
+import (
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Pending holds a deferred tool action awaiting human approval.
+type Pending struct {
+	ID              string
+	Tool            string
+	Summary         string
+	Command         string
+	CommandYieldMs  int
+	Purpose         string
+	Scope           string
+	CommandDigest   string
+	WorkDir         string
+	RequestID       string
+	Workspace       string
+	RemoteSessionID string
+	PrincipalID     string
+	ChangesetID     string
+	ChangesetDigest string
+	ContentKey      string
+	CreatedAt       time.Time
+}
+
+// Store holds Remote Session-scoped pending approvals.
+type Store struct {
+	mu   sync.Mutex
+	byID map[string]Pending
+	db   *sql.DB
+}
+
+const pendingTTL = 30 * time.Minute
+
+// NewStore creates an empty store.
+func NewStore() *Store {
+	return &Store{byID: map[string]Pending{}}
+}
+
+// NewPersistentStore stores Remote Session approvals in SQLite.
+func NewPersistentStore(db *sql.DB) *Store {
+	return &Store{byID: map[string]Pending{}, db: db}
+}
+
+// contentKey computes the dedup key for a pending approval. command_execute
+// deliberately excludes RequestID: CommandDigest embeds it and changes on
+// every retry, which would defeat deduplication.
+func contentKey(p Pending) string {
+	switch p.Tool {
+	case "command_execute":
+		return strings.Join([]string{p.Command, p.Purpose, p.Scope}, "\x00")
+	case "change_execute", "change_apply":
+		if p.ChangesetID == "" || p.ChangesetDigest == "" {
+			return ""
+		}
+		return strings.Join([]string{p.ChangesetID, p.ChangesetDigest}, "\x00")
+	default:
+		return ""
+	}
+}
+
+// Put registers a pending action and returns approval_id.
+func (s *Store) Put(p Pending) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	s.pruneLocked(now)
+	if p.ID == "" {
+		p.ID = newID()
+	}
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = now
+	}
+	if p.ContentKey == "" {
+		p.ContentKey = contentKey(p)
+	}
+	// An incoming approval that is already past its TTL is stale: never fold it
+	// onto a live approval_id.
+	if p.ContentKey != "" && now.Sub(p.CreatedAt) < pendingTTL {
+		if existing, ok := s.findPendingLocked(p.RemoteSessionID, p.ContentKey); ok {
+			return existing.ID, nil
+		}
+	}
+	if s.db != nil {
+		payload, err := json.Marshal(p)
+		if err != nil {
+			return "", fmt.Errorf("encode approval: %w", err)
+		}
+		_, err = s.db.Exec(`INSERT OR REPLACE INTO approvals
+            (id, remote_session_id, principal_id, tool, summary, payload_json, content_key, status, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+			p.ID, p.RemoteSessionID, p.PrincipalID, p.Tool, p.Summary, string(payload), p.ContentKey,
+			p.CreatedAt.UnixMilli(), p.CreatedAt.Add(pendingTTL).UnixMilli())
+		if err != nil {
+			return "", fmt.Errorf("persist approval: %w", err)
+		}
+	}
+	s.byID[p.ID] = p
+	return p.ID, nil
+}
+
+// Consume removes and returns a pending approval by id after the action succeeds.
+func (s *Store) Consume(id string) (Pending, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked(time.Now().UTC())
+	p, ok := s.getLocked(id)
+	if ok {
+		if s.db != nil {
+			result, err := s.db.Exec(`UPDATE approvals SET status = 'consumed', consumed_at = ? WHERE id = ? AND status = 'pending' AND expires_at > ?`,
+				time.Now().UTC().UnixMilli(), id, time.Now().UTC().UnixMilli())
+			if err != nil {
+				return Pending{}, false
+			}
+			rows, _ := result.RowsAffected()
+			if rows != 1 {
+				return Pending{}, false
+			}
+		}
+		delete(s.byID, id)
+	}
+	return p, ok
+}
+
+// Take is retained for internal callers that explicitly need one-shot removal.
+func (s *Store) Take(id string) (Pending, bool) {
+	return s.Consume(id)
+}
+
+// Get peeks without remove.
+func (s *Store) Get(id string) (Pending, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked(time.Now().UTC())
+	return s.getLocked(id)
+}
+
+// ListRemoteSession returns durable pending approvals for a Remote Session.
+func (s *Store) ListRemoteSession(remoteSessionID string) []Pending {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked(time.Now().UTC())
+	if s.db != nil {
+		return s.listLocked(`remote_session_id = ?`, remoteSessionID)
+	}
+	var out []Pending
+	for _, pending := range s.byID {
+		if pending.RemoteSessionID == remoteSessionID {
+			out = append(out, pending)
+		}
+	}
+	return out
+}
+
+func (s *Store) pruneLocked(now time.Time) {
+	for id, p := range s.byID {
+		if !p.CreatedAt.IsZero() && now.Sub(p.CreatedAt) >= pendingTTL {
+			delete(s.byID, id)
+		}
+	}
+	if s.db != nil {
+		_, _ = s.db.Exec(`UPDATE approvals SET status = 'expired' WHERE status = 'pending' AND expires_at <= ?`, now.UnixMilli())
+	}
+}
+
+func (s *Store) findPendingLocked(remoteSessionID, contentKey string) (Pending, bool) {
+	for _, p := range s.byID {
+		if p.RemoteSessionID == remoteSessionID && p.ContentKey == contentKey {
+			return p, true
+		}
+	}
+	if s.db == nil {
+		return Pending{}, false
+	}
+	var payload string
+	err := s.db.QueryRow(`SELECT payload_json FROM approvals
+        WHERE remote_session_id = ? AND content_key = ? AND status = 'pending' AND expires_at > ?
+        ORDER BY created_at LIMIT 1`,
+		remoteSessionID, contentKey, time.Now().UTC().UnixMilli()).Scan(&payload)
+	if err != nil {
+		return Pending{}, false
+	}
+	var pending Pending
+	if json.Unmarshal([]byte(payload), &pending) != nil {
+		return Pending{}, false
+	}
+	return pending, true
+}
+
+func (s *Store) getLocked(id string) (Pending, bool) {
+	if pending, ok := s.byID[id]; ok {
+		return pending, true
+	}
+	if s.db == nil {
+		return Pending{}, false
+	}
+	var payload string
+	err := s.db.QueryRow(`SELECT payload_json FROM approvals WHERE id = ? AND status = 'pending' AND expires_at > ?`, id, time.Now().UTC().UnixMilli()).Scan(&payload)
+	if err != nil {
+		return Pending{}, false
+	}
+	var pending Pending
+	if json.Unmarshal([]byte(payload), &pending) != nil {
+		return Pending{}, false
+	}
+	return pending, true
+}
+
+func (s *Store) listLocked(where string, value string) []Pending {
+	rows, err := s.db.Query(`SELECT payload_json FROM approvals WHERE `+where+` AND status = 'pending' AND expires_at > ? ORDER BY created_at`, value, time.Now().UTC().UnixMilli())
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var result []Pending
+	for rows.Next() {
+		var payload string
+		var pending Pending
+		if rows.Scan(&payload) == nil && json.Unmarshal([]byte(payload), &pending) == nil {
+			result = append(result, pending)
+		}
+	}
+	return result
+}
+
+func newID() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("a_%s", hex.EncodeToString(b[:]))
+}

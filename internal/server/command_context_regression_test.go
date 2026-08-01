@@ -1,0 +1,107 @@
+package server
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	"mcpx/internal/remotesession"
+)
+
+func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	rt.cfg.Security.Commands.Allow = append(rt.cfg.Security.Commands.Allow, `^printf\b`)
+	rt.cfg.Security.Commands.Confirm = append(rt.cfg.Security.Commands.Confirm, `^echo\b`)
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	missingPurpose := mcp.CallToolRequest{}
+	missingPurpose.Params.Arguments = map[string]any{
+		"remote_session_id": created.Session.ID, "command": "printf context",
+	}
+	missingResult, err := rt.toolCommandExecute(context.Background(), missingPurpose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := decodeToolResult(t, missingResult)
+	if missing["status"] != "error" {
+		t.Fatalf("missing purpose was accepted: %+v", missing)
+	}
+
+	invalidScope := mcp.CallToolRequest{}
+	invalidScope.Params.Arguments = map[string]any{
+		"remote_session_id": created.Session.ID, "command": "printf context",
+		"purpose": "verify context binding", "scope": "host",
+	}
+	invalidResult, err := rt.toolCommandExecute(context.Background(), invalidScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid := decodeToolResult(t, invalidResult)
+	if invalid["status"] != "error" {
+		t.Fatalf("invalid scope was accepted: %+v", invalid)
+	}
+
+	// Confirm rules create a pending action carrying the exact command context.
+	approvalRequest := mcp.CallToolRequest{}
+	approvalRequest.Params.Arguments = map[string]any{
+		"remote_session_id": created.Session.ID, "command": "echo approval",
+		"purpose": "verify approval context", "scope": "workspace",
+	}
+	approvalResult, err := rt.toolCommandExecute(context.Background(), approvalRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvalResponse := decodeToolResult(t, approvalResult)
+	approvalData, _ := approvalResponse["data"].(map[string]any)
+	if approvalResponse["status"] != "need_confirmation" || approvalData["purpose"] != "verify approval context" || approvalData["scope"] != "workspace" {
+		t.Fatalf("confirm rule must create approval: %+v", approvalResponse)
+	}
+	if digest, _ := approvalData["command_digest"].(string); !strings.HasPrefix(digest, "sha256:") {
+		t.Fatalf("missing command digest: %+v", approvalData)
+	}
+	approvalID, _ := approvalData["approval_id"].(string)
+	confirmRequest := mcp.CallToolRequest{}
+	confirmRequest.Params.Arguments = map[string]any{
+		"remote_session_id": created.Session.ID, "approval_id": approvalID, "approve": true,
+	}
+	confirmed, err := rt.toolApprovalConfirm(context.Background(), confirmRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmedResponse := decodeToolResult(t, confirmed)
+	if confirmedResponse["status"] != "ok" {
+		t.Fatalf("approved command failed: %+v", confirmedResponse)
+	}
+
+	valid := mcp.CallToolRequest{}
+	valid.Params.Arguments = map[string]any{
+		"remote_session_id": created.Session.ID, "command": "printf context",
+		"purpose": "verify context binding", "scope": "workspace",
+	}
+	validResult, err := rt.toolCommandExecute(context.Background(), valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := decodeToolResult(t, validResult)
+	data, _ := response["data"].(map[string]any)
+	if response["status"] != "ok" || data["purpose"] != "verify context binding" || data["scope"] != "workspace" || data["workspace_scoped"] != true {
+		t.Fatalf("execution context was not returned: %+v", response)
+	}
+	if digest, _ := data["command_digest"].(string); !strings.HasPrefix(digest, "sha256:") {
+		t.Fatalf("missing command digest: %+v", data)
+	}
+}

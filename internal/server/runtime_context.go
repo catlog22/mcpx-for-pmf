@@ -1,0 +1,139 @@
+package server
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"mcpx/internal/envelope"
+)
+
+const (
+	requestIDHeader     = "X-Request-ID"
+	mcpxRequestIDHeader = "X-MCPX-Request-ID"
+	traceparentHeader   = "Traceparent"
+	mcpxTraceIDHeader   = "X-MCPX-Trace-ID"
+	mcpxSpanIDHeader    = "X-MCPX-Span-ID"
+	mcpxStartedAtHeader = "X-MCPX-Started-At-Ms"
+)
+
+type runtimeContextKey struct{}
+
+// RuntimeContext is gateway-owned lifecycle metadata. It is never decoded
+// from tool arguments and is not part of an MCP input schema.
+type RuntimeContext struct {
+	RequestID      string
+	TraceID        string
+	SpanID         string
+	ParentSpanID   string
+	StartedAtMs    int64
+	ReceivedAtMs   int64
+	CompletedAtMs  int64
+	NetworkLatency int64
+	ProcessingMs   int64
+	ServerElapsed  int64
+	ClientName     string
+	ClientVersion  string
+}
+
+func withRuntimeContext(ctx context.Context, value RuntimeContext) context.Context {
+	return context.WithValue(ctx, runtimeContextKey{}, value)
+}
+
+func runtimeContextFrom(ctx context.Context) (RuntimeContext, bool) {
+	value, ok := ctx.Value(runtimeContextKey{}).(RuntimeContext)
+	return value, ok && value.RequestID != ""
+}
+
+func ensureRuntimeContext(ctx context.Context, headers http.Header, received time.Time) (context.Context, RuntimeContext) {
+	if current, ok := runtimeContextFrom(ctx); ok {
+		current.ReceivedAtMs = received.UnixMilli()
+		return withRuntimeContext(ctx, current), current
+	}
+	current := runtimeContextFromHeaders(headers, received)
+	return withRuntimeContext(ctx, current), current
+}
+
+func runtimeContextFromHeaders(headers http.Header, received time.Time) RuntimeContext {
+	receivedAtMs := received.UnixMilli()
+	startedAtMs := receivedAtMs
+	if value, err := strconv.ParseInt(firstHeader(headers, mcpxStartedAtHeader), 10, 64); err == nil && value > 0 && value <= receivedAtMs {
+		startedAtMs = value
+	}
+	requestID := firstHeader(headers, requestIDHeader, mcpxRequestIDHeader)
+	if requestID == "" {
+		requestID = envelope.EnsureRequestID("")
+	}
+	traceID, parentSpanID := traceFromHeaders(headers)
+	if traceID == "" {
+		traceID = newRuntimeID("tr", 16)
+	}
+	return RuntimeContext{
+		RequestID: requestID, TraceID: traceID, SpanID: newRuntimeID("sp", 8), ParentSpanID: parentSpanID,
+		StartedAtMs: startedAtMs, ReceivedAtMs: receivedAtMs,
+	}
+}
+
+func firstHeader(headers http.Header, names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(headers.Get(name)); value != "" {
+			return value
+		}
+		for key, values := range headers {
+			if !strings.EqualFold(key, name) || len(values) == 0 {
+				continue
+			}
+			if value := strings.TrimSpace(values[0]); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+func traceFromHeaders(headers http.Header) (traceID, parentSpanID string) {
+	traceID = firstHeader(headers, mcpxTraceIDHeader)
+	traceparent := strings.Split(firstHeader(headers, traceparentHeader), "-")
+	if len(traceparent) == 4 && len(traceparent[1]) == 32 && len(traceparent[2]) == 16 {
+		if _, err := hex.DecodeString(traceparent[1]); err == nil {
+			if _, err := hex.DecodeString(traceparent[2]); err == nil {
+				if traceID == "" {
+					traceID = traceparent[1]
+				}
+				parentSpanID = traceparent[2]
+			}
+		}
+	}
+	if parentSpanID == "" {
+		parentSpanID = firstHeader(headers, mcpxSpanIDHeader)
+	}
+	return traceID, parentSpanID
+}
+
+func newRuntimeID(prefix string, bytes int) string {
+	raw := make([]byte, bytes)
+	if _, err := rand.Read(raw); err != nil {
+		return prefix + "_unavailable"
+	}
+	return prefix + "_" + hex.EncodeToString(raw)
+}
+
+func runtimeContextWithClient(value RuntimeContext, name, version string) RuntimeContext {
+	value.ClientName = name
+	value.ClientVersion = version
+	return value
+}
+
+func runtimeContextWithTiming(value RuntimeContext, timing interactionTiming) RuntimeContext {
+	value.StartedAtMs = timing.StartedAtMs
+	value.ReceivedAtMs = timing.ReceivedAtMs
+	value.CompletedAtMs = timing.CompletedAtMs
+	value.NetworkLatency = timing.NetworkLatencyMs
+	value.ProcessingMs = timing.ProcessingMs
+	value.ServerElapsed = timing.ServerElapsedMs
+	return value
+}
