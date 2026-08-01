@@ -95,7 +95,7 @@ func TestToolLogRecordsDuration(t *testing.T) {
 }
 
 func TestStartupSkillDetailsUseDebugAndInfoOnlyCounts(t *testing.T) {
-	rt := newWorkspaceRuntime(t, "demo")
+	rt := newWorkspaceRuntime(t, "demo", "fyy", "codex")
 	skillRoot := t.TempDir()
 	skillDir := filepath.Join(skillRoot, "sample")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
@@ -107,7 +107,7 @@ func TestStartupSkillDetailsUseDebugAndInfoOnlyCounts(t *testing.T) {
 	rt.cfg.Discovery.Skills.Dirs = []string{skillRoot}
 	recorder := &startupLogRecorder{}
 	rt.logStartupInventory(recorder)
-	if !strings.Contains(recorder.info.String(), "skills_summary") || !strings.Contains(recorder.info.String(), "1") {
+	if !strings.Contains(recorder.info.String(), "skills_summary count 1") {
 		t.Fatalf("info log should contain only skill count: %s", recorder.info.String())
 	}
 	if strings.Contains(recorder.info.String(), "sample") {

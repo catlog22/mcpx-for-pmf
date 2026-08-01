@@ -481,14 +481,13 @@ func (r *Runtime) logStartupInventory(log interface {
 	skillSeen := map[string]bool{}
 	var skillNames []string
 	addSkill := func(name, runtime, format, source, scope, wsName string) {
-		key := name // global unique by name at boot summary
-		if scope == "workspace" {
-			key = wsName + "/" + name
-		}
-		if skillSeen[key] {
+		// A global skill directory is also part of every workspace's effective
+		// configuration. Count each skill name once in the process-wide startup
+		// inventory instead of once per workspace.
+		if skillSeen[name] {
 			return
 		}
-		skillSeen[key] = true
+		skillSeen[name] = true
 		skillNames = append(skillNames, name)
 		args := []any{"name", name, "runtime", runtime, "format", format, "source", source, "scope", scope}
 		if wsName != "" {
