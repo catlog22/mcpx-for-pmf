@@ -97,6 +97,8 @@ func (r *Runtime) toolWorkspaceState(ctx context.Context, req mcp.CallToolReques
 		return r.toolFileChanges(ctx, req)
 	case "watch":
 		return r.toolFileWatch(ctx, req)
+	case "memory":
+		return r.toolWorkspaceMemory(ctx, req)
 	default:
 		return r.invalidAction(ctx, req, "workspace_state", toolAction(req))
 	}
@@ -115,19 +117,6 @@ func (r *Runtime) toolArtifactManage(ctx context.Context, req mcp.CallToolReques
 	}
 }
 
-func (r *Runtime) toolApprovalManage(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	switch toolAction(req) {
-	case "list":
-		return r.toolApprovalList(ctx, req)
-	case "approve":
-		return r.toolApprovalConfirm(ctx, forwardedRequest(req, map[string]any{"approve": true}))
-	case "deny":
-		return r.toolApprovalConfirm(ctx, forwardedRequest(req, map[string]any{"approve": false}))
-	default:
-		return r.invalidAction(ctx, req, "approval_manage", toolAction(req))
-	}
-}
-
 // extension_manage intentionally lists both extension families in a single
 // result. Calls still use the existing specialised handlers so their security,
 // upstream errors, and audit events are preserved.
@@ -135,6 +124,8 @@ func (r *Runtime) toolExtensionManage(ctx context.Context, req mcp.CallToolReque
 	action := toolAction(req)
 	kind, _ := req.GetArguments()["kind"].(string)
 	kind = strings.ToLower(strings.TrimSpace(kind))
+	query, _ := req.GetArguments()["query"].(string)
+	query = strings.TrimSpace(query)
 	switch action {
 	case "list":
 		envReq, principal, fail := r.remoteRequest(ctx, req)
@@ -148,7 +139,8 @@ func (r *Runtime) toolExtensionManage(ctx context.Context, req mcp.CallToolReque
 		effective := r.effectiveConfig(workspace.Path)
 		data := map[string]any{}
 		if kind == "" || kind == "skill" || kind == "skills" {
-			data["skills"] = skillItems(skill.LoadAll(effective.Discovery.Skills.Dirs, workspace.Path))
+			skills := skill.LoadAll(effective.Discovery.Skills.Dirs, workspace.Path)
+			data["skills"] = skillItems(filterSkillsByQuery(skills, query))
 		}
 		if kind == "" || kind == "mcp" {
 			manager, managerErr := r.mcpManagerForWorkspace(workspace.Path)
@@ -156,6 +148,7 @@ func (r *Runtime) toolExtensionManage(ctx context.Context, req mcp.CallToolReque
 				return r.terminalError(envReq, remoteID, workspace.Name, "mcp_config_error", managerErr.Error())
 			}
 			servers := manager.List()
+			servers = filterExtensionItemsByQuery(servers, query)
 			if include, _ := req.GetArguments()["include_tools"].(bool); include && effective.Discovery.MCP.Enabled {
 				servers = r.enrichServersWithTools(ctx, manager, servers)
 			}
@@ -163,6 +156,9 @@ func (r *Runtime) toolExtensionManage(ctx context.Context, req mcp.CallToolReque
 		}
 		if kind != "" && kind != "skill" && kind != "skills" && kind != "mcp" {
 			return r.invalidAction(ctx, req, "extension_manage", kind)
+		}
+		if query != "" {
+			data["query"] = query
 		}
 		return compactToolResult(data, "Extension inventory returned."), nil
 	case "describe":
@@ -185,7 +181,7 @@ func (r *Runtime) toolExtensionManage(ctx context.Context, req mcp.CallToolReque
 			name, _ := req.GetArguments()["name"].(string)
 			item, found := skill.Find(skill.LoadAll(r.effectiveConfig(workspace.Path).Discovery.Skills.Dirs, workspace.Path), name)
 			if !found {
-				return r.terminalError(envReq, remoteID, workspace.Name, "not_found", "skill not found")
+				return r.skillNotFound(envReq, remoteID, workspace.Name, name)
 			}
 			data := map[string]any{"skill": skillItems([]skill.Skill{item})[0]}
 			return compactToolResult(data, fmt.Sprintf("Skill %s described.", name)), nil
@@ -202,4 +198,53 @@ func (r *Runtime) toolExtensionManage(ctx context.Context, req mcp.CallToolReque
 	default:
 		return r.invalidAction(ctx, req, "extension_manage", action)
 	}
+}
+
+func filterSkillsByQuery(skills []skill.Skill, query string) []skill.Skill {
+	if strings.TrimSpace(query) == "" {
+		return skills
+	}
+	filtered := make([]skill.Skill, 0, len(skills))
+	for _, item := range skills {
+		if extensionQueryMatches(query, item.Manifest.Name, item.Manifest.Description) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func filterExtensionItemsByQuery(items []map[string]any, query string) []map[string]any {
+	if strings.TrimSpace(query) == "" {
+		return items
+	}
+	filtered := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		name, _ := item["name"].(string)
+		description, _ := item["description"].(string)
+		if extensionQueryMatches(query, name, description) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func extensionQueryMatches(query string, values ...string) bool {
+	text := strings.ToLower(strings.Join(values, " "))
+	for _, term := range strings.Fields(strings.ToLower(query)) {
+		if !strings.Contains(text, term) {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *Runtime) skillNotFound(envReq envelope.Request, remoteSessionID, workspace, name string) (*mcp.CallToolResult, error) {
+	response := envelope.Fail(envelope.StatusError, envReq.RequestID, workspace, nil, "not_found", fmt.Sprintf("skill %q was not found; call extension_manage with action=list and kind=skill before selecting a name", strings.TrimSpace(name)))
+	response.RemoteSessionID = remoteSessionID
+	addRecoveryAction(&response, "extension_manage", "list configured Skills before selecting a name", map[string]any{
+		"remote_session_id": remoteSessionID,
+		"action":            "list",
+		"kind":              "skill",
+	})
+	return r.resultJSON(response)
 }

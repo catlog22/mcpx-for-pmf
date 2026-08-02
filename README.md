@@ -18,7 +18,7 @@ MCPX 是运行在开发环境中的 **MCP Runtime（网关）**。ChatGPT、Clau
 | **Workspace**         | 多项目注册，创建 Remote Session 时显式绑定目标项目                        |
 | **Terminal**          | 短命令 + 持久长任务，可列表、attach、分页读取日志、查看监听端口和停止任务 |
 | **Source**            | 项目检查、源码列表 / 搜索 / 读取，读取结果携带 SHA-256                    |
-| **Changeset**         | 草稿、Unified Diff、冲突检测、策略审批、事务应用、历史与回退              |
+| **Changeset**         | 草稿、Unified Diff、冲突检测、语义确认、事务应用、历史与回退                |
 | **Workspace Changes** | Git 状态与 Diff，按 `mcpx` / `preexisting` / `external` 标记变更来源      |
 | **Project Task**      | 从项目清单发现测试、构建、检查任务，持久执行并解析结构化诊断              |
 | **Artifact**          | 注册测试报告、覆盖率、构建产物和日志，支持 Resource Link 与分页读取       |
@@ -26,7 +26,7 @@ MCPX 是运行在开发环境中的 **MCP Runtime（网关）**。ChatGPT、Clau
 | **Screenshot**        | 全屏或任意坐标区域截图，支持 PNG/JPEG 与压缩档位                          |
 | **MCP 代理**          | 不重复实现 GitHub/DB 等，配置后 `mcp_call` 转发                           |
 | **Skill**             | 扫描 `SKILL.md` / `skill.yaml`，可执行或返回文档                          |
-| **安全**              | OAuth / Bearer、Principal、Remote Session ACL、命令与文件策略、人工审批   |
+| **安全**              | OAuth / Bearer、Principal、Remote Session ACL、命令与文件策略、语义确认   |
 | **审计**              | 关键调用写入本地 JSONL 日志                                               |
 
 ## 架构
@@ -43,7 +43,7 @@ flowchart TB
         Remote["Remote Session<br/>ACL · Handoff · Events · Idempotency"]
         Development["开发服务<br/>Source · Changeset · Terminal · Project Task"]
         Context["环境服务<br/>Environment · Screenshot · Artifact"]
-        Control["控制服务<br/>Approval · Secret · Audit"]
+        Control["控制服务<br/>Confirmation · Secret · Audit"]
         Extension["扩展桥接<br/>Upstream MCP · Skill"]
     end
 
@@ -76,7 +76,7 @@ flowchart TB
 | 标识                | 生命周期                              | 用途                                                             |
 | ------------------- | ------------------------------------- | ---------------------------------------------------------------- |
 | `Mcp-Session-Id`    | 临时，可在重连或切换客户端时变化      | Streamable HTTP 传输状态                                         |
-| `remote_session_id` | SQLite 持久化，可跨连接和进程重启查询 | Workspace、成员权限、Changeset、任务、审批、快照和产物的业务主键 |
+| `remote_session_id` | SQLite 持久化，可跨连接和进程重启查询 | Workspace、成员权限、Changeset、任务、确认、快照和产物的业务主键 |
 
 源码修改默认采用 Diff First 流程：读取源码与 SHA-256 → 准备 Changeset → 展示 Unified Diff → 校验 revision 和策略 → 事务应用。工具结果内联返回（上限 `limits.max_result_bytes`，默认 256KB）：命令 stdout/stderr 直接内联，变更文件条目包含每文件 Diff 预览；完整 Unified Diff 保存在 Changeset 状态中，并可通过 `mcpx://remote-sessions/...` Resource Link 读取，不会写入 workspace。
 
@@ -115,7 +115,7 @@ go build -o bin/mcpx-server ./cmd/mcpx-server
 | `config.yaml`             | 全局配置（端口、鉴权、安全策略、workspaces…）                          |
 | `.mcp.json`               | 上游 MCP 列表（默认可为空）                                            |
 | `logs/`                   | 审计日志                                                               |
-| `state/mcpx.db`           | Remote Session、Principal、Changeset、任务元数据、审批、快照和产物索引 |
+| `state/mcpx.db`           | Remote Session、Principal、Changeset、任务元数据、确认、快照和产物索引 |
 | `tasks/`                  | 持久终端任务日志，文件权限为 `0600`                                    |
 | `skills/`                 | 可选技能目录                                                           |
 | `oauth-clients.json`      | 按需生成的 OAuth 动态客户端注册表                                      |
@@ -148,16 +148,16 @@ http://127.0.0.1:9090/mcp
 
 观测命令只通过本机 Unix Socket 订阅事件，不启动第二个 HTTP 服务，也不会执行工具、命令或修改 Workspace。启动时先回放最近事件，随后由服务端事件推送实时展示；连接中断后按 sequence 自动补偿，不轮询 SQLite。按 `Ctrl-C` 正常退出。
 
-text 模式按一次 MCP 工具调用聚合为一个交互块：工具开始事件不单独输出，每个完成动作使用过去式 `• Ran`、`• Searched`、`• Read`、`• Edited`、`• Created` 等动词；命令和文件路径保留，结果压缩为 `↳` 摘要，文件变更只显示少量 Diff 片段。每个区块最多 10 个逻辑行（含边界），超出内容以 `...` 表示；text 不显示截断说明或 Resource URI。需要机器处理时使用 `--format json`：
+text 模式按一次 MCP 工具调用聚合为一个交互块：工具开始事件不单独输出，每个完成动作使用过去式 `• Ran`、`• Searched`、`• Read`、`• Edited`、`• Created` 等动词；命令和文件路径保留，结果压缩为 `↳` 摘要，文件变更只显示少量 Diff 片段。每个区块正文最多 20 个逻辑行，顶部和底部分隔线不计入预算；超出内容以 `...` 表示，底部分隔线下额外保留一个空行。text 不显示截断说明或 Resource URI。需要机器处理时使用 `--format json`：
 
 ````text
-╭─ #42 · command_execute
+╭─ #42 · 4f8c2e90-6b2a-4b20-9d8c-1a1f8a12e7c4 · command_execute
 │ • Ran go test ./internal/auth
 │   ↳ 修改登录流程并运行相关测试
 │ • Read stdout
 │   ↳ 12 tests passed
 ╰────────────────────────
-╭─ #43 · change_execute
+╭─ #43 · 4f8c2e90-6b2a-4b20-9d8c-1a1f8a12e7c4 · change_execute
 │ • Edited internal/auth.go
 │   ↳ internal/auth.go (update) +1 -1
 │     -return legacyLogin()
@@ -188,7 +188,7 @@ mcpx-server workspace [flags] <workspace name>
 # -format json   一行一个事件，供脚本或日志系统消费
 ```
 
-观测 text 输出中的 `rg` / `find` 是源码查询的等价展示，不代表服务端执行了 Shell 命令；文件路径是 Workspace 内的项目相对路径，Workspace 列表会同时显示注册根路径。交互块颜色仅在 TTY 中启用，可设置 `NO_COLOR=1` 关闭；命令、查询、读取、变更、会话和错误分别使用稳定的语义颜色。
+观测 text 输出中的 `rg` / `find` 是源码查询的等价展示，不代表服务端执行了 Shell 命令；文件路径是 Workspace 内的项目相对路径，Workspace 列表会同时显示注册根路径。交互块颜色仅在 TTY 中启用，可设置 `NO_COLOR=1` 关闭；支持 `COLORTERM=truecolor` / `24bit` 时，Diff 的 `+++` 使用绿色、`---` 使用红色，新增内容使用低饱和绿色背景，删除内容使用低饱和红色背景；其他 TTY 降级为 ANSI 16 色。命令、查询、读取、变更、会话和错误分别使用稳定的语义颜色。
 
 MCP 工具响应同样以 Markdown 文本作为模型和宿主的默认展示内容，完整 ARC 机器结果保存在响应 `_meta["mcpx.result"]`，不再放入会被宿主直接渲染为 JSON 卡片的 `structuredContent`。
 
@@ -219,7 +219,7 @@ Source search returned 2 match(es).
 ```json
 {
   "intent": "汇报当前读取结果并等待用户决定下一步",
-  "remote_session_id": "rs_example",
+	"remote_session_id": "4f8c2e90-6b2a-4b20-9d8c-1a1f8a12e7c4",
   "summary": "已读取 SupplierDetailForm.vue，确认截图中的证照字段均已有绑定",
   "result_summary": "文件读取成功，返回 827 行",
   "status": "waiting_for_user",
@@ -282,7 +282,7 @@ discovery:
 security:
   commands:
     # 未命中 allow/confirm/deny 时的默认：allow | confirm | deny
-    default: allow # 未命中规则时的默认决策；confirm 规则仍需 approval_manage
+    default: allow # 未命中规则时的默认决策；confirm 规则等待用户语义确认
     allow:
       - ^ls\b
       - ^git status
@@ -299,6 +299,19 @@ security:
       - ^\.git/
 limits:
   max_result_bytes: 262144 # 工具结果内联上限（256KB），命令输出与 Diff 预览共用
+
+# SQLite 状态库自动保留策略（仅全局 config.yaml 生效）
+state:
+  retention:
+    enabled: true
+    interval: 24h
+    process_event_ttl: 720h       # 过程观测保留 30 天
+    process_event_max_rows: 10000 # 每个 Workspace 的过程事件上限
+    memory_event_ttl: 4320h       # 项目记忆保留 180 天
+    memory_event_max_rows: 2000
+    terminal_task_ttl: 720h
+    snapshot_ttl: 2160h
+    vacuum_threshold_rows: 10000
 ```
 
 也可用命令注册项目（会写回全局配置）：
@@ -336,7 +349,9 @@ security:
 ```
 
 HTTP Bearer / OAuth 鉴权是进程级配置，只在全局 `config.yaml` 中定义；
-项目配置用于描述、命令策略、文件策略与能力开关，不覆盖全局身份凭证。
+项目配置用于描述、命令策略、文件策略与能力开关，不覆盖全局身份凭证或 `state.retention`。
+
+`state.retention` 由服务后台按 Workspace 分批执行。它只回收过期或超量的过程观测、已关闭会话的旧任务/日志/快照和过期临时记录；活跃会话、未完成 Changeset/Plan、未过期确认、有效幂等记录及当前引用快照会被保护。清理后执行 WAL checkpoint，达到 `vacuum_threshold_rows` 且数据库空闲时才执行 `VACUUM`。设置 `enabled: false` 可停用自动清理。
 
 ---
 
@@ -450,7 +465,7 @@ curl -sS -m 5 \
 {
   "intent": "读取登录流程，修改校验逻辑并运行相关测试",
   "progress_summary": "已选择登录模块，准备读取当前实现",
-  "remote_session_id": "rs_…",
+	"remote_session_id": "4f8c2e90-6b2a-4b20-9d8c-1a1f8a12e7c4",
   "path": "internal/auth.go"
 }
 ```
@@ -459,7 +474,7 @@ curl -sS -m 5 \
 | -------- | --------------------- | -------------------------------------------------------------------------------------------- |
 | 高频开发 | `workspace_list`      | 查询已注册 Workspace。                                                                       |
 | 高频开发 | `session_open`        | 一次创建或恢复 Remote Session，并返回初始化上下文。                                          |
-| 高频开发 | `file_read`           | 读取单文件或 `items[]` 批量文件窗口，返回独立 SHA-256；修改前必须先读取当前内容。            |
+| 高频开发 | `file_read`           | 默认读取单文件或 `items[]` 批量文件窗口，返回独立 SHA-256；需要客户端预览完整 HTML、图片等文件时，对单个 `path` 使用 `mode: "full"`，图片直接返回 MCP `ImageContent`。 |
 | 高频开发 | `context_query`       | 通过 `query` / `search` / `list` 动作获取受预算限制的源码上下文。                            |
 | 高频开发 | `change_execute`      | 一次完成普通修改的 Changeset、策略检查、原子 Apply 和可选验证。                              |
 | 高频开发 | `command_execute`     | 执行命令或项目任务；10 秒内返回结果，超时转统一 Task；stdout/stderr 内联返回（上限 256KB）。 |
@@ -473,18 +488,17 @@ curl -sS -m 5 \
 | 领域管理 | `workspace_state`     | `changes`、`snapshot`、`diff`、`watch`。                                                     |
 | 领域管理 | `extension_manage`    | 统一 `list`、`describe`、`call` Skills 和上游 MCP。                                          |
 | 领域管理 | `artifact_manage`     | `list`、`read`、`register` Artifact。                                                        |
-| 领域管理 | `approval_manage`     | `list`、`approve`、`deny` 高风险操作。                                                       |
 | 特殊能力 | `screenshot_capture`  | 截取显示器或区域。                                                                           |
 | 特殊能力 | `secrets_provide`     | 提供仅进程内可用的 Secret 引用。                                                             |
 
-`tools/list` 只暴露以上 **19** 个工具。低频操作必须通过其领域工具的 `action` 分支调用；文件读取和普通修改分别统一使用 `file_read`、`change_execute`。所有直接文件修改都必须经过 `change_execute`，不能通过 `command_execute` 或 `change_manage` 绕过。
+`tools/list` 只暴露以上 **18** 个工具。低频操作必须通过其领域工具的 `action` 分支调用；文件读取和普通修改分别统一使用 `file_read`、`change_execute`。所有直接文件修改都必须经过 `change_execute`，不能通过 `command_execute` 或 `change_manage` 绕过。
 
 ### 推荐开发流程
 
 1. Workspace 已知时直接调用 `session_open`；未知时先调用 `workspace_list`。
-2. `session_open` 返回根级 `AGENTS.md` 元数据、项目摘要、任务、Skills、上游 MCP、Changeset、Approval、Artifact、`agent_guidance` 与独立 revision。需要正文时显式设置 `include_instructions_content: true`；需要项目任务时设置 `include_project_tasks: true`；需要上游工具 Schema 时设置 `include_upstream_tools: true`。Skills 是否发现及扫描哪些目录完全由服务端 `discovery.skills.enabled`、`discovery.skills.dirs` 和 `extra_dirs` 配置控制，不使用请求级 `include_skills` 参数。
-3. 用 `context_query(action="query" | "search" | "list")` 定位文件；已知文件用 `file_read(items=[])` 批量读取。
-4. 用 `change_execute` 进行所有文件修改；草稿、审阅和历史使用 `change_manage`，Apply 或回滚使用 `change_execute` 的 `changeset_id` / `revert_changeset_id`。
+2. `session_open` 返回根级 `AGENTS.md` 元数据、项目摘要、任务、Skills、上游 MCP、Changeset、安全确认、Artifact、`agent_guidance` 与独立 revision。需要正文时显式设置 `include_instructions_content: true`；需要项目任务时设置 `include_project_tasks: true`；需要上游工具 Schema 时设置 `include_upstream_tools: true`。Skills 是否发现及扫描哪些目录完全由服务端 `discovery.skills.enabled`、`discovery.skills.dirs` 和 `extra_dirs` 配置控制，不使用请求级 `include_skills` 参数。
+3. 用 `context_query(action="query" | "search" | "list")` 定位文件；已知文件用 `file_read(items=[])` 批量读取。需要模型或客户端获取完整预览文件时，使用单个 `path` 和 `mode: "full"`。
+4. 用 `change_execute` 进行所有文件修改；用户原始请求已明确授权时可在首次 `operations` 请求中设置 `user_confirmed=true` 直接应用，否则先展示文件和差异，用户明确确认后使用原 `changeset_id` / `expected_digest` 并设置 `user_confirmed=true` 重试。草稿、审阅和历史使用 `change_manage`，Apply 或回滚仍使用 `change_execute`。
 5. 用 `command_execute` 运行测试或命令；超过 10 秒时按响应中的 `task_manage(action="attach")` 继续。
 6. 用 `workspace_state(action="changes")` 检查最终变更；跨客户端接力使用 `session_manage(action="handoff" | "attach")`。
 
@@ -511,11 +525,11 @@ MCP 标准 `tools/list` 是工具名称、描述、参数 JSON Schema 和 Annota
 
 ### 补丁式源码修改
 
-对已有文件，先用 `file_read` 获取目标片段及其 `sha256`，再调用 `change_execute`。`operations` 使用 `base_sha256` 和 `patch`（Unified Diff hunk），由服务端校验版本、上下文和文件策略，创建 Changeset 后原子 Apply；高风险操作会返回 `approval_manage(action="approve")` 的可执行 `next_action`。草稿、Diff、历史等低频生命周期操作使用 `change_manage`；已准备 Changeset 的 Apply 和回滚仍统一通过 `change_execute`。`change_execute` 三种模式互斥：`operations`（新建并应用）、`changeset_id + expected_digest`（应用草稿）、`revert_changeset_id`（回滚已应用变更）。
+对已有文件，通常先用 `file_read` 获取目标片段及其 `sha256`，再调用 `change_execute`。`operations` 使用 `base_sha256` 和 `patch`（Unified Diff hunk），由服务端校验版本、上下文和文件策略，创建 Changeset 后原子 Apply；删除可省略 `base_sha256`，服务端会在准备阶段捕获文件或目录树版本，并在 Apply 前复核。删除支持直接提交目录路径，目录会整体原子移入变更集回收区，避免把 `.venv`、缓存或 `site-packages` 展开成大量单文件操作；目录删除的备份用于失败恢复，普通 `revert` 会明确报告该边界。需要确认时先用原工具展示文件、差异或命令摘要，用户明确确认后使用原参数并设置 `user_confirmed=true` 重试；确认始终通过原工具链路完成。草稿、Diff、历史等低频生命周期操作使用 `change_manage`；已准备 Changeset 的 Apply 和回滚仍统一通过 `change_execute`。`change_execute` 三种模式互斥：`operations`（新建并应用）、`changeset_id + expected_digest`（应用草稿）、`revert_changeset_id`（回滚已应用变更）。文件版本校验独立于 Git，非 Git Workspace 也可以执行读取、创建、修改、重命名和删除。
 
 ```json
 {
-  "remote_session_id": "rs_example",
+	"remote_session_id": "4f8c2e90-6b2a-4b20-9d8c-1a1f8a12e7c4",
   "summary": "更新页面标题",
   "operations": [
     {
@@ -528,7 +542,7 @@ MCP 标准 `tools/list` 是工具名称、描述、参数 JSON Schema 和 Annota
 }
 ```
 
-`create` 使用完整 `content`；`update` 仍接受完整 `content` 作为无法生成补丁时的兜底。`rename` 和 `delete` 只需提交路径与 `base_sha256`。`expected_sha256` 保留为 `base_sha256` 的兼容别名。
+`create` 使用完整 `content`；`update` 仍接受完整 `content` 作为无法生成补丁时的兜底。`rename` 需要路径与 `base_sha256`；`delete` 只需路径即可，服务端会捕获并复核目标版本。`expected_sha256` 保留为 `base_sha256` 的兼容别名。
 
 除 `patch` 外，`operations` 还支持按内容精确编辑的快捷操作，均要求 `base_sha256`（当前 revision）：
 
@@ -571,7 +585,7 @@ MCP 标准 `tools/list` 是工具名称、描述、参数 JSON Schema 和 Annota
 - **Presentation**：继续完善宿主能力协商，让客户端可以按自身能力选择 `diff`、`table`、`tree`、`diagram` 等视图，并始终保留安全的文本降级路径。
 - **ARC**：推进结果类型与 JSON Schema 的兼容演进，补充版本协商、错误恢复和跨客户端一致的动作描述。
 - **大结果交付**：进一步统一 Diff、日志、搜索结果和 Artifact 的 Resource Link 分页与流式读取，减少内联响应体积。
-- **可观测性**：完善 trace、耗时和结果分类指标，帮助定位客户端渲染、审批链路和任务执行问题。
+- **可观测性**：完善 trace、耗时和结果分类指标，帮助定位客户端渲染、确认链路和任务执行问题。
 
 ---
 
@@ -630,7 +644,7 @@ mcpx/
     environment/       # 环境探测、快照与漂移
     screenshot/        # 跨平台截图、显示器探测与压缩
     artifact/          # 开发产物索引与读取
-    approval/          # 人工审批元数据
+    approval/          # 语义确认状态元数据
     secrets/           # Secret 请求与内存值
     security/          # 命令和文件策略
     audit/             # JSONL 审计
@@ -659,7 +673,7 @@ mcpx/
 
 ## 学习与研究免责声明
 
-MCPX 仅用于学习、研究和经授权的开发环境自动化。使用者应自行负责部署、配置、命令执行、文件修改、凭证保管以及由此产生的直接或间接后果。请勿在未经授权的系统、数据或网络上使用；用于生产环境前，请完成安全审计、数据备份、最小权限配置和人工审批验证。
+MCPX 仅用于学习、研究和经授权的开发环境自动化。使用者应自行负责部署、配置、命令执行、文件修改、凭证保管以及由此产生的直接或间接后果。请勿在未经授权的系统、数据或网络上使用；用于生产环境前，请完成安全审计、数据备份、最小权限配置和用户语义确认验证。
 
 本文档和项目不构成安全、法律、医疗、财务或其他专业建议，也不保证适用于任何特定场景。涉及真实环境的操作请先确认授权范围，并在执行前审阅变更和命令。
 

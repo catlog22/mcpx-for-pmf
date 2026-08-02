@@ -34,6 +34,10 @@ func RenderToolContent(tool, resultType, renderer, summary string, data any) (st
 		return renderSessionOpen(summary, asMap)
 	case "context_query":
 		return renderContextQuery(summary, asMap)
+	case "plan_manage":
+		if text, ok := renderPlanData(summary, asMap); ok {
+			return text, true
+		}
 	case "artifact_manage":
 		if text, ok := renderArtifactRead(summary, asMap); ok {
 			return text, true
@@ -107,7 +111,11 @@ func renderSessionOpen(summary string, data map[string]any) (string, bool) {
 	if builder.Len() == 0 {
 		builder.WriteString("Session opened.")
 	}
-	if id := humanField(remote, "id"); id != "" {
+	id := humanField(remote, "id")
+	if id == "" {
+		id = humanField(data, "remote_session_id")
+	}
+	if id != "" {
 		fmt.Fprintf(&builder, "\n\n- Remote session: %s", inlineCode(id))
 	}
 	if role := humanField(remote, "role"); role != "" {
@@ -141,7 +149,7 @@ func renderSessionOpen(summary string, data map[string]any) (string, bool) {
 	appendSessionInventory(&builder, "Skills", data["skills"])
 	appendSessionInventory(&builder, "MCP servers", data["upstream_mcp"])
 	appendSessionInventory(&builder, "Active changesets", data["active_changesets"])
-	appendSessionInventory(&builder, "Pending approvals", data["pending_approvals"])
+	appendSessionInventory(&builder, "Pending confirmations", data["pending_confirmations"])
 	appendSessionInventory(&builder, "Tasks", data["tasks"])
 	appendSessionInventory(&builder, "Artifacts", data["artifacts"])
 	appendRevisionFacts(&builder, data["revisions"])
@@ -247,6 +255,76 @@ func renderContextQuery(summary string, data map[string]any) (string, bool) {
 	return strings.TrimSpace(builder.String()), true
 }
 
+func renderPlanData(summary string, data map[string]any) (string, bool) {
+	planID := humanField(data, "plan_id")
+	taskID := humanField(data, "task_id")
+	if planID == "" && taskID == "" {
+		return summary, false
+	}
+
+	var builder strings.Builder
+	writeHumanSummary(&builder, summary)
+	if builder.Len() == 0 {
+		builder.WriteString("Plan updated.")
+	}
+	if planID != "" {
+		fmt.Fprintf(&builder, "\n\n- Plan ID: %s", inlineCode(planID))
+	}
+	if taskID != "" {
+		fmt.Fprintf(&builder, "\n- Task ID: %s", inlineCode(taskID))
+	}
+	if status := humanField(data, "status"); status != "" {
+		fmt.Fprintf(&builder, "\n- Status: %s", inlineCode(status))
+	}
+	if goal := compactHuman(humanField(data, "goal")); goal != "" {
+		fmt.Fprintf(&builder, "\n- Goal: %s", goal)
+	}
+	if task := humanMap(data["task"]); len(task) > 0 {
+		if title := compactHuman(humanField(task, "title")); title != "" {
+			fmt.Fprintf(&builder, "\n- Task: %s", title)
+		}
+	}
+	planData := humanMap(data["plan"])
+	if progress := humanMap(data["progress"]); len(progress) > 0 {
+		total := humanField(progress, "total")
+		completed := humanField(progress, "completed")
+		if total != "" {
+			if completed == "" {
+				completed = "0"
+			}
+			fmt.Fprintf(&builder, "\n- Progress: %s/%s completed", completed, total)
+		}
+	}
+	tasks := humanMaps(data["tasks"])
+	if len(tasks) == 0 && len(planData) > 0 {
+		tasks = humanMaps(planData["tasks"])
+	}
+	if len(tasks) > 0 {
+		builder.WriteString("\n- Tasks:")
+		for _, task := range tasks {
+			id := humanField(task, "task_id")
+			if id == "" {
+				id = humanField(task, "id")
+			}
+			if id == "" {
+				continue
+			}
+			fmt.Fprintf(&builder, "\n  - %s", inlineCode(id))
+			if status := humanField(task, "status"); status != "" {
+				fmt.Fprintf(&builder, " (%s)", inlineCode(status))
+			}
+			if title := compactHuman(humanField(task, "title")); title != "" {
+				builder.WriteString(" — ")
+				builder.WriteString(title)
+			}
+		}
+	}
+	if _, exists := data["ready"]; exists {
+		fmt.Fprintf(&builder, "\n- Ready: %s", inlineCode(humanField(data, "ready")))
+	}
+	return strings.TrimSpace(builder.String()), true
+}
+
 func renderArtifactRead(summary string, data map[string]any) (string, bool) {
 	content := humanField(data, "data")
 	if content == "" {
@@ -276,7 +354,7 @@ func renderArtifactRead(summary string, data map[string]any) (string, bool) {
 }
 
 func renderKnownCollection(summary string, data map[string]any) (string, bool) {
-	for _, key := range []string{"sessions", "artifacts", "changesets", "tasks", "approvals", "events", "changes", "files", "tools", "documents", "capabilities", "skills", "upstream_mcp", "servers"} {
+	for _, key := range []string{"sessions", "artifacts", "changesets", "tasks", "confirmations", "events", "changes", "files", "tools", "documents", "capabilities", "skills", "upstream_mcp", "servers"} {
 		value, exists := data[key]
 		if !exists {
 			continue
@@ -774,26 +852,26 @@ func humanLanguage(path string) string {
 
 func humanCollectionTitle(key string) string {
 	return map[string]string{
-		"sessions":     "Remote sessions:",
-		"artifacts":    "Artifacts:",
-		"changesets":   "Changesets:",
-		"tasks":        "Tasks:",
-		"approvals":    "Approvals:",
-		"events":       "Events:",
-		"changes":      "Changes:",
-		"files":        "Files:",
-		"tools":        "Tools:",
-		"documents":    "Instructions:",
-		"capabilities": "Capabilities:",
-		"skills":       "Skills:",
-		"upstream_mcp": "MCP servers:",
-		"servers":      "Servers:",
+		"sessions":      "Remote sessions:",
+		"artifacts":     "Artifacts:",
+		"changesets":    "Changesets:",
+		"tasks":         "Tasks:",
+		"confirmations": "Confirmations:",
+		"events":        "Events:",
+		"changes":       "Changes:",
+		"files":         "Files:",
+		"tools":         "Tools:",
+		"documents":     "Instructions:",
+		"capabilities":  "Capabilities:",
+		"skills":        "Skills:",
+		"upstream_mcp":  "MCP servers:",
+		"servers":       "Servers:",
 	}[key]
 }
 
 func humanCollectionItem(item map[string]any) string {
 	label := "item"
-	for _, key := range []string{"name", "id", "session_id", "task_id", "artifact_id", "changeset_id", "approval_id", "path", "type", "summary"} {
+	for _, key := range []string{"name", "id", "session_id", "task_id", "artifact_id", "changeset_id", "path", "type", "summary"} {
 		if value := humanField(item, key); value != "" {
 			label = value
 			break

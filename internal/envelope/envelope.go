@@ -82,7 +82,7 @@ func Fail(status Status, requestID, workspace string, data any, code, msg string
 	if code == "" {
 		switch status {
 		case StatusNeedConfirmation:
-			code = "APPROVAL_REQUIRED"
+			code = "USER_CONFIRMATION_REQUIRED"
 		case StatusNeedSecret:
 			code = "SECRET_REQUIRED"
 		case StatusUnauthorized:
@@ -115,8 +115,11 @@ func Fail(status Status, requestID, workspace string, data any, code, msg string
 }
 
 func classifyError(status Status, code string) (category string, retryable bool, retryHint string) {
-	if status == StatusUnauthorized || strings.Contains(code, "FORBIDDEN") || strings.Contains(code, "DENIED") || strings.Contains(code, "APPROVAL") || strings.Contains(code, "SECRET") {
-		return "permission", false, "Request the required permission or provide the required approval."
+	if status == StatusNeedConfirmation || strings.Contains(code, "CONFIRMATION") {
+		return "confirmation", true, "Ask the user for explicit confirmation, then retry the original tool with user_confirmed=true."
+	}
+	if status == StatusUnauthorized || strings.Contains(code, "FORBIDDEN") || strings.Contains(code, "DENIED") || strings.Contains(code, "SECRET") {
+		return "permission", false, "Request the required permission or provide the required secret."
 	}
 	if strings.Contains(code, "NOT_FOUND") || strings.Contains(code, "WORKSPACE_NOT_FOUND") {
 		return "not_found", false, "Check the identifier and refresh the relevant list."

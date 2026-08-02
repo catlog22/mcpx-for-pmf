@@ -16,8 +16,101 @@ func TestActionColorUsesToolAndErrorOverride(t *testing.T) {
 }
 
 func TestInteractionLineBudget(t *testing.T) {
-	if maxInteractionLines != 10 || maxInteractionBodyLines != 7 {
-		t.Fatalf("line budget=%d/%d", maxInteractionLines, maxInteractionBodyLines)
+	if maxInteractionBodyLines != 20 {
+		t.Fatalf("body line budget=%d", maxInteractionBodyLines)
+	}
+}
+
+func TestDiffLineStyleUsesTrueColorAndFallback(t *testing.T) {
+	added := diffLineStyle("+new", ColorModeTrueColor)
+	if !strings.Contains(added, ansiDiffAddedBackground) || !strings.Contains(added, ansiDiffAddedForeground) || !strings.HasSuffix(added, ansiReset) {
+		t.Fatalf("added style=%q", added)
+	}
+	removed := diffLineStyle("-old", ColorModeTrueColor)
+	if !strings.Contains(removed, ansiDiffRemovedBackground) || !strings.Contains(removed, ansiDiffRemovedForeground) {
+		t.Fatalf("removed style=%q", removed)
+	}
+	for _, line := range []string{"+++ b/demo.go", "--- a/demo.go"} {
+		styled := diffLineStyle(line, ColorModeTrueColor)
+		if strings.Contains(styled, "48;2;") {
+			t.Fatalf("header has content background=%q", styled)
+		}
+	}
+	if styled := diffLineStyle("+new", ColorModeANSI16); strings.Contains(styled, "48;2;") {
+		t.Fatalf("16-color style has truecolor background=%q", styled)
+	}
+	if styled := diffLineStyle("+new", ColorModeNone); styled != "+new" {
+		t.Fatalf("no-color style=%q", styled)
+	}
+	styled := formatDiffLine("+new", ColorModeTrueColor, 12)
+	if displayWidth(styled) != 4 || !strings.Contains(styled, ansiDiffAddedBackground) {
+		t.Fatalf("content diff line=%q width=%d", styled, displayWidth(styled))
+	}
+	blank := formatDiffLine("+", ColorModeTrueColor, 12)
+	if strings.Contains(blank, ansiDiffAddedBackground) || displayWidth(blank) != 1 {
+		t.Fatalf("blank diff line should not become a background block: %q", blank)
+	}
+}
+
+func TestHumanTextSummarizesErrorWithoutProtocolDiagnostics(t *testing.T) {
+	got := humanText(`{"ok":false,"status":"error","completed_at_ms":0,"network_latency_ms":0,"processing_ms":0,"received_at_ms":0,"server_elapsed_ms":0,"started_at_ms":0,"remote_session_id":"rs_test","request_id":"req_test","error":{"code":"REVISION_REQUIRED","message":"expected_sha256 required for delete"}}`)
+	want := "REVISION_REQUIRED: expected_sha256 required for delete"
+	if got != want {
+		t.Fatalf("error summary=%q, want %q", got, want)
+	}
+	for _, diagnostic := range []string{"completed_at_ms", "remote_session_id", "request_id", "server_elapsed_ms"} {
+		if strings.Contains(got, diagnostic) {
+			t.Fatalf("protocol diagnostic %q leaked into %q", diagnostic, got)
+		}
+	}
+}
+
+func TestRenderTextShowsNestedFailureWithoutProtocolDiagnostics(t *testing.T) {
+	var output bytes.Buffer
+	if err := RenderText(&output, Event{
+		Tool:   "change_execute",
+		Type:   TypeToolCompleted,
+		Input:  []byte(`{"summary":"remove files"}`),
+		Output: []byte(`{"status":"ok","result":{"content":[{"type":"text","text":"{\"ok\":false,\"status\":\"error\",\"completed_at_ms\":0,\"remote_session_id\":\"rs_test\",\"request_id\":\"req_test\",\"error\":{\"code\":\"REVISION_REQUIRED\",\"message\":\"expected_sha256 required for delete\"}}"}]}}`),
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	if !strings.Contains(text, "failed: REVISION_REQUIRED: expected_sha256 required for delete") {
+		t.Fatalf("nested failure summary missing: %s", text)
+	}
+	for _, diagnostic := range []string{"completed_at_ms", "remote_session_id", "request_id"} {
+		if strings.Contains(text, diagnostic) {
+			t.Fatalf("protocol diagnostic %q leaked: %s", diagnostic, text)
+		}
+	}
+}
+
+func TestRenderTextDoesNotTreatNullErrorAsFailure(t *testing.T) {
+	var output bytes.Buffer
+	if err := RenderText(&output, Event{
+		Tool:   "environment_inspect",
+		Type:   TypeToolCompleted,
+		Output: []byte(`{"status":"ok","result":{"content":[{"type":"text","text":"{\"ok\":true,\"status\":\"ok\",\"error\":null,\"data\":{\"os\":{}}}"}]}}`),
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), "failed:") {
+		t.Fatalf("successful response with null error was rendered as failure: %q", output.String())
+	}
+}
+
+func TestRenderTextPreservesPlainMCPErrorMessage(t *testing.T) {
+	var output bytes.Buffer
+	if err := RenderText(&output, Event{
+		Tool:   "environment_inspect",
+		Type:   TypeToolCompleted,
+		Output: []byte(`{"status":"error","result":{"content":[{"type":"text","text":"environment inspection failed: permission denied"}]}}`),
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); !strings.Contains(got, "failed: environment inspection failed: permission denied") {
+		t.Fatalf("plain MCP error was hidden: %q", got)
 	}
 }
 
@@ -98,6 +191,140 @@ func TestRenderTextShowsWorkspaceListResultInsteadOfOK(t *testing.T) {
 	}
 	if strings.Contains(text, "intent:") || strings.Contains(text, "data=object") || strings.Contains(text, "TOOL") {
 		t.Fatalf("workspace list rendering leaked protocol details: %s", text)
+	}
+}
+
+func TestRenderTextSummarizesPlanManageEnvelope(t *testing.T) {
+	var output bytes.Buffer
+	if err := RenderText(&output, Event{
+		Tool:   "plan_manage",
+		Type:   TypeToolCompleted,
+		Input:  []byte(`{"action":"create","goal":"修复可见性"}`),
+		Output: []byte(`{"status":"ok","result":{"content":[{"type":"text","text":"{\"ok\":true,\"status\":\"ok\",\"data\":{\"plan_id\":\"pl_demo\",\"status\":\"ready\",\"tasks\":[{\"task_id\":\"pt_1\"},{\"task_id\":\"pt_2\"}]}}"}]}}`),
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{"Plan pl_demo", "状态 ready", "任务 2 个", "pt_1", "pt_2"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("plan summary missing %q: %s", want, text)
+		}
+	}
+	if strings.Contains(text, "data=object") {
+		t.Fatalf("plan summary leaked generic data marker: %s", text)
+	}
+}
+
+func TestRenderTextSummarizesEnvironmentInspectEnvelope(t *testing.T) {
+	var output bytes.Buffer
+	if err := RenderText(&output, Event{
+		Tool:   "environment_inspect",
+		Type:   TypeToolCompleted,
+		Output: []byte(`{"status":"ok","result":{"content":[{"type":"text","text":"{\"ok\":true,\"status\":\"ok\",\"data\":{\"snapshot_id\":\"env_demo\",\"toolchains\":{\"python\":{\"available\":true,\"version\":\"Python 3.11.9\"},\"go\":{\"available\":true,\"version\":\"go1.26.1\"},\"node\":{\"available\":false}}}}"}]}}`),
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{"环境快照 env_demo 已保存", "python Python 3.11.9", "go go1.26.1"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("environment summary missing %q: %s", want, text)
+		}
+	}
+	if strings.Contains(text, "data=object") {
+		t.Fatalf("environment summary leaked generic data marker: %s", text)
+	}
+}
+
+func TestRenderTextSummarizesScreenshotRuntimeAndWorkspaceMemoryEnvelopes(t *testing.T) {
+	tests := []struct {
+		name   string
+		tool   string
+		output string
+		wants  []string
+	}{
+		{
+			name:   "screenshot",
+			tool:   "screenshot_capture",
+			output: `{"status":"ok","result":{"content":[{"type":"text","text":"{\"ok\":true,\"data\":{\"display\":0,\"output_width\":1440,\"output_height\":900,\"format\":\"png\"}}"}]}}`,
+			wants:  []string{"• Captured screenshot", "截图已捕获", "1440×900", "png"},
+		},
+		{
+			name:   "runtime project",
+			tool:   "runtime_inspect",
+			output: `{"status":"ok","result":{"content":[{"type":"text","text":"{\"ok\":true,\"data\":{\"stacks\":[\"python\"],\"manifests\":[\"pyproject.toml\"],\"git_status\":\"## main\"}}"}]}}`,
+			wants:  []string{"• Read project summary", "项目摘要", "技术栈：python", "清单：pyproject.toml"},
+		},
+		{
+			name:   "workspace memory",
+			tool:   "workspace_state",
+			output: `{"status":"ok","result":{"content":[{"type":"text","text":"{\"ok\":true,\"data\":{\"items\":[{\"id\":7}],\"total\":42,\"has_more\":true}}"}]}}`,
+			wants:  []string{"• Read project memory", "项目记忆：返回 1 条，共 42 条", "还有更多"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			input := []byte(`{}`)
+			switch test.tool {
+			case "runtime_inspect":
+				input = []byte(`{"action":"project"}`)
+			case "workspace_state":
+				input = []byte(`{"action":"memory"}`)
+			}
+			if err := RenderText(&output, Event{Tool: test.tool, Type: TypeToolCompleted, Input: input, Output: []byte(test.output)}, false); err != nil {
+				t.Fatal(err)
+			}
+			text := output.String()
+			for _, want := range test.wants {
+				if !strings.Contains(text, want) {
+					t.Fatalf("summary missing %q: %s", want, text)
+				}
+			}
+			if strings.Contains(text, "data=object") {
+				t.Fatalf("summary leaked generic data marker: %s", text)
+			}
+		})
+	}
+}
+
+func TestRenderTextHidesObserverMetadataObject(t *testing.T) {
+	var output bytes.Buffer
+	if err := RenderText(&output, Event{
+		Type:    TypeObserverNotice,
+		Summary: "command.started: go test ./...",
+		Output:  []byte(`{"source_type":"command.started","source_sequence":311,"metadata":{"purpose":"测试","scope":"workspace"}}`),
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	if !strings.Contains(text, "• Observed command.started: go test ./...") {
+		t.Fatalf("observer title missing: %s", text)
+	}
+	for _, forbidden := range []string{"metadata=object", "source_sequence", "purpose="} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("observer metadata leaked %q: %s", forbidden, text)
+		}
+	}
+}
+
+func TestRenderTextSummarizesExtensionInventoryStructuredContent(t *testing.T) {
+	var output bytes.Buffer
+	if err := RenderText(&output, Event{
+		Tool:   "extension_manage",
+		Type:   TypeToolCompleted,
+		Input:  []byte(`{"action":"list","kind":"skill","query":"ui ux"}`),
+		Output: []byte(`{"status":"ok","result":{"content":[{"type":"text","text":"Extension inventory returned."}],"structured_content":{"skills":[{"name":"ui-ux-pro-max"}]}}}`),
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{"Skill 1 项：ui-ux-pro-max"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("extension inventory summary missing %q: %s", want, text)
+		}
+	}
+	if strings.Contains(text, "Extension inventory returned.") {
+		t.Fatalf("generic extension text should be replaced by inventory summary: %s", text)
 	}
 }
 

@@ -200,7 +200,10 @@ func TestObservationRecordsRuntimeTaskOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	task, err := rt.tasks.StartRemote(context.Background(), created.Session.ID, "demo", registered.Path, "printf 'runtime-out'; printf 'runtime-err' >&2")
+	const requestID = "req_runtime_output"
+	const tool = "command_execute"
+	command := "printf 'runtime-out token=do-not-store-this-token'; printf 'runtime-err password=do-not-store-this-password' >&2"
+	task, err := rt.tasks.StartRemoteWithObservation(context.Background(), requestID, tool, created.Session.ID, "demo", registered.Path, command)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,18 +216,44 @@ func TestObservationRecordsRuntimeTaskOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	expectedResourceURI := fmt.Sprintf("mcpx://remote-sessions/%s/tasks/%s/logs", created.Session.ID, task.ID)
 	streams := map[string]string{}
+	offsets := map[string]int64{}
 	for _, event := range events {
 		if event.Type != "command.output" || event.OperationID != task.ID {
 			continue
+		}
+		if event.Workspace != "demo" || event.RemoteSessionID != created.Session.ID || event.RequestID != requestID || event.Tool != tool {
+			t.Fatalf("runtime output identity=%+v", event)
+		}
+		if event.Stream != "stdout" && event.Stream != "stderr" {
+			t.Fatalf("runtime output stream=%q", event.Stream)
+		}
+		if event.Offset != offsets[event.Stream] {
+			t.Fatalf("runtime output offset=%d for %s, want %d", event.Offset, event.Stream, offsets[event.Stream])
+		}
+		if event.ResourceURI != expectedResourceURI {
+			t.Fatalf("runtime output resource=%q, want %q", event.ResourceURI, expectedResourceURI)
 		}
 		var output map[string]any
 		if err := json.Unmarshal(event.Output, &output); err != nil {
 			t.Fatal(err)
 		}
-		streams[event.Stream] += output["text"].(string)
+		text, ok := output["text"].(string)
+		if !ok {
+			t.Fatalf("runtime output text=%+v", output["text"])
+		}
+		if strings.Contains(string(event.Output), command) || strings.Contains(string(event.Output), "do-not-store-this-token") || strings.Contains(string(event.Output), "do-not-store-this-password") {
+			t.Fatalf("runtime output leaked command or credential: %s", event.Output)
+		}
+		streams[event.Stream] += text
+		bytesValue, ok := output["bytes"].(float64)
+		if !ok {
+			t.Fatalf("runtime output bytes=%+v", output["bytes"])
+		}
+		offsets[event.Stream] += int64(bytesValue)
 	}
-	if streams["stdout"] != "runtime-out" || streams["stderr"] != "runtime-err" {
+	if streams["stdout"] != "runtime-out token=[REDACTED]" || streams["stderr"] != "runtime-err password=[REDACTED]" {
 		t.Fatalf("runtime output events=%+v", streams)
 	}
 }

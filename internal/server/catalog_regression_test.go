@@ -13,6 +13,9 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 	protocol := mcpserver.NewMCPServer("mcpx-test", "0.1.0")
 	rt.registerTools(protocol)
 	tools := protocol.ListTools()
+	if _, exists := tools["approval_manage"]; exists {
+		t.Fatal("approval_manage must not be exposed; semantic confirmation uses the original tool")
+	}
 	for _, name := range []string{"workspace_list", "file_read", "context_query", "runtime_inspect", "environment_inspect"} {
 		annotation := tools[name].Tool.Annotations
 		if annotation.ReadOnlyHint == nil || !*annotation.ReadOnlyHint || annotation.DestructiveHint == nil || *annotation.DestructiveHint || annotation.IdempotentHint == nil || !*annotation.IdempotentHint {
@@ -23,7 +26,7 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 	if sessionAnnotation.DestructiveHint == nil || *sessionAnnotation.DestructiveHint {
 		t.Fatalf("session_open should not be marked destructive: %+v", sessionAnnotation)
 	}
-	for _, name := range []string{"command_execute", "approval_manage"} {
+	for _, name := range []string{"command_execute"} {
 		annotation := tools[name].Tool.Annotations
 		if annotation.DestructiveHint == nil || *annotation.DestructiveHint {
 			t.Fatalf("%s should not be marked destructive: %+v", name, annotation)
@@ -38,6 +41,19 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 	}
 	if _, exists := tools["session_open"].Tool.InputSchema.Properties["include_skills"]; exists {
 		t.Fatal("session_open must not expose request-level include_skills; use server discovery.skills config")
+	}
+	fileReadSchema := tools["file_read"].Tool.InputSchema
+	modeSchema, ok := fileReadSchema.Properties["mode"].(map[string]any)
+	enumValues, _ := modeSchema["enum"].([]string)
+	fullMode := false
+	for _, value := range enumValues {
+		if value == "full" {
+			fullMode = true
+			break
+		}
+	}
+	if !ok || !fullMode {
+		t.Fatalf("file_read must expose mode=full for complete client previews: %+v", fileReadSchema.Properties["mode"])
 	}
 
 	var request mcp.CallToolRequest

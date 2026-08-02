@@ -88,6 +88,141 @@ func TestPrepareApplyHistoryAndRevert(t *testing.T) {
 	}
 }
 
+func TestApplyCreatesNestedParentDirectories(t *testing.T) {
+	workspace, store, remoteID, principal := newChangesetFixture(t, nil)
+	service := NewService(store.DB())
+	prepared, err := service.Prepare(context.Background(), remoteID, principal.ID, workspace, "create nested files", []Operation{
+		{Operation: "create", Path: "src/demo_taskboard/__init__.py", Content: "\n"},
+		{Operation: "create", Path: "src/demo_taskboard/core.py", Content: "class Board:\n    pass\n"},
+		{Operation: "create", Path: "tests/test_core.py", Content: "import unittest\n"},
+		{Operation: "create", Path: "web/index.html", Content: "<!doctype html>\n"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Apply(context.Background(), prepared.ID, workspace); err != nil {
+		t.Fatal(err)
+	}
+	for path := range map[string]string{
+		"src/demo_taskboard/__init__.py": "\n",
+		"src/demo_taskboard/core.py":     "class Board:\n    pass\n",
+		"tests/test_core.py":             "import unittest\n",
+		"web/index.html":                 "<!doctype html>\n",
+	} {
+		if _, err := os.Stat(filepath.Join(workspace, path)); err != nil {
+			t.Fatalf("nested file %s was not created: %v", path, err)
+		}
+	}
+}
+
+func TestApplyDeletesDirectoryAsOneQuarantinedChange(t *testing.T) {
+	workspace, store, remoteID, principal := newChangesetFixture(t, nil)
+	directory := filepath.Join(workspace, "old-project")
+	if err := os.MkdirAll(filepath.Join(directory, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "README.md"), []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "nested", "value.txt"), []byte("value\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	service := NewService(store.DB())
+	prepared, err := service.Prepare(context.Background(), remoteID, principal.ID, workspace, "remove old project", []Operation{{
+		Operation: "delete", Path: "old-project",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !IsDirectoryChange(prepared.Files[0]) || !strings.Contains(prepared.UnifiedDiff, "directory removed") {
+		t.Fatalf("directory delete was not represented safely: %+v\n%s", prepared.Files[0], prepared.UnifiedDiff)
+	}
+	if prepared.Files[0].DeletedFiles != 2 || prepared.Files[0].DeletedDirs != 2 {
+		t.Fatalf("directory delete counts = files:%d dirs:%d, want files:2 dirs:2", prepared.Files[0].DeletedFiles, prepared.Files[0].DeletedDirs)
+	}
+	if _, err := service.Apply(context.Background(), prepared.ID, workspace); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(directory); !os.IsNotExist(err) {
+		t.Fatalf("directory was not removed: %v", err)
+	}
+	backup, err := directoryDeleteBackupPath(workspace, prepared.ID, prepared.Files[0].Ordinal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(backup, "nested", "value.txt")); err != nil {
+		t.Fatalf("quarantine backup is incomplete: %v", err)
+	}
+	loaded, err := service.Get(context.Background(), prepared.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Files[0].DeletedFiles != 2 || loaded.Files[0].DeletedDirs != 2 {
+		t.Fatalf("persisted directory delete counts = files:%d dirs:%d, want files:2 dirs:2", loaded.Files[0].DeletedFiles, loaded.Files[0].DeletedDirs)
+	}
+	if _, err := service.PrepareRevert(context.Background(), prepared.ID, principal.ID, workspace); err == nil || !strings.Contains(err.Error(), "cannot be reverted automatically") {
+		t.Fatalf("directory revert should report its explicit boundary: %v", err)
+	}
+}
+
+func TestApplyRestoresQuarantinedDirectoryWhenLaterOperationFails(t *testing.T) {
+	workspace, store, remoteID, principal := newChangesetFixture(t, nil)
+	directory := filepath.Join(workspace, "old-project")
+	if err := os.MkdirAll(filepath.Join(directory, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "README.md"), []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "sentinel.txt"), []byte("sentinel-old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store.DB())
+	service.beforeApply = func(item FileChange) error {
+		if item.Ordinal == 1 {
+			return errors.New("injected later failure")
+		}
+		return nil
+	}
+	prepared, err := service.Prepare(context.Background(), remoteID, principal.ID, workspace, "replace old project", []Operation{
+		{Operation: "delete", Path: "old-project"},
+		{Operation: "update", Path: "sentinel.txt", ExpectedSHA256: hashBytes([]byte("sentinel-old\n")), Content: "sentinel-new\n"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Apply(context.Background(), prepared.ID, workspace); err == nil {
+		t.Fatal("later operation failure unexpectedly succeeded")
+	}
+	assertFile(t, filepath.Join(directory, "README.md"), "old\n")
+	assertFile(t, filepath.Join(workspace, "sentinel.txt"), "sentinel-old\n")
+}
+
+func TestPrepareRejectsDirectoryPathAsRegularFileWhenCreatingDescendant(t *testing.T) {
+	workspace, store, remoteID, principal := newChangesetFixture(t, nil)
+	service := NewService(store.DB())
+	_, err := service.Prepare(context.Background(), remoteID, principal.ID, workspace, "invalid directory operation", []Operation{
+		{Operation: "create", Path: "src/demo_taskboard", Content: ""},
+		{Operation: "create", Path: "src/demo_taskboard/core.py", Content: "pass\n"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "parent directories are created automatically") {
+		t.Fatalf("directory operation was not rejected: %v", err)
+	}
+}
+
+func TestPrepareRequiresSeparateDeleteAndCreateOperations(t *testing.T) {
+	workspace, store, remoteID, principal := newChangesetFixture(t, map[string]string{"same.txt": "old\n"})
+	service := NewService(store.DB())
+	_, err := service.Prepare(context.Background(), remoteID, principal.ID, workspace, "replace same path", []Operation{
+		{Operation: "delete", Path: "same.txt"},
+		{Operation: "create", Path: "new.txt", Content: "new\n"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "delete/create conflict") || !strings.Contains(err.Error(), "separate change_execute calls") {
+		t.Fatalf("same-path replacement was not rejected clearly: %v", err)
+	}
+}
+
 func TestPrepareAppliesUnifiedPatchAtServer(t *testing.T) {
 	workspace := t.TempDir()
 	original := "<template>\n  <main>Old</main>\n</template>\n"

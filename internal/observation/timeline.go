@@ -2,38 +2,84 @@ package observation
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // TextRenderer groups related observation events into one bounded terminal
 // block. It is intentionally stateful because a command's output can arrive
 // between its tool.started and tool.completed events.
 type TextRenderer struct {
-	color       bool
-	blocks      map[string]*interactionBlock
-	activeKey   string
-	fallbackSeq uint64
+	colorMode               ColorMode
+	width                   int
+	blocks                  map[string]*interactionBlock
+	activeKey               string
+	fallbackSeq             uint64
+	lastProgressFingerprint string
 }
 
 type interactionBlock struct {
-	key           string
-	sequence      int64
-	tool          string
-	failed        bool
-	continuation  bool
-	opened        bool
-	closed        bool
-	bodyLines     int
-	ellipsis      bool
-	commandOutput bool
+	key             string
+	sequence        int64
+	remoteSessionID string
+	tool            string
+	failed          bool
+	continuation    bool
+	opened          bool
+	closed          bool
+	bodyLines       int
+	pendingLine     string
+	ellipsis        bool
+	commandOutput   bool
 }
 
 // NewTextRenderer creates a text renderer for one observer stream.
 func NewTextRenderer(color bool) *TextRenderer {
-	return &TextRenderer{color: color, blocks: make(map[string]*interactionBlock)}
+	mode := ColorModeNone
+	if color {
+		mode = ColorModeANSI16
+	}
+	return NewTextRendererWithMode(mode, 0)
+}
+
+// NewTextRendererWithWidth creates a text renderer constrained to terminalWidth
+// display cells. A non-positive width uses the renderer's safe fallback width.
+func NewTextRendererWithWidth(color bool, terminalWidth int) *TextRenderer {
+	mode := ColorModeNone
+	if color {
+		mode = ColorModeANSI16
+	}
+	return NewTextRendererWithMode(mode, terminalWidth)
+}
+
+// NewTextRendererWithMode creates a renderer with explicit ANSI capabilities.
+func NewTextRendererWithMode(mode ColorMode, terminalWidth int) *TextRenderer {
+	if terminalWidth <= 0 {
+		terminalWidth = defaultTerminalWidth
+	}
+	if terminalWidth < 4 {
+		terminalWidth = 4
+	}
+	return &TextRenderer{colorMode: mode, width: terminalWidth, blocks: make(map[string]*interactionBlock)}
+}
+
+// SetWidth refreshes the terminal width without discarding open interaction
+// blocks. Callers that observe terminal resize events can update the renderer
+// before writing the next frame; non-positive values leave the current width
+// unchanged.
+func (r *TextRenderer) SetWidth(terminalWidth int) {
+	if r == nil || terminalWidth <= 0 {
+		return
+	}
+	if terminalWidth < 4 {
+		terminalWidth = 4
+	}
+	r.width = terminalWidth
 }
 
 // RenderEvent writes one event, keeping the block open until the interaction
@@ -48,18 +94,31 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 	if r.blocks == nil {
 		r.blocks = make(map[string]*interactionBlock)
 	}
+	if event.Tool == "progress_report" && event.Type == TypeToolCompleted {
+		fingerprint := progressFingerprint(event)
+		if fingerprint != "" && fingerprint == r.lastProgressFingerprint {
+			return nil
+		}
+		r.lastProgressFingerprint = fingerprint
+	} else if event.Tool != "progress_report" || event.Type != TypeToolStarted {
+		r.lastProgressFingerprint = ""
+	}
 	key := r.eventKey(event)
 	block := r.blocks[key]
 	if block == nil || block.closed {
 		block = &interactionBlock{
-			key:          key,
-			sequence:     event.Sequence,
-			tool:         event.toolOrType(),
-			failed:       eventFailed(event),
-			continuation: block != nil && block.closed,
+			key:             key,
+			sequence:        event.Sequence,
+			remoteSessionID: formatRemoteSessionID(event.RemoteSessionID),
+			tool:            event.toolOrType(),
+			failed:          eventFailed(event),
+			continuation:    block != nil && block.closed,
 		}
 		r.blocks[key] = block
 	} else {
+		if event.RemoteSessionID != "" {
+			block.remoteSessionID = formatRemoteSessionID(event.RemoteSessionID)
+		}
 		if event.Tool != "" {
 			block.tool = event.Tool
 		}
@@ -77,7 +136,7 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 	}
 
 	var rendered bytes.Buffer
-	if err := renderText(&rendered, event, r.color, block.commandOutput && event.Type == TypeToolCompleted); err != nil {
+	if err := renderTextWithOptions(&rendered, event, renderOptions{colorMode: r.colorMode, terminalWidth: r.width}, block.commandOutput && event.Type == TypeToolCompleted); err != nil {
 		return err
 	}
 	lines := splitRenderedLines(rendered.String())
@@ -109,6 +168,28 @@ func (r *TextRenderer) ResetAfterGap() {
 	r.blocks = make(map[string]*interactionBlock)
 	r.activeKey = ""
 	r.fallbackSeq = 0
+	r.lastProgressFingerprint = ""
+}
+
+func progressFingerprint(event Event) string {
+	var input struct {
+		Summary       string `json:"summary"`
+		ResultSummary string `json:"result_summary"`
+		Status        string `json:"status"`
+		NextStep      string `json:"next_step"`
+		RelatedTool   string `json:"related_tool"`
+	}
+	if err := json.Unmarshal(event.Input, &input); err != nil {
+		return ""
+	}
+	values := []string{
+		event.Workspace, event.RemoteSessionID, input.Summary, input.ResultSummary,
+		input.Status, input.NextStep, input.RelatedTool,
+	}
+	if strings.TrimSpace(input.Summary) == "" && strings.TrimSpace(event.ProgressSummary) == "" {
+		return ""
+	}
+	return strings.Join(values, "\x00")
 }
 
 func (r *TextRenderer) eventKey(event Event) string {
@@ -137,14 +218,24 @@ func (r *TextRenderer) activate(w io.Writer, block *interactionBlock) error {
 		r.activeKey = block.key
 		return nil
 	}
-	header := fmt.Sprintf("╭─ #%d · %s", block.sequence, block.tool)
+	header := "╭─"
 	if block.sequence == 0 {
-		header = "╭─ · " + block.tool
+		if block.remoteSessionID == "" {
+			header += " · "
+		}
+	} else {
+		header += fmt.Sprintf(" #%d", block.sequence)
+	}
+	for _, part := range []string{block.remoteSessionID, block.tool} {
+		if part != "" {
+			header += " · " + part
+		}
 	}
 	if block.continuation {
 		header += " · continued"
 	}
-	if _, err := fmt.Fprintln(w, paint(header, actionColor(block.tool, block.failed), r.color)); err != nil {
+	header = truncateRenderedLine(header, r.width)
+	if _, err := fmt.Fprintln(w, paint(header, actionColor(block.tool, block.failed), r.colorMode != ColorModeNone)); err != nil {
 		return err
 	}
 	block.opened = true
@@ -152,24 +243,70 @@ func (r *TextRenderer) activate(w io.Writer, block *interactionBlock) error {
 	return nil
 }
 
+// formatRemoteSessionID keeps old persisted rs_ identifiers readable while
+// rendering newly-created UUID session identifiers in canonical form.
+func formatRemoteSessionID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if parsed, err := uuid.Parse(value); err == nil {
+		return parsed.String()
+	}
+	if strings.HasPrefix(value, "rs_") {
+		raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(value, "rs_"))
+		if err == nil && len(raw) == 16 {
+			var parsed uuid.UUID
+			copy(parsed[:], raw)
+			return parsed.String()
+		}
+	}
+	return value
+}
+
 func (r *TextRenderer) writeBodyLine(w io.Writer, block *interactionBlock, line string) error {
 	if strings.TrimSpace(stripANSI(line)) == "" {
 		return nil
 	}
-	if block.bodyLines < maxInteractionBodyLines {
-		if _, err := fmt.Fprintln(w, "│ "+line); err != nil {
-			return err
-		}
-		block.bodyLines++
-		return nil
+	bodyWidth := r.width - 2
+	if bodyWidth < 1 {
+		bodyWidth = 1
 	}
+	line = truncateRenderedLine(line, bodyWidth)
 	if block.ellipsis {
 		return nil
 	}
-	if _, err := fmt.Fprintln(w, paint("│ ...", ansiYellow, r.color)); err != nil {
+	if block.pendingLine == "" {
+		block.pendingLine = line
+		return nil
+	}
+	if block.bodyLines >= maxInteractionBodyLines-1 {
+		block.pendingLine = ""
+		marker := truncateRenderedLine("│ ...", r.width)
+		if _, err := fmt.Fprintln(w, paint(marker, ansiYellow, r.colorMode != ColorModeNone)); err != nil {
+			return err
+		}
+		block.bodyLines++
+		block.ellipsis = true
+		return nil
+	}
+	if err := r.flushBodyLine(w, block, block.pendingLine); err != nil {
 		return err
 	}
-	block.ellipsis = true
+	block.pendingLine = line
+	return nil
+}
+
+func (r *TextRenderer) flushBodyLine(w io.Writer, block *interactionBlock, line string) error {
+	bodyWidth := r.width - 2
+	if bodyWidth < 1 {
+		bodyWidth = 1
+	}
+	line = truncateRenderedLine(line, bodyWidth)
+	if _, err := fmt.Fprintln(w, "│ "+line); err != nil {
+		return err
+	}
+	block.bodyLines++
 	return nil
 }
 
@@ -177,7 +314,17 @@ func (r *TextRenderer) close(w io.Writer, block *interactionBlock) error {
 	if block == nil || block.closed {
 		return nil
 	}
-	if _, err := fmt.Fprintln(w, paint("╰────────────────────────", actionColor(block.tool, block.failed), r.color)); err != nil {
+	if block.pendingLine != "" && !block.ellipsis {
+		if err := r.flushBodyLine(w, block, block.pendingLine); err != nil {
+			return err
+		}
+		block.pendingLine = ""
+	}
+	footer := "╰" + strings.Repeat("─", r.width-1)
+	if _, err := fmt.Fprintln(w, paint(footer, actionColor(block.tool, block.failed), r.colorMode != ColorModeNone)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
 		return err
 	}
 	block.closed = true
@@ -199,10 +346,12 @@ func eventFailed(event Event) bool {
 	if event.Type != TypeToolCompleted {
 		return false
 	}
-	var payload struct {
-		Status string `json:"status"`
+	var payload map[string]any
+	if json.Unmarshal(event.Output, &payload) != nil {
+		return false
 	}
-	return json.Unmarshal(event.Output, &payload) == nil && payload.Status == "error"
+	failed, _ := toolFailure(payload)
+	return failed
 }
 
 func stripANSI(value string) string {

@@ -328,6 +328,16 @@ var migrations = []string{
 	CREATE INDEX IF NOT EXISTS idx_observation_events_workspace_sequence
 		ON observation_events(workspace_name, sequence);`,
 	`ALTER TABLE observation_events ADD COLUMN progress_summary TEXT NOT NULL DEFAULT '';`,
+	`CREATE INDEX IF NOT EXISTS idx_observation_events_retention
+		ON observation_events(workspace_name, event_type, created_at, sequence);
+	CREATE INDEX IF NOT EXISTS idx_terminal_tasks_retention
+		ON terminal_tasks(status, finished_at, updated_at, remote_session_id);
+	CREATE INDEX IF NOT EXISTS idx_file_snapshots_retention
+		ON file_snapshots(created_at, remote_session_id);
+	CREATE INDEX IF NOT EXISTS idx_environment_snapshots_retention
+		ON environment_snapshots(created_at, remote_session_id);`,
+	`ALTER TABLE changeset_files ADD COLUMN deleted_files INTEGER NOT NULL DEFAULT 0;
+	ALTER TABLE changeset_files ADD COLUMN deleted_directories INTEGER NOT NULL DEFAULT 0;`,
 }
 
 func applyMigrations(ctx context.Context, db *sql.DB) error {

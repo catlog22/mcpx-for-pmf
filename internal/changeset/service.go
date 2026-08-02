@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -70,6 +71,8 @@ type FileChange struct {
 	OriginalMode   uint32 `json:"-"`
 	Original       []byte `json:"-"`
 	Proposed       []byte `json:"-"`
+	DeletedFiles   int    `json:"deleted_files,omitempty"`
+	DeletedDirs    int    `json:"deleted_directories,omitempty"`
 }
 
 type Changeset struct {
@@ -183,6 +186,12 @@ func (s *Service) buildChangeset(remoteSessionID, workspaceRoot, summary string,
 	}
 	files := make([]FileChange, 0, len(operations))
 	seen := map[string]bool{}
+	if err := rejectDeleteCreateConflicts(operations); err != nil {
+		return Changeset{}, err
+	}
+	if err := rejectDirectoryCreateOperations(operations); err != nil {
+		return Changeset{}, err
+	}
 	for index, operation := range operations {
 		prepared, err := prepareOperation(workspaceRoot, index, operation)
 		if err != nil {
@@ -219,6 +228,35 @@ func (s *Service) buildChangeset(remoteSessionID, workspaceRoot, summary string,
 	changeset := Changeset{ID: id, RemoteSessionID: remoteSessionID, Status: "draft", Summary: summary, Digest: digest, Files: files, CreatedAt: now}
 	changeset.UnifiedDiff = unifiedDiff(files)
 	return changeset, nil
+}
+
+// rejectDeleteCreateConflicts keeps destructive replacement in two explicit
+// Changesets. Preparing a create against the pre-delete workspace can otherwise
+// fail with "target already exists", while applying both in one batch prevents
+// a fresh workspace enumeration and revision read between the destructive and
+// constructive steps.
+func rejectDeleteCreateConflicts(operations []Operation) error {
+	deletePaths := make([]string, 0)
+	createPaths := make([]string, 0)
+	for _, operation := range operations {
+		op := strings.ToLower(strings.TrimSpace(operation.Operation))
+		path := filepath.ToSlash(filepath.Clean(operation.Path))
+		if path == "." || path == "" {
+			continue
+		}
+		switch op {
+		case "delete":
+			deletePaths = append(deletePaths, path)
+		case "create":
+			createPaths = append(createPaths, path)
+		}
+	}
+	if len(deletePaths) == 0 || len(createPaths) == 0 {
+		return nil
+	}
+	sort.Strings(deletePaths)
+	sort.Strings(createPaths)
+	return fmt.Errorf("delete/create conflict: one change_execute cannot mix delete and create operations (delete: %s; create: %s); submit them in separate change_execute calls, apply delete first, then re-read the workspace before creating files", strings.Join(deletePaths, ", "), strings.Join(createPaths, ", "))
 }
 
 func prepareOperation(workspaceRoot string, ordinal int, operation Operation) (FileChange, error) {
@@ -259,8 +297,35 @@ func prepareOperation(workspaceRoot string, ordinal int, operation Operation) (F
 		prepared.Proposed = proposed
 		prepared.ProposedSHA256 = hashBytes(proposed)
 	case op == "update" || op == "rename" || op == "delete":
-		if prepared.ExpectedSHA256 == "" {
-			return FileChange{}, fmt.Errorf("expected_sha256 required for %s", op)
+		if prepared.ExpectedSHA256 == "" && op != "delete" {
+			return FileChange{}, fmt.Errorf("base_sha256 (expected_sha256 alias) required for %s: %s", op, path)
+		}
+		if op == "delete" {
+			absolute, resolveErr := file.Resolve(workspaceRoot, path)
+			if resolveErr != nil {
+				return FileChange{}, resolveErr
+			}
+			info, statErr := os.Lstat(absolute)
+			if statErr != nil {
+				return FileChange{}, statErr
+			}
+			if info.IsDir() {
+				digest, stats, digestErr := hashDirectory(absolute)
+				if digestErr != nil {
+					return FileChange{}, fmt.Errorf("hash directory %s: %w", path, digestErr)
+				}
+				prepared.OriginalMode = uint32(info.Mode())
+				prepared.OriginalSHA256 = digest
+				prepared.DeletedFiles = stats.Files
+				prepared.DeletedDirs = stats.Directories
+				if prepared.ExpectedSHA256 == "" {
+					prepared.ExpectedSHA256 = digest
+				}
+				if prepared.OriginalSHA256 != prepared.ExpectedSHA256 {
+					return FileChange{}, fmt.Errorf("%w: %s", ErrStaleRevision, path)
+				}
+				break
+			}
 		}
 		content, mode, err := readExisting(workspaceRoot, path)
 		if err != nil {
@@ -268,6 +333,15 @@ func prepareOperation(workspaceRoot string, ordinal int, operation Operation) (F
 		}
 		prepared.Original, prepared.OriginalMode = content, mode
 		prepared.OriginalSHA256 = hashBytes(content)
+		if op == "delete" {
+			prepared.DeletedFiles = 1
+		}
+		// Deletion is always confirmation-gated. Capture the revision here when
+		// the caller omits it so a safe delete does not require a separate
+		// read/hash round trip; Apply still rechecks this revision before remove.
+		if prepared.ExpectedSHA256 == "" {
+			prepared.ExpectedSHA256 = prepared.OriginalSHA256
+		}
 		if prepared.OriginalSHA256 != prepared.ExpectedSHA256 {
 			return FileChange{}, fmt.Errorf("%w: %s", ErrStaleRevision, path)
 		}
@@ -320,6 +394,37 @@ func prepareOperation(workspaceRoot string, ordinal int, operation Operation) (F
 		prepared.ProposedSHA256 = prepared.OriginalSHA256
 	}
 	return prepared, nil
+}
+
+// rejectDirectoryCreateOperations prevents a directory path from being
+// materialized as a regular file when the same batch also creates descendants.
+// Parent directories are created implicitly by applyOne for file operations.
+func rejectDirectoryCreateOperations(operations []Operation) error {
+	for index, operation := range operations {
+		if strings.ToLower(strings.TrimSpace(operation.Operation)) != "create" {
+			continue
+		}
+		parent := filepath.Clean(operation.Path)
+		if parent == "." || filepath.IsAbs(operation.Path) {
+			continue
+		}
+		for childIndex, candidate := range operations {
+			if index == childIndex {
+				continue
+			}
+			for _, candidatePath := range []string{candidate.Path, candidate.NewPath} {
+				if candidatePath == "" {
+					continue
+				}
+				relative, err := filepath.Rel(parent, filepath.Clean(candidatePath))
+				if err != nil || relative == "." || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+					continue
+				}
+				return fmt.Errorf("operation %d creates directory path %q as a file; omit the directory operation because parent directories are created automatically", index, operation.Path)
+			}
+		}
+	}
+	return nil
 }
 
 func applyExactEdit(original []byte, operation Operation) ([]byte, error) {
@@ -662,8 +767,9 @@ func (s *Service) Get(ctx context.Context, changesetID string) (Changeset, error
 		result.AppliedAt = &value
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT ordinal, operation, path, new_path, expected_sha256,
-        original_sha256, proposed_sha256, original_mode, original_content, proposed_content
-        FROM changeset_files WHERE changeset_id = ? ORDER BY ordinal`, changesetID)
+		original_sha256, proposed_sha256, original_mode, original_content, proposed_content,
+		deleted_files, deleted_directories
+		FROM changeset_files WHERE changeset_id = ? ORDER BY ordinal`, changesetID)
 	if err != nil {
 		return Changeset{}, err
 	}
@@ -671,7 +777,8 @@ func (s *Service) Get(ctx context.Context, changesetID string) (Changeset, error
 	for rows.Next() {
 		var item FileChange
 		if err := rows.Scan(&item.Ordinal, &item.Operation, &item.Path, &item.NewPath, &item.ExpectedSHA256,
-			&item.OriginalSHA256, &item.ProposedSHA256, &item.OriginalMode, &item.Original, &item.Proposed); err != nil {
+			&item.OriginalSHA256, &item.ProposedSHA256, &item.OriginalMode, &item.Original, &item.Proposed,
+			&item.DeletedFiles, &item.DeletedDirs); err != nil {
 			return Changeset{}, err
 		}
 		result.Files = append(result.Files, item)
@@ -725,64 +832,104 @@ func (s *Service) Apply(ctx context.Context, changesetID, workspaceRoot string) 
 		return ApplyResult{}, fmt.Errorf("%w: Changeset application already claimed", ErrConflict)
 	}
 	applied := make([]FileChange, 0, len(changeset.Files))
+	createdDirs := make([]string, 0)
 	for _, item := range changeset.Files {
+		if item.Operation == "create" {
+			dirs, mkdirErr := ensureParentDirectories(workspaceRoot, item.Path)
+			if mkdirErr != nil {
+				return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied, createdDirs,
+					fmt.Errorf("prepare parent directory for %s: %w", item.Path, mkdirErr))
+			}
+			createdDirs = append(createdDirs, dirs...)
+		}
 		if s.beforeApply != nil {
 			if err := s.beforeApply(item); err != nil {
-				return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied,
+				return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied, createdDirs,
 					fmt.Errorf("before apply %s: %w", item.Path, err))
 			}
 		}
-		if err := applyOne(workspaceRoot, item); err != nil {
+		if err := applyOneForChangeset(workspaceRoot, changeset.ID, item); err != nil {
 			var partialErr *partialApplyError
 			if errors.As(err, &partialErr) {
 				applied = append(applied, item)
 				if progressErr := s.updateJournalProgress(ctx, journalID, changeset.ID, applied); progressErr != nil {
-					return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied,
+					return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied, createdDirs,
 						fmt.Errorf("record partially applied %s: %w", item.Path, progressErr))
 				}
 			}
-			return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied,
+			return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied, createdDirs,
 				fmt.Errorf("apply %s: %w", item.Path, err))
 		}
 		applied = append(applied, item)
 		if err := s.updateJournalProgress(ctx, journalID, changeset.ID, applied); err != nil {
-			return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied,
+			return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied, createdDirs,
 				fmt.Errorf("record apply progress: %w", err))
 		}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied, err)
+		return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied, createdDirs, err)
 	}
 	defer tx.Rollback()
 	res, err := tx.ExecContext(ctx, `UPDATE changesets SET status = 'applied', applied_at = ? WHERE id = ? AND status = 'draft'`, now.UnixMilli(), changeset.ID)
 	if err != nil {
 		_ = tx.Rollback()
-		return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied, err)
+		return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied, createdDirs, err)
 	}
 	rows, _ := res.RowsAffected()
 	if rows != 1 {
 		_ = tx.Rollback()
-		return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied, ErrConflict)
+		return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied, createdDirs, ErrConflict)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE change_journals SET status = 'completed', updated_at = ? WHERE id = ?`, now.UnixMilli(), journalID); err != nil {
 		_ = tx.Rollback()
-		return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied, err)
+		return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied, createdDirs, err)
 	}
 	if changeset.SourceChangesetID != "" {
 		if _, err := tx.ExecContext(ctx, `UPDATE changesets SET status = 'reverted' WHERE id = ? AND status = 'applied'`, changeset.SourceChangesetID); err != nil {
 			_ = tx.Rollback()
-			return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied, err)
+			return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied, createdDirs, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied, err)
+		return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied, createdDirs, err)
 	}
 	return ApplyResult{ChangesetID: changeset.ID, JournalID: journalID, Status: "applied", AppliedAt: now, Files: len(applied)}, nil
 }
 
-func (s *Service) abortApply(ctx context.Context, journalID, changesetID, workspaceRoot string, applied []FileChange, cause error) error {
-	rollbackErr := rollback(workspaceRoot, applied)
+func (s *Service) abortApply(ctx context.Context, journalID, changesetID, workspaceRoot string, applied []FileChange, createdDirs []string, cause error) error {
+	var rollbackErr error
+	if containsDirectoryDelete(applied) {
+		// Roll back files created below a quarantined directory first, then
+		// remove the now-empty parent directories, and restore the directory
+		// last. This also covers a clear-and-recreate batch in one Changeset.
+		var contentChanges, directoryChanges []FileChange
+		for _, item := range applied {
+			if IsDirectoryChange(item) {
+				directoryChanges = append(directoryChanges, item)
+			} else {
+				contentChanges = append(contentChanges, item)
+			}
+		}
+		var failures []string
+		if err := rollback(workspaceRoot, changesetID, contentChanges); err != nil {
+			failures = append(failures, err.Error())
+		}
+		if err := removeCreatedDirectories(createdDirs); err != nil {
+			failures = append(failures, "remove created directories: "+err.Error())
+		}
+		if err := rollback(workspaceRoot, changesetID, directoryChanges); err != nil {
+			failures = append(failures, "restore directories: "+err.Error())
+		}
+		if len(failures) > 0 {
+			rollbackErr = errors.New(strings.Join(failures, "; "))
+		}
+	} else {
+		rollbackErr = rollback(workspaceRoot, changesetID, applied)
+		if rollbackErr == nil {
+			rollbackErr = removeCreatedDirectories(createdDirs)
+		}
+	}
 	status := "rolled_back"
 	if rollbackErr != nil {
 		// Keep the journal recoverable. Recover only scans applying journals,
@@ -794,6 +941,15 @@ func (s *Service) abortApply(ctx context.Context, journalID, changesetID, worksp
 		return cause
 	}
 	return fmt.Errorf("%w (rollback: %v; state: %v)", cause, rollbackErr, stateErr)
+}
+
+func containsDirectoryDelete(files []FileChange) bool {
+	for _, item := range files {
+		if IsDirectoryChange(item) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) markApplyFailure(ctx context.Context, journalID, changesetID, journalStatus string) error {
@@ -860,7 +1016,7 @@ func (s *Service) recoverJournal(ctx context.Context, journalID, changesetID, jo
 	}
 	applied := make([]FileChange, 0, len(changeset.Files))
 	for _, item := range changeset.Files {
-		wasApplied, inferErr := inferApplied(workspaceRoot, item)
+		wasApplied, inferErr := inferApplied(workspaceRoot, changesetID, item)
 		if inferErr != nil {
 			return s.markRecoveryFailed(ctx, journalID, changesetID, inferErr)
 		}
@@ -868,13 +1024,13 @@ func (s *Service) recoverJournal(ctx context.Context, journalID, changesetID, jo
 			applied = append(applied, item)
 		}
 	}
-	if err := rollback(workspaceRoot, applied); err != nil {
+	if err := rollback(workspaceRoot, changesetID, applied); err != nil {
 		return s.markRecoveryFailed(ctx, journalID, changesetID, fmt.Errorf("rollback journal %s: %w", journalID, err))
 	}
 	return s.markRecoveryFailed(ctx, journalID, changesetID, nil)
 }
 
-func inferApplied(workspaceRoot string, item FileChange) (bool, error) {
+func inferApplied(workspaceRoot, changesetID string, item FileChange) (bool, error) {
 	path, err := file.Resolve(workspaceRoot, item.Path)
 	if err != nil {
 		return false, err
@@ -906,6 +1062,35 @@ func inferApplied(workspaceRoot string, item FileChange) (bool, error) {
 		}
 		return true, nil
 	case "delete":
+		if IsDirectoryChange(item) {
+			backup, backupErr := directoryDeleteBackupPath(workspaceRoot, changesetID, item.Ordinal)
+			if backupErr != nil {
+				return false, backupErr
+			}
+			_, sourceErr := os.Stat(path)
+			_, backupStatErr := os.Stat(backup)
+			if os.IsNotExist(sourceErr) && backupStatErr == nil {
+				return true, nil
+			}
+			if sourceErr == nil {
+				info, statErr := os.Stat(path)
+				if statErr != nil {
+					return false, statErr
+				}
+				if info.IsDir() {
+					digest, _, digestErr := hashDirectory(path)
+					if digestErr != nil {
+						return false, digestErr
+					}
+					if digest == item.OriginalSHA256 {
+						return false, nil
+					}
+				}
+			}
+			if !os.IsNotExist(sourceErr) || backupStatErr != nil {
+				return false, fmt.Errorf("cannot determine recovery state for %s", item.Path)
+			}
+		}
 		content, err := os.ReadFile(path)
 		if os.IsNotExist(err) {
 			return true, nil
@@ -975,6 +1160,9 @@ func (s *Service) PrepareRevert(ctx context.Context, changesetID, principalID, w
 		case "create":
 			operations = append(operations, Operation{Operation: "delete", Path: item.Path, ExpectedSHA256: item.ProposedSHA256})
 		case "delete":
+			if IsDirectoryChange(item) {
+				return Changeset{}, fmt.Errorf("directory deletion %s cannot be reverted automatically; its backup is retained for recovery", item.Path)
+			}
 			operations = append(operations, Operation{Operation: "create", Path: item.Path, Content: string(item.Original)})
 		case "rename":
 			operations = append(operations, Operation{Operation: "rename", Path: item.NewPath, NewPath: item.Path, ExpectedSHA256: item.ProposedSHA256})
@@ -1034,7 +1222,8 @@ func (s *Service) History(ctx context.Context, remoteSessionID string, limit int
 		args = append(args, id)
 	}
 	fileRows, err := s.db.QueryContext(ctx, `SELECT changeset_id, ordinal, operation, path, new_path,
-        expected_sha256, original_sha256, proposed_sha256, original_mode
+		expected_sha256, original_sha256, proposed_sha256, original_mode,
+		deleted_files, deleted_directories
         FROM changeset_files WHERE changeset_id IN (`+placeholders+`) ORDER BY changeset_id, ordinal`, args...)
 	if err != nil {
 		return nil, err
@@ -1045,7 +1234,8 @@ func (s *Service) History(ctx context.Context, remoteSessionID string, limit int
 		var changesetID string
 		var item FileChange
 		if err := fileRows.Scan(&changesetID, &item.Ordinal, &item.Operation, &item.Path, &item.NewPath,
-			&item.ExpectedSHA256, &item.OriginalSHA256, &item.ProposedSHA256, &item.OriginalMode); err != nil {
+			&item.ExpectedSHA256, &item.OriginalSHA256, &item.ProposedSHA256, &item.OriginalMode,
+			&item.DeletedFiles, &item.DeletedDirs); err != nil {
 			return nil, err
 		}
 		byID[changesetID] = append(byID[changesetID], item)
@@ -1080,11 +1270,13 @@ func (s *Service) insertTx(ctx context.Context, tx *sql.Tx, changeset Changeset,
 	}
 	for _, item := range changeset.Files {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO changeset_files
-            (changeset_id, ordinal, operation, path, new_path, expected_sha256, original_sha256,
-             proposed_sha256, original_mode, original_content, proposed_content)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, changeset.ID, item.Ordinal, item.Operation,
+			(changeset_id, ordinal, operation, path, new_path, expected_sha256, original_sha256,
+			 proposed_sha256, original_mode, original_content, proposed_content,
+			 deleted_files, deleted_directories)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, changeset.ID, item.Ordinal, item.Operation,
 			item.Path, item.NewPath, item.ExpectedSHA256, item.OriginalSHA256, item.ProposedSHA256,
-			item.OriginalMode, nullableBytes(item.Original), nullableBytes(item.Proposed)); err != nil {
+			item.OriginalMode, nullableBytes(item.Original), nullableBytes(item.Proposed),
+			item.DeletedFiles, item.DeletedDirs); err != nil {
 			return err
 		}
 	}
@@ -1100,6 +1292,20 @@ func preflight(workspaceRoot string, files []FileChange) error {
 		if item.Operation == "create" {
 			if _, err := os.Stat(absolute); !os.IsNotExist(err) {
 				return fmt.Errorf("%w: create target %s", ErrStaleRevision, item.Path)
+			}
+			if err := validateParentDirectory(filepath.Dir(absolute)); err != nil {
+				return fmt.Errorf("create parent directory for %s: %w", item.Path, err)
+			}
+			continue
+		}
+		if IsDirectoryChange(item) {
+			info, statErr := os.Stat(absolute)
+			if statErr != nil || !info.IsDir() {
+				return fmt.Errorf("%w: %s", ErrStaleRevision, item.Path)
+			}
+			digest, _, digestErr := hashDirectory(absolute)
+			if digestErr != nil || digest != item.ExpectedSHA256 {
+				return fmt.Errorf("%w: %s", ErrStaleRevision, item.Path)
 			}
 			continue
 		}
@@ -1121,6 +1327,10 @@ func preflight(workspaceRoot string, files []FileChange) error {
 }
 
 func applyOne(workspaceRoot string, item FileChange) error {
+	return applyOneForChangeset(workspaceRoot, "", item)
+}
+
+func applyOneForChangeset(workspaceRoot, changesetID string, item FileChange) error {
 	path, err := file.Resolve(workspaceRoot, item.Path)
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", item.Path, err)
@@ -1131,6 +1341,30 @@ func applyOne(workspaceRoot string, item FileChange) error {
 	case "create":
 		return atomicWrite(path, item.Proposed, 0o644)
 	case "delete":
+		if IsDirectoryChange(item) {
+			backup, backupErr := directoryDeleteBackupPath(workspaceRoot, changesetID, item.Ordinal)
+			if backupErr != nil {
+				return backupErr
+			}
+			if _, statErr := os.Lstat(backup); statErr == nil {
+				return fmt.Errorf("directory deletion backup already exists: %s", item.Path)
+			} else if !os.IsNotExist(statErr) {
+				return statErr
+			}
+			if err := os.MkdirAll(filepath.Dir(backup), 0o700); err != nil {
+				return err
+			}
+			if err := os.Rename(path, backup); err != nil {
+				return err
+			}
+			if err := syncDirectory(filepath.Dir(path)); err != nil {
+				return &partialApplyError{err: err}
+			}
+			if err := syncDirectory(filepath.Dir(backup)); err != nil {
+				return &partialApplyError{err: err}
+			}
+			return nil
+		}
 		if err := os.Remove(path); err != nil {
 			return err
 		}
@@ -1158,7 +1392,89 @@ func applyOne(workspaceRoot string, item FileChange) error {
 	}
 }
 
-func rollback(workspaceRoot string, applied []FileChange) error {
+func ensureParentDirectories(workspaceRoot, relativePath string) ([]string, error) {
+	path, err := file.Resolve(workspaceRoot, relativePath)
+	if err != nil {
+		return nil, err
+	}
+	parent := filepath.Dir(path)
+	if err := validateParentDirectory(parent); err != nil {
+		return nil, err
+	}
+	missing := make([]string, 0)
+	current := parent
+	for {
+		_, statErr := os.Stat(current)
+		if statErr == nil {
+			break
+		}
+		if !os.IsNotExist(statErr) {
+			return nil, statErr
+		}
+		missing = append(missing, current)
+		next := filepath.Dir(current)
+		if next == current {
+			return nil, fmt.Errorf("workspace parent directory not found")
+		}
+		current = next
+	}
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return nil, err
+	}
+	return missing, nil
+}
+
+func validateParentDirectory(path string) error {
+	current := filepath.Clean(path)
+	for {
+		info, err := os.Stat(current)
+		if err == nil {
+			if !info.IsDir() {
+				return fmt.Errorf("parent path is not a directory: %s", current)
+			}
+			return nil
+		}
+		if !os.IsNotExist(err) {
+			return err
+		}
+		next := filepath.Dir(current)
+		if next == current {
+			return err
+		}
+		current = next
+	}
+}
+
+func removeCreatedDirectories(paths []string) error {
+	unique := make(map[string]struct{}, len(paths))
+	ordered := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if _, exists := unique[path]; exists {
+			continue
+		}
+		unique[path] = struct{}{}
+		ordered = append(ordered, path)
+	}
+	sort.SliceStable(ordered, func(left, right int) bool {
+		return directoryDepth(ordered[left]) > directoryDepth(ordered[right])
+	})
+	var failures []string
+	for _, path := range ordered {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			failures = append(failures, path+": "+err.Error())
+		}
+	}
+	if len(failures) > 0 {
+		return errors.New(strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+func directoryDepth(path string) int {
+	return strings.Count(filepath.Clean(path), string(filepath.Separator))
+}
+
+func rollback(workspaceRoot, changesetID string, applied []FileChange) error {
 	var failures []string
 	for index := len(applied) - 1; index >= 0; index-- {
 		item := applied[index]
@@ -1174,6 +1490,27 @@ func rollback(workspaceRoot string, applied []FileChange) error {
 				err = atomicWrite(path, item.Original, os.FileMode(item.OriginalMode))
 			}
 		case "delete":
+			if IsDirectoryChange(item) {
+				backup, backupErr := directoryDeleteBackupPath(workspaceRoot, changesetID, item.Ordinal)
+				if backupErr != nil {
+					err = backupErr
+					break
+				}
+				if info, statErr := os.Lstat(path); statErr == nil {
+					if !info.IsDir() {
+						err = fmt.Errorf("external path appeared after directory delete")
+					} else if removeErr := os.Remove(path); removeErr != nil {
+						err = fmt.Errorf("external directory appeared after directory delete: %w", removeErr)
+					}
+				} else if !os.IsNotExist(statErr) {
+					err = statErr
+				} else if _, statErr := os.Stat(backup); statErr != nil {
+					err = fmt.Errorf("directory deletion backup is missing: %s", item.Path)
+				} else if err = os.Rename(backup, path); err == nil {
+					err = syncDirectory(filepath.Dir(path))
+				}
+				break
+			}
 			if _, statErr := os.Stat(path); statErr == nil {
 				err = fmt.Errorf("external file appeared after delete")
 			} else if !os.IsNotExist(statErr) {
@@ -1223,6 +1560,9 @@ func ensureCurrentHash(workspaceRoot, path, expected string) error {
 }
 
 func atomicWrite(path string, content []byte, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
 	temporary, err := os.CreateTemp(filepath.Dir(path), ".mcpx-change-*")
 	if err != nil {
 		return err
@@ -1269,6 +1609,81 @@ func readExisting(workspaceRoot, path string) ([]byte, uint32, error) {
 	return content, uint32(info.Mode() & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)), err
 }
 
+// IsDirectoryChange reports whether a delete targets a directory. The mode is
+// already persisted with every Changeset file, so this marker works for
+// non-Git workspaces and for recovery after a process restart without a schema
+// migration or a second directory scan.
+func IsDirectoryChange(item FileChange) bool {
+	return item.Operation == "delete" && item.OriginalMode&uint32(os.ModeDir) != 0 && item.Original == nil
+}
+
+func directoryDeleteBackupPath(workspaceRoot, changesetID string, ordinal int) (string, error) {
+	if strings.TrimSpace(changesetID) == "" {
+		return "", fmt.Errorf("changeset id required for directory deletion")
+	}
+	if filepath.Base(changesetID) != changesetID {
+		return "", fmt.Errorf("invalid changeset id")
+	}
+	return filepath.Join(filepath.Dir(filepath.Clean(workspaceRoot)), ".mcpx-trash", changesetID, strconv.Itoa(ordinal)), nil
+}
+
+// hashDirectory creates a stable tree digest and deletion counts without
+// following symlinks. The full directory is never materialized in the
+// Changeset database or rendered into a diff.
+type directoryStats struct {
+	Files       int
+	Directories int
+}
+
+func hashDirectory(root string) (string, directoryStats, error) {
+	hasher := sha256.New()
+	var stats directoryStats
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			stats.Directories++
+		} else {
+			stats.Files++
+		}
+		fmt.Fprintf(hasher, "path=%s\x00mode=%o\x00type=%s\x00", filepath.ToSlash(relative), info.Mode(), info.Mode().Type())
+		if entry.Type()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(hasher, "link=%s\x00", target)
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		fileHandle, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(hasher, fileHandle)
+		closeErr := fileHandle.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
+	})
+	if err != nil {
+		return "", directoryStats{}, err
+	}
+	return "sha256:" + hex.EncodeToString(hasher.Sum(nil)), stats, nil
+}
+
 func hashBytes(content []byte) string {
 	sum := sha256.Sum256(content)
 	return "sha256:" + hex.EncodeToString(sum[:])
@@ -1303,6 +1718,9 @@ func unifiedDiff(files []FileChange) string {
 // It is shared by the Changeset result and its per-file UI presentation so
 // both views describe the same proposed content.
 func UnifiedDiffForFile(item FileChange) string {
+	if IsDirectoryChange(item) {
+		return fmt.Sprintf("--- a/%s/\n+++ /dev/null\n@@ directory removed @@\n-<directory contents retained for rollback>\n", item.Path)
+	}
 	oldPath, newPath := "a/"+item.Path, "b/"+item.Path
 	oldContent, newContent := item.Original, item.Proposed
 	switch item.Operation {

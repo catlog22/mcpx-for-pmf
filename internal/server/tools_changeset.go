@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"mcpx/internal/approval"
 	"mcpx/internal/audit"
 	"mcpx/internal/auth"
 	"mcpx/internal/changeset"
@@ -67,53 +67,6 @@ func (r *Runtime) toolChangeDiff(ctx context.Context, req mcp.CallToolRequest) (
 		return r.changeError(envReq, session.ID, session.WorkspaceName, changeset.ErrNotFound)
 	}
 	return changeDiffResult(item), nil
-}
-
-func (r *Runtime) toolChangeApply(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	envReq, principal, session, fail := r.changeRequest(ctx, req, true)
-	if fail != nil {
-		return fail, nil
-	}
-	changesetID, _ := envReq.Payload["changeset_id"].(string)
-	item, err := r.changesets.Get(ctx, changesetID)
-	if err != nil || item.RemoteSessionID != session.ID {
-		if err == nil {
-			err = changeset.ErrNotFound
-		}
-		return r.changeError(envReq, session.ID, session.WorkspaceName, err)
-	}
-	expectedDigest, _ := envReq.Payload["expected_digest"].(string)
-	if expectedDigest == "" || expectedDigest != item.Digest {
-		return r.changeError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("changeset digest mismatch"))
-	}
-	effective := r.effectiveConfig(session.WorkspacePath)
-	needsConfirmation, changedLines, deniedPath := evaluateChangesetPolicy(effective, item.Files)
-	if deniedPath != "" {
-		response := envelope.Fail(envelope.StatusDenied, envReq.RequestID, session.WorkspaceName, map[string]any{"path": deniedPath}, "FILE_DENIED", "file denied by policy")
-		response.RemoteSessionID = session.ID
-		return r.resultJSON(response)
-	}
-	if effective.Security.Files.MaxPatchLines > 0 && changedLines > effective.Security.Files.MaxPatchLines {
-		return r.patchTooLargeResult(envReq, session, changedLines, effective.Security.Files.MaxPatchLines)
-	}
-	if needsConfirmation {
-		approvalID, approvalErr := r.approvals.Put(approval.Pending{
-			Tool: "change_apply", Summary: item.Summary, WorkDir: session.WorkspacePath, Workspace: session.WorkspaceName,
-			RequestID: envReq.RequestID, RemoteSessionID: session.ID, PrincipalID: principal.ID,
-			ChangesetID: item.ID, ChangesetDigest: item.Digest,
-		})
-		if approvalErr != nil {
-			return r.terminalError(envReq, session.ID, session.WorkspaceName, "approval_store_error", approvalErr.Error())
-		}
-		approvalData := changeSummaryDTO(item)
-		approvalData["approval_id"] = approvalID
-		approvalData["next_action"] = nextAction("approval_manage", map[string]any{"remote_session_id": session.ID, "action": "approve", "approval_id": approvalID})
-		response := envelope.Fail(envelope.StatusNeedConfirmation, envReq.RequestID, session.WorkspaceName,
-			approvalData, "APPROVAL_REQUIRED", "Changeset apply requires approval")
-		response.RemoteSessionID = session.ID
-		return r.resultJSON(response)
-	}
-	return r.applyChangeset(ctx, envReq, principal.ID, session, item)
 }
 
 func (r *Runtime) toolChangeHistory(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -192,7 +145,7 @@ func (r *Runtime) applyChangeset(ctx context.Context, envReq envelope.Request, p
 	if err == nil && principal.ID == principalID {
 		_ = r.remote.AddEvent(ctx, principal, remotesession.Event{RemoteSessionID: session.ID, Type: "changeset.applied", OperationID: item.ID, Summary: item.Summary})
 	}
-	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: session.ID, Workspace: session.WorkspaceName, Tool: "change_apply", Status: "ok", Detail: map[string]any{"changeset_id": item.ID, "digest": item.Digest}})
+	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: session.ID, Workspace: session.WorkspaceName, Tool: "change_execute", Status: "ok", Detail: map[string]any{"changeset_id": item.ID, "digest": item.Digest}})
 	return r.remoteResult(envReq, session.ID, session.WorkspaceName, result)
 }
 
@@ -227,6 +180,13 @@ func changeSummaryDTO(item changeset.Changeset) map[string]any {
 			"original_sha256": f.OriginalSHA256, "proposed_sha256": f.ProposedSHA256,
 			"expected_sha256": f.ExpectedSHA256,
 		}
+		if changeset.IsDirectoryChange(f) {
+			file["is_directory"] = true
+			file["rollback"] = "retained_backup"
+			file["delete_mode"] = "directory_recursive"
+			file["deleted_files"] = f.DeletedFiles
+			file["deleted_directories"] = f.DeletedDirs
+		}
 		if previewBudget > 0 {
 			fileBudget := diffFilePreviewMaxBytes
 			if previewBudget < fileBudget {
@@ -255,12 +215,74 @@ func changeSummaryDTO(item changeset.Changeset) map[string]any {
 		// Preview only — never embed full large diff in structured/text.
 		diff["unified_diff_preview"] = trimDiffPreview(item.UnifiedDiff, diffPreviewLines)
 	}
-	return map[string]any{
+	dto := map[string]any{
 		"changeset_id": item.ID, "remote_session_id": item.RemoteSessionID,
 		"status": item.Status, "summary": item.Summary, "digest": item.Digest,
 		"files": files, "diff": diff, "created_at": item.CreatedAt,
 		"source_changeset_id": item.SourceChangesetID,
 	}
+	if deleteSummary := deleteSummaryDTO(item.Files); deleteSummary != nil {
+		dto["delete_summary"] = deleteSummary
+	}
+	return dto
+}
+
+func deleteSummaryDTO(files []changeset.FileChange) map[string]any {
+	topLevelDirectories, topLevelFiles := 0, 0
+	deletedFiles, deletedDirectories := 0, 0
+	for _, item := range files {
+		if item.Operation != "delete" {
+			continue
+		}
+		if changeset.IsDirectoryChange(item) {
+			topLevelDirectories++
+			deletedFiles += item.DeletedFiles
+			deletedDirectories += item.DeletedDirs
+			if item.DeletedDirs == 0 {
+				// Changesets created before deletion statistics were persisted
+				// still identify the selected directory safely.
+				deletedDirectories++
+			}
+			continue
+		}
+		topLevelFiles++
+		if item.DeletedFiles > 0 {
+			deletedFiles += item.DeletedFiles
+		} else {
+			deletedFiles++
+		}
+	}
+	if topLevelDirectories == 0 && topLevelFiles == 0 {
+		return nil
+	}
+	mode := "file"
+	if topLevelDirectories > 0 && topLevelFiles > 0 {
+		mode = "mixed"
+	} else if topLevelDirectories > 0 {
+		mode = "directory_recursive"
+	}
+	display := "逐项删除 " + strconv.Itoa(topLevelFiles) + " 个顶层文件。"
+	if topLevelDirectories > 0 {
+		display = fmt.Sprintf("目录级递归删除 %d 个顶层目录", topLevelDirectories)
+		if topLevelFiles > 0 {
+			display += fmt.Sprintf("，并逐项删除 %d 个顶层文件", topLevelFiles)
+		}
+		display += fmt.Sprintf("；共删除 %d 个文件、%d 个目录。", deletedFiles, deletedDirectories)
+	}
+	return map[string]any{
+		"mode":                  mode,
+		"top_level_directories": topLevelDirectories,
+		"top_level_files":       topLevelFiles,
+		"deleted_files":         deletedFiles,
+		"deleted_directories":   deletedDirectories,
+		"display":               display,
+	}
+}
+
+func deleteSummaryDisplay(dto map[string]any) string {
+	summary, _ := dto["delete_summary"].(map[string]any)
+	display, _ := summary["display"].(string)
+	return strings.TrimSpace(display)
 }
 
 func fileDiffPreview(item changeset.FileChange, maxBytes int) (string, bool) {
@@ -299,6 +321,9 @@ func changeDiffResultFromDTO(item changeset.Changeset, dto map[string]any) *mcp.
 	diffMeta, _ := dto["diff"].(map[string]any)
 	mode, _ := diffMeta["mode"].(string)
 	fallback := fmt.Sprintf("Changeset %s digest=%s files=%d diff_mode=%s", item.ID, item.Digest, len(item.Files), mode)
+	if summary := deleteSummaryDisplay(dto); summary != "" {
+		fallback += " · " + summary
+	}
 	// Keep the first text content useful for hosts and models. The public
 	// wrapper preserves the full result in response metadata while rendering
 	// this Markdown diff directly in the session.
@@ -402,7 +427,9 @@ func (r *Runtime) changeError(envReq envelope.Request, remoteSessionID, workspac
 		code = "PATCH_TOO_MANY_FILES"
 	case strings.Contains(message, "appears more than once"):
 		code = "PATCH_DUPLICATE_PATH"
-	case strings.Contains(message, "sha256 required"):
+	case strings.Contains(message, "delete/create conflict"):
+		code = "DELETE_CREATE_CONFLICT"
+	case (strings.Contains(message, "base_sha256") || strings.Contains(message, "expected_sha256")) && strings.Contains(message, "required"):
 		code = "REVISION_REQUIRED"
 	case strings.Contains(message, "new_path required"):
 		code = "MISSING_ARGUMENT"
@@ -424,15 +451,23 @@ func (r *Runtime) changeError(envReq envelope.Request, remoteSessionID, workspac
 		}
 	}
 	if code == "REVISION_REQUIRED" {
-		addRecoveryAction(&response, "file_read", "read the current revision of the target file, then retry the operation with its base_sha256", map[string]any{
-			"remote_session_id": remoteSessionID,
-		})
+		arguments := map[string]any{"remote_session_id": remoteSessionID}
+		if path := changesetErrorPath(message); path != "" {
+			arguments["path"] = path
+		}
+		addRecoveryAction(&response, "file_read", "read the current revision of the target file, then retry the operation with its base_sha256", arguments)
 	}
 	if code == "PATCH_DUPLICATE_PATH" {
 		addRecoveryAction(&response, "change_manage", "merge operations for the same path into a single operation", map[string]any{
 			"remote_session_id": remoteSessionID,
 			"action":            "prepare",
 		})
+	}
+	if code == "DELETE_CREATE_CONFLICT" {
+		addRecoveryActions(&response,
+			nextActionWithReason("change_execute", "apply the delete operation alone, wait for success, then submit a new create operation", map[string]any{"remote_session_id": remoteSessionID}),
+			nextActionWithReason("context_query", "re-enumerate the workspace after deletion before creating files", map[string]any{"remote_session_id": remoteSessionID, "action": "list"}),
+		)
 	}
 	if code == "PATCH_TOO_MANY_FILES" {
 		addRecoveryActions(&response,
@@ -444,12 +479,19 @@ func (r *Runtime) changeError(envReq envelope.Request, remoteSessionID, workspac
 }
 
 func changesetErrorPath(message string) string {
-	for _, marker := range []string{"file revision is stale:", "digest mismatch for ", "apply ", "patch context did not match in "} {
+	for _, marker := range []string{"file revision is stale:", "digest mismatch for ", "apply ", "patch context did not match in ", "base_sha256 (expected_sha256 alias) required for ", "expected_sha256 required for "} {
 		index := strings.LastIndex(strings.ToLower(message), marker)
 		if index < 0 {
 			continue
 		}
 		candidate := strings.TrimSpace(message[index+len(marker):])
+		for _, operation := range []string{"create", "update", "rename", "delete"} {
+			prefix := operation + ": "
+			if strings.HasPrefix(candidate, prefix) {
+				candidate = strings.TrimSpace(strings.TrimPrefix(candidate, prefix))
+				break
+			}
+		}
 		if colon := strings.Index(candidate, ":"); colon >= 0 {
 			candidate = candidate[:colon]
 		}

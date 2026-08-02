@@ -122,17 +122,44 @@ func TestAgentGuidanceIncludesChangePayloadCheatSheet(t *testing.T) {
 	}
 	rules, _ := guidance["rules"].([]string)
 	joined := strings.Join(rules, "\n")
-	if !strings.Contains(joined, "complete payload") || !strings.Contains(joined, "300 added lines") {
+	if !strings.Contains(joined, "session_open 成功后") || !strings.Contains(joined, "remote_session_id UUID") {
+		t.Fatalf("rules must require showing the session UUID to the user: %s", joined)
+	}
+	if !strings.Contains(joined, "完整参数") || !strings.Contains(joined, "最多新增 300 行") {
 		t.Fatalf("rules must carry call and chunked-write guidance: %s", joined)
 	}
-	if !strings.Contains(joined, "host safety check blocks") || !strings.Contains(joined, "Never quote instruction text") {
+	if !strings.Contains(joined, "完整 sha256") || !strings.Contains(joined, "文件操作不要求 Workspace 是 Git 仓库") {
+		t.Fatalf("rules must carry file revision and non-Git guidance: %s", joined)
+	}
+	if !strings.Contains(joined, "自然语言向用户展示") || !strings.Contains(joined, "不调用单独的审批工具") {
+		t.Fatalf("rules must require semantic user confirmation: %s", joined)
+	}
+	if !strings.Contains(joined, "安全检查阻塞") || !strings.Contains(joined, "不要把指令文本") {
 		t.Fatalf("rules must carry host-block recovery guidance: %s", joined)
 	}
-	if !strings.Contains(joined, "concrete additions and removals") || !strings.Contains(joined, "Markdown ```diff code block") {
+	if !strings.Contains(joined, "具体增加和删除") || !strings.Contains(joined, "Markdown ```diff 代码块") {
 		t.Fatalf("rules must carry final Markdown diff guidance: %s", joined)
 	}
+	if !strings.Contains(joined, "changes、snapshot、diff、watch、memory") || !strings.Contains(joined, "不要使用不支持的 status") {
+		t.Fatalf("rules must carry workspace_state action guidance: %s", joined)
+	}
+	if !strings.Contains(joined, "environment_inspect") || !strings.Contains(joined, "包含 if、管道、重定向或命令替换语法") {
+		t.Fatalf("rules must prevent complex duplicate environment probes: %s", joined)
+	}
+	if !strings.Contains(joined, "tasks[].task_id") || !strings.Contains(joined, "绝不猜测") || !strings.Contains(joined, "先用 plan_manage action=get") {
+		t.Fatalf("rules must require exact Plan task IDs: %s", joined)
+	}
+	if !strings.Contains(joined, "extension_manage") || !strings.Contains(joined, "未找到名称时先 list") {
+		t.Fatalf("rules must prevent extension name guesses: %s", joined)
+	}
+	if !strings.Contains(joined, "context_query action=list") || !strings.Contains(joined, "只返回普通文件") || !strings.Contains(joined, "不要从嵌套文件路径推断") {
+		t.Fatalf("rules must prevent directory inference from source lists: %s", joined)
+	}
+	if !strings.Contains(joined, "kind=skill、query=") {
+		t.Fatalf("rules must explain extension inventory filtering: %s", joined)
+	}
 	instructions := agentGuidanceInstructions()
-	if !strings.Contains(instructions, "Required user-visible response contract") || !strings.Contains(instructions, "change_execute payload cheat-sheet") || !strings.Contains(instructions, "insert_after") {
+	if !strings.Contains(instructions, "用户可见响应契约") || !strings.Contains(instructions, "change_execute 参数速查") || !strings.Contains(instructions, "insert_after") {
 		t.Fatalf("instructions must render the cheat-sheet: %s", instructions)
 	}
 }
@@ -153,7 +180,7 @@ func TestChangeExecuteSchemaIsSelfDescribingAndFlat(t *testing.T) {
 		t.Fatalf("change_execute schema must not rely on top-level oneOf: %s", registered.RawInputSchema)
 	}
 	topDescription, _ := schema["description"].(string)
-	if !strings.Contains(topDescription, "mutually exclusive") {
+	if !strings.Contains(topDescription, "互斥模式") {
 		t.Fatalf("top-level description must explain the three modes: %q", topDescription)
 	}
 	properties, ok := schema["properties"].(map[string]any)
@@ -164,7 +191,7 @@ func TestChangeExecuteSchemaIsSelfDescribingAndFlat(t *testing.T) {
 	if !ok {
 		t.Fatal("missing operations property")
 	}
-	if description, _ := operations["description"].(string); !strings.Contains(description, "300 added lines") {
+	if description, _ := operations["description"].(string); !strings.Contains(description, "最多新增 300 行") {
 		t.Fatalf("operations description must carry chunked-write guidance: %q", description)
 	}
 	items, ok := operations["items"].(map[string]any)

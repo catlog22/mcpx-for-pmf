@@ -5,6 +5,7 @@ type Config struct {
 	Server     ServerConfig     `yaml:"server"`
 	Auth       AuthConfig       `yaml:"auth"`
 	Security   SecurityConfig   `yaml:"security"`
+	State      StateConfig      `yaml:"state"`
 	Workspaces []WorkspaceEntry `yaml:"workspaces"`
 	Terminal   TerminalConfig   `yaml:"terminal"`
 	FileWatch  FileWatchConfig  `yaml:"file_watch"`
@@ -55,6 +56,36 @@ type TransportConfig struct {
 
 type LimitsConfig struct {
 	MaxResultBytes int `yaml:"max_result_bytes"`
+}
+
+// StateConfig controls durable state retention. It is process-wide and is
+// intentionally not overridable by a project-level .mcpx.yaml.
+type StateConfig struct {
+	Retention RetentionConfig `yaml:"retention"`
+}
+
+// RetentionConfig contains conservative cleanup thresholds for the state DB.
+// The EnabledSet and *Set fields distinguish omitted YAML fields from an
+// explicit zero/false value while merging the global configuration.
+type RetentionConfig struct {
+	Enabled             bool   `yaml:"enabled"`
+	EnabledSet          bool   `yaml:"-"`
+	Interval            string `yaml:"interval"`
+	IntervalSet         bool   `yaml:"-"`
+	ProcessEventTTL     string `yaml:"process_event_ttl"`
+	ProcessEventTTLSet  bool   `yaml:"-"`
+	ProcessEventMaxRows int    `yaml:"process_event_max_rows"`
+	ProcessEventMaxSet  bool   `yaml:"-"`
+	MemoryEventTTL      string `yaml:"memory_event_ttl"`
+	MemoryEventTTLSet   bool   `yaml:"-"`
+	MemoryEventMaxRows  int    `yaml:"memory_event_max_rows"`
+	MemoryEventMaxSet   bool   `yaml:"-"`
+	TerminalTaskTTL     string `yaml:"terminal_task_ttl"`
+	TerminalTaskTTLSet  bool   `yaml:"-"`
+	SnapshotTTL         string `yaml:"snapshot_ttl"`
+	SnapshotTTLSet      bool   `yaml:"-"`
+	VacuumThresholdRows int    `yaml:"vacuum_threshold_rows"`
+	VacuumThresholdSet  bool   `yaml:"-"`
 }
 
 type SecurityConfig struct {
@@ -155,6 +186,17 @@ func DefaultConfig() Config {
 		},
 		Transport: TransportConfig{SessionIdleTTL: "24h"},
 		Limits:    LimitsConfig{MaxResultBytes: 256 << 10},
+		State: StateConfig{Retention: RetentionConfig{
+			Enabled:             true,
+			Interval:            "24h",
+			ProcessEventTTL:     "720h",
+			ProcessEventMaxRows: 10000,
+			MemoryEventTTL:      "4320h",
+			MemoryEventMaxRows:  2000,
+			TerminalTaskTTL:     "720h",
+			SnapshotTTL:         "2160h",
+			VacuumThresholdRows: 10000,
+		}},
 		Security: SecurityConfig{
 			Commands: CommandRules{
 				Default: "allow",

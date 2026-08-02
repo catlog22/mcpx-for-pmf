@@ -1,0 +1,237 @@
+package state
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"mcpx/internal/config"
+)
+
+func newRetentionTestService(t *testing.T, logDir string) (*sql.DB, *RetentionService, time.Time) {
+	t.Helper()
+	store, err := Open(filepath.Join(t.TempDir(), "mcpx.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	policy := config.RetentionConfig{
+		Enabled:             true,
+		Interval:            "1h",
+		ProcessEventTTL:     "1h",
+		ProcessEventMaxRows: 1,
+		MemoryEventTTL:      "1h",
+		MemoryEventMaxRows:  1,
+		TerminalTaskTTL:     "1h",
+		SnapshotTTL:         "1h",
+		VacuumThresholdRows: 100000,
+	}
+	service, err := NewRetentionService(store.DB(), logDir, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return now }
+	return store.DB(), service, now
+}
+
+func insertRetentionPrincipal(t *testing.T, db *sql.DB, id string) {
+	t.Helper()
+	_, err := db.Exec(`INSERT INTO principals(id, kind, subject_hash, created_at, last_seen_at) VALUES (?, 'test', ?, 1, 1)`, id, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func insertRetentionSession(t *testing.T, db *sql.DB, id, workspace, status, owner string) {
+	t.Helper()
+	_, err := db.Exec(`INSERT INTO remote_sessions
+        (id, workspace_name, workspace_path, label, status, owner_principal_id, created_at, last_active_at)
+        VALUES (?, ?, '/tmp', ?, ?, ?, 1, 1)`, id, workspace, id, status, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func insertRetentionEvent(t *testing.T, db *sql.DB, workspace, remoteID, eventType, tool string, createdAt int64) int64 {
+	t.Helper()
+	result, err := db.Exec(`INSERT INTO observation_events
+        (workspace_name, remote_session_id, event_type, tool_name, summary, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)`, workspace, remoteID, eventType, tool, eventType, createdAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sequence, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sequence
+}
+
+func TestRetentionProtectsActiveSessionsAndReferencedSnapshots(t *testing.T) {
+	db, service, now := newRetentionTestService(t, "")
+	insertRetentionPrincipal(t, db, "principal")
+	insertRetentionSession(t, db, "active", "demo", "active", "principal")
+	insertRetentionSession(t, db, "closed", "demo", "closed", "principal")
+
+	old := now.Add(-2 * time.Hour).UnixMilli()
+	recent := now.Add(-10 * time.Minute).UnixMilli()
+	processOld := insertRetentionEvent(t, db, "demo", "", "tool.started", "file_read", old)
+	activeProcess := insertRetentionEvent(t, db, "demo", "active", "command.output", "command_execute", old)
+	closedMemory := insertRetentionEvent(t, db, "demo", "closed", "file.changed", "", old)
+	activeMemory := insertRetentionEvent(t, db, "demo", "active", "session.lifecycle", "", old)
+	firstRecent := insertRetentionEvent(t, db, "demo", "", "tool.started", "file_read", recent)
+	secondRecent := insertRetentionEvent(t, db, "demo", "", "tool.started", "file_read", recent+1)
+	if processOld == 0 || activeProcess == 0 || closedMemory == 0 || activeMemory == 0 || firstRecent == 0 || secondRecent == 0 {
+		t.Fatal("failed to create retention fixtures")
+	}
+	_, err := db.Exec(`INSERT INTO runtime_instances(id, started_at, last_seen_at) VALUES ('runtime', 1, 1)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO environment_snapshots
+        (id, remote_session_id, runtime_instance_id, static_digest, snapshot_json, created_at)
+        VALUES ('env-active', 'active', 'runtime', 'digest', '{}', ?),
+               ('env-closed', 'closed', 'runtime', 'digest', '{}', ?)`, old, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`UPDATE remote_sessions SET environment_snapshot_id = 'env-active' WHERE id = 'active'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO file_snapshots(id, remote_session_id, snapshot_json, created_at)
+        VALUES ('file-active', 'active', '{}', ?), ('file-closed', 'closed', '{}', ?)`, old, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := service.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.DeletedObservationEvents != 3 {
+		t.Fatalf("deleted observation events=%d, want 3; report=%+v", report.DeletedObservationEvents, report)
+	}
+	for _, sequence := range []int64{activeProcess, activeMemory, secondRecent} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM observation_events WHERE sequence = ?`, sequence).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("protected/recent event %d was deleted", sequence)
+		}
+	}
+	for _, sequence := range []int64{processOld, closedMemory, firstRecent} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM observation_events WHERE sequence = ?`, sequence).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("eligible event %d remains", sequence)
+		}
+	}
+
+	var envCount, fileCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM environment_snapshots WHERE id = 'env-active'`).Scan(&envCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM environment_snapshots WHERE id = 'env-closed'`).Scan(&envCount); err != nil {
+		t.Fatal(err)
+	}
+	if envCount != 0 {
+		t.Fatal("closed environment snapshot remains")
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM environment_snapshots WHERE id = 'env-active'`).Scan(&envCount); err != nil {
+		t.Fatal(err)
+	}
+	if envCount != 1 {
+		t.Fatal("referenced environment snapshot was deleted")
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM file_snapshots WHERE id = 'file-closed'`).Scan(&fileCount); err != nil {
+		t.Fatal(err)
+	}
+	if fileCount != 0 {
+		t.Fatal("closed file snapshot remains")
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM file_snapshots WHERE id = 'file-active'`).Scan(&fileCount); err != nil {
+		t.Fatal(err)
+	}
+	if fileCount != 1 {
+		t.Fatal("active file snapshot was deleted")
+	}
+}
+
+func TestRetentionDeletesExpiredEphemeralRecords(t *testing.T) {
+	db, service, now := newRetentionTestService(t, "")
+	insertRetentionPrincipal(t, db, "principal")
+	insertRetentionSession(t, db, "closed", "demo", "closed", "principal")
+	old := now.Add(-time.Hour).UnixMilli()
+	_, err := db.Exec(`INSERT INTO approvals(id, remote_session_id, principal_id, tool, summary, payload_json, status, created_at, expires_at)
+        VALUES ('approval', 'closed', 'principal', 'change_execute', 'old', '{}', 'expired', ?, ?)`, old, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO secret_requests(id, remote_session_id, principal_id, payload_json, status, created_at, expires_at)
+        VALUES ('secret', 'closed', 'principal', '{}', 'expired', ?, ?)`, old, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO idempotency_records(remote_session_id, principal_id, client_request_id, operation, response_json, created_at, expires_at)
+        VALUES ('closed', 'principal', 'request', 'test', '{}', ?, ?)`, old, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{
+		`SELECT COUNT(*) FROM approvals`,
+		`SELECT COUNT(*) FROM secret_requests`,
+		`SELECT COUNT(*) FROM idempotency_records`,
+	} {
+		var count int
+		if err := db.QueryRow(query).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("expired record remains for %s", query)
+		}
+	}
+}
+
+func TestRetentionTaskLogFailureKeepsRow(t *testing.T) {
+	logDir := t.TempDir()
+	db, service, now := newRetentionTestService(t, logDir)
+	insertRetentionPrincipal(t, db, "principal")
+	insertRetentionSession(t, db, "closed", "demo", "closed", "principal")
+	logPath := filepath.Join(logDir, "task.log")
+	if err := os.WriteFile(logPath, []byte("output"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := db.Exec(`INSERT INTO terminal_tasks
+        (id, remote_session_id, workspace_name, workspace_path, command, status, log_path, started_at, finished_at, updated_at)
+        VALUES ('task', 'closed', 'demo', '/tmp', 'echo output', 'exited', ?, ?, ?, ?)`, logPath, now.Add(-2*time.Hour).UnixMilli(), now.Add(-2*time.Hour).UnixMilli(), now.Add(-2*time.Hour).UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.remove = func(string) error { return errors.New("permission denied") }
+	report, err := service.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Errors) != 1 {
+		t.Fatalf("cleanup errors=%v, want one", report.Errors)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM terminal_tasks WHERE id = 'task'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatal("task row was deleted after log removal failed")
+	}
+}

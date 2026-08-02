@@ -54,6 +54,130 @@ func TestChangeExecuteDoesNotWriteDiffFileToWorkspace(t *testing.T) {
 	}
 }
 
+func TestChangeExecuteDeletesNonGitFileAfterSemanticConfirmation(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	path := filepath.Join(registered.Path, "remove-me.txt")
+	if err := os.WriteFile(path, []byte("remove me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deleteRequest := mcp.CallToolRequest{}
+	deleteRequest.Params.Arguments = map[string]any{
+		"intent":            "delete the confirmed test file",
+		"remote_session_id": created.Session.ID, "summary": "remove test file",
+		"operations": []map[string]any{{"operation": "delete", "path": "remove-me.txt"}},
+	}
+	deleteResult, err := rt.toolChangeExecute(context.Background(), deleteRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := decodeToolResult(t, deleteResult)
+	if pending["status"] != "need_confirmation" {
+		t.Fatalf("delete should wait for semantic confirmation: %+v", pending)
+	}
+	pendingData, _ := pending["data"].(map[string]any)
+	if pendingData["confirmation_required"] != true || pendingData["approval_id"] != nil {
+		t.Fatalf("delete confirmation should be semantic and not expose a separate action: %+v", pendingData)
+	}
+
+	confirmRequest := mcp.CallToolRequest{}
+	confirmRequest.Params.Arguments = map[string]any{
+		"intent":            "用户已确认删除该文件",
+		"remote_session_id": created.Session.ID, "changeset_id": pendingData["changeset_id"],
+		"expected_digest": pendingData["digest"], "user_confirmed": true,
+	}
+	confirmedResult, err := rt.toolChangeExecute(context.Background(), confirmRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmed := decodeToolResult(t, confirmedResult)
+	if confirmed["status"] != "ok" {
+		t.Fatalf("confirmed delete failed in non-Git workspace: %+v", confirmed)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("confirmed delete left the file behind: %v", err)
+	}
+	if pending := rt.approvals.ListRemoteSession(created.Session.ID); len(pending) != 0 {
+		t.Fatalf("semantic confirmation should consume the pending request: %+v", pending)
+	}
+}
+
+func TestChangeExecuteDeletesDirectoryWithInitialSemanticConfirmation(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	directory := filepath.Join(registered.Path, "old-project")
+	if err := os.MkdirAll(filepath.Join(directory, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "README.md"), []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := mcp.CallToolRequest{}
+	request.Params.Arguments = map[string]any{
+		"intent":            "清空旧项目目录",
+		"remote_session_id": created.Session.ID,
+		"summary":           "删除旧项目目录",
+		"user_confirmed":    true,
+		"operations":        []map[string]any{{"operation": "delete", "path": "old-project"}},
+	}
+	result, err := rt.toolChangeExecute(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := decodeToolResult(t, result)
+	if response["status"] != "ok" {
+		t.Fatalf("initial semantic confirmation did not apply directory delete: %+v", response)
+	}
+	if _, err := os.Stat(directory); !os.IsNotExist(err) {
+		t.Fatalf("directory was not removed: %v", err)
+	}
+	data, _ := response["data"].(map[string]any)
+	files, _ := data["files"].([]any)
+	if len(files) != 1 {
+		t.Fatalf("directory delete result missing file summary: %+v", data)
+	}
+	fileData, _ := files[0].(map[string]any)
+	if fileData["is_directory"] != true || fileData["rollback"] != "retained_backup" {
+		t.Fatalf("directory delete result missing safety metadata: %+v", fileData)
+	}
+	deleteSummary, _ := data["delete_summary"].(map[string]any)
+	if deleteSummary["mode"] != "directory_recursive" || deleteSummary["top_level_directories"] != float64(1) ||
+		deleteSummary["deleted_files"] != float64(1) || deleteSummary["deleted_directories"] != float64(2) {
+		t.Fatalf("directory delete summary = %+v", deleteSummary)
+	}
+	if display, _ := deleteSummary["display"].(string); !strings.Contains(display, "目录级递归删除") || strings.Contains(display, "总大小") {
+		t.Fatalf("directory delete display = %q", display)
+	}
+}
+
 func TestChangeSummaryIncludesPerFileDiffPreview(t *testing.T) {
 	item := changeset.Changeset{
 		ID: "chg_preview",
@@ -76,6 +200,22 @@ func TestChangeSummaryIncludesPerFileDiffPreview(t *testing.T) {
 	diff, _ := files[0]["diff"].(string)
 	if !strings.Contains(diff, "-旧消息链路") || !strings.Contains(diff, "+新消息链路") {
 		t.Fatalf("per-file diff preview must include concrete changes: %q", diff)
+	}
+}
+
+func TestChangeSummaryExplainsMixedDeleteScope(t *testing.T) {
+	dto := changeSummaryDTO(changeset.Changeset{Files: []changeset.FileChange{
+		{Operation: "delete", Path: "src", OriginalMode: uint32(os.ModeDir), DeletedFiles: 10, DeletedDirs: 3},
+		{Operation: "delete", Path: "README.md", DeletedFiles: 1},
+	}})
+	summary, _ := dto["delete_summary"].(map[string]any)
+	if summary["mode"] != "mixed" || summary["top_level_directories"] != 1 || summary["top_level_files"] != 1 ||
+		summary["deleted_files"] != 11 || summary["deleted_directories"] != 3 {
+		t.Fatalf("mixed delete summary = %+v", summary)
+	}
+	display, _ := summary["display"].(string)
+	if !strings.Contains(display, "目录级递归删除") || !strings.Contains(display, "逐项删除 1 个顶层文件") || strings.Contains(display, "总大小") {
+		t.Fatalf("mixed delete display = %q", display)
 	}
 }
 
@@ -175,6 +315,48 @@ func TestChangeExecuteMissingRevisionHasRecovery(t *testing.T) {
 	}
 }
 
+func TestUpdateMissingRevisionSuggestsTargetFileRead(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	if err := os.WriteFile(filepath.Join(registered.Path, "update-me.txt"), []byte("update me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := mcp.CallToolRequest{}
+	request.Params.Arguments = map[string]any{
+		"intent":            "update without a revision to test recovery",
+		"remote_session_id": created.Session.ID, "summary": "update without revision",
+		"operations": []map[string]any{{"operation": "update", "path": "update-me.txt", "patch": "@@ -1 +1 @@\n-update me\n+updated\n"}},
+	}
+	result, err := rt.toolChangeExecute(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := decodeToolResult(t, result)
+	errorBody, _ := response["error"].(map[string]any)
+	if errorBody["code"] != "REVISION_REQUIRED" {
+		t.Fatalf("missing update revision must map to REVISION_REQUIRED: %+v", response)
+	}
+	details, _ := errorBody["details"].(map[string]any)
+	nextAction, _ := details["next_action"].(map[string]any)
+	arguments, _ := nextAction["arguments"].(map[string]any)
+	if nextAction["tool"] != "file_read" || arguments["path"] != "update-me.txt" {
+		t.Fatalf("update recovery must target the missing revision file: %+v", details)
+	}
+}
+
 func TestChangePrepareDuplicatePathHasRecovery(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	principal, err := rt.principalFromContext(context.Background())
@@ -216,6 +398,56 @@ func TestChangePrepareDuplicatePathHasRecovery(t *testing.T) {
 	action, _ := details["next_action"].(map[string]any)
 	if action["tool"] != "change_manage" {
 		t.Fatalf("duplicate path must suggest change_manage: %+v", details)
+	}
+}
+
+func TestChangePrepareDeleteCreateConflictRequiresSeparateCalls(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	if err := os.WriteFile(filepath.Join(registered.Path, "same.txt"), []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"intent":            "replace a file in separate audited steps",
+		"remote_session_id": created.Session.ID,
+		"action":            "prepare",
+		"summary":           "replace same path",
+		"operations": []map[string]any{
+			{"operation": "delete", "path": "same.txt"},
+			{"operation": "create", "path": "same.txt", "content": "new\n"},
+		},
+	}
+	result, err := rt.toolChangeManage(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := decodeToolResult(t, result)
+	errorBody, _ := response["error"].(map[string]any)
+	if errorBody["code"] != "DELETE_CREATE_CONFLICT" {
+		t.Fatalf("unexpected error code: %v", errorBody["code"])
+	}
+	if !strings.Contains(fmt.Sprint(errorBody["message"]), "separate change_execute calls") {
+		t.Fatalf("error message did not explain split workflow: %+v", errorBody)
+	}
+	details, _ := errorBody["details"].(map[string]any)
+	actions, _ := details["next_actions"].([]any)
+	if len(actions) != 2 {
+		t.Fatalf("split workflow recovery actions=%+v", details)
 	}
 }
 

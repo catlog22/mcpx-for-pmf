@@ -41,6 +41,7 @@ type GitRoot struct {
 type Report struct {
 	RemoteSessionID string    `json:"remote_session_id"`
 	Workspace       string    `json:"workspace"`
+	GitAvailable    bool      `json:"git_available"`
 	GitHead         string    `json:"git_head,omitempty"`
 	GitRoots        []GitRoot `json:"git_roots,omitempty"`
 	BaselineHead    string    `json:"baseline_git_head,omitempty"`
@@ -79,6 +80,15 @@ func DiscoverGitRoots(workspaceRoot string) ([]string, error) {
 
 // CaptureBaseline records files already dirty when a Remote Session starts.
 func (s *Service) CaptureBaseline(ctx context.Context, remoteSessionID, workspaceRoot string) error {
+	roots, err := DiscoverGitRoots(workspaceRoot)
+	if err != nil {
+		return err
+	}
+	if len(roots) == 0 {
+		// File Changesets work independently of Git. A non-Git workspace simply
+		// has no Git baseline to capture.
+		return nil
+	}
 	head, _, entries, err := gitState(ctx, workspaceRoot)
 	if err != nil {
 		return err
@@ -112,12 +122,32 @@ func (s *Service) CaptureBaseline(ctx context.Context, remoteSessionID, workspac
 }
 
 func (s *Service) Inspect(ctx context.Context, remoteSessionID, workspaceName, workspaceRoot string, includeDiff bool) (Report, error) {
-	head, roots, entries, err := gitState(ctx, workspaceRoot)
+	roots, err := DiscoverGitRoots(workspaceRoot)
+	if err != nil {
+		return Report{}, err
+	}
+	if len(roots) == 0 {
+		return Report{
+			RemoteSessionID: remoteSessionID,
+			Workspace:       workspaceName,
+			GitAvailable:    false,
+			Entries:         []Entry{},
+			InspectedAt:     s.now().UTC(),
+		}, nil
+	}
+	head, gitRoots, entries, err := gitState(ctx, workspaceRoot)
 	if err != nil {
 		return Report{}, err
 	}
 	baselineHead, baseline, err := s.baseline(ctx, remoteSessionID)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
+		// A workspace can become a Git repository after the Remote Session is
+		// opened. There is no pre-existing Git baseline in that case, so treat
+		// the current repository as an empty baseline instead of failing a
+		// read-only status query.
+		baselineHead = head
+		baseline = map[string]bool{}
+	} else if err != nil {
 		return Report{}, err
 	}
 	mcpx, err := s.mcpxPaths(ctx, remoteSessionID)
@@ -135,7 +165,7 @@ func (s *Service) Inspect(ctx context.Context, remoteSessionID, workspaceName, w
 			entry.Attribution = "external"
 		}
 	}
-	report := Report{RemoteSessionID: remoteSessionID, Workspace: workspaceName, GitHead: head, GitRoots: roots, BaselineHead: baselineHead, Entries: entries, InspectedAt: s.now().UTC()}
+	report := Report{RemoteSessionID: remoteSessionID, Workspace: workspaceName, GitAvailable: true, GitHead: head, GitRoots: gitRoots, BaselineHead: baselineHead, Entries: entries, InspectedAt: s.now().UTC()}
 	if includeDiff {
 		var parts []string
 		diffRoots, _ := DiscoverGitRoots(workspaceRoot)

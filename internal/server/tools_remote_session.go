@@ -213,12 +213,7 @@ func (r *Runtime) toolRemoteSessionGet(ctx context.Context, req mcp.CallToolRequ
 		data["recent_changesets"] = history
 	}
 	if session.Role == "owner" || session.Role == "approver" {
-		pending := r.approvals.ListRemoteSession(session.ID)
-		items := make([]map[string]any, 0, len(pending))
-		for _, approval := range pending {
-			items = append(items, map[string]any{"approval_id": approval.ID, "tool": approval.Tool, "summary": approval.Summary, "created_at": approval.CreatedAt})
-		}
-		data["pending_approvals"] = items
+		data["pending_confirmations"] = pendingConfirmationItems(r.approvals.ListRemoteSession(session.ID))
 	}
 	if artifacts, artifactErr := r.artifacts.List(ctx, session.ID, "", 10); artifactErr == nil {
 		data["recent_artifacts"] = artifacts

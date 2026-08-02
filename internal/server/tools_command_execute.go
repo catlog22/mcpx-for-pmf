@@ -62,26 +62,31 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req mcp.CallToolReques
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "denied", "command denied by policy")
 	case security.Confirm:
 		yield := commandYield(envReq.Payload)
-		approvalID, approvalErr := r.approvals.Put(approval.Pending{
-			Tool: "command_execute", Summary: command, Command: command,
-			CommandYieldMs: int(yield / time.Millisecond), Purpose: purpose, Scope: scope,
-			CommandDigest: commandDigest, WorkDir: remote.WorkspacePath,
-			RequestID: envReq.RequestID, Workspace: remote.WorkspaceName,
-			RemoteSessionID: remote.ID, PrincipalID: principal.ID,
-		})
-		if approvalErr != nil {
-			return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "approval_store_error", approvalErr.Error())
+		if !userConfirmed(envReq.Payload) || !r.hasPendingCommandConfirmation(remote.ID, command, purpose, scope) {
+			_, confirmationErr := r.approvals.Put(approval.Pending{
+				Tool: "command_execute", Summary: command, Command: command,
+				CommandYieldMs: int(yield / time.Millisecond), Purpose: purpose, Scope: scope,
+				CommandDigest: commandDigest, WorkDir: remote.WorkspacePath,
+				RequestID: envReq.RequestID, Workspace: remote.WorkspaceName,
+				RemoteSessionID: remote.ID, PrincipalID: principal.ID,
+			})
+			if confirmationErr != nil {
+				return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "confirmation_store_error", confirmationErr.Error())
+			}
+			response := envelope.Fail(envelope.StatusNeedConfirmation, envReq.RequestID, remote.WorkspaceName,
+				map[string]any{
+					"command": command, "purpose": purpose, "scope": scope,
+					"command_digest": commandDigest, "confirmation_required": true,
+					"confirmation_message": "请向用户展示命令及用途，等待明确确认；确认后使用相同 command 和 purpose，并设置 user_confirmed=true 重试。",
+				}, "USER_CONFIRMATION_REQUIRED", "命令执行等待用户语义确认")
+			response.RemoteSessionID = remote.ID
+			return r.resultJSON(response)
 		}
-		response := envelope.Fail(envelope.StatusNeedConfirmation, envReq.RequestID, remote.WorkspaceName,
-			map[string]any{
-				"approval_id": approvalID, "command": command, "purpose": purpose,
-				"scope": scope, "command_digest": commandDigest,
-				"next_action": nextAction("approval_manage", map[string]any{
-					"remote_session_id": remote.ID, "action": "approve", "approval_id": approvalID,
-				}),
-			}, "APPROVAL_REQUIRED", "command execution requires approval")
-		response.RemoteSessionID = remote.ID
-		return r.resultJSON(response)
+		result, executeErr := r.executeCommandTask(ctx, envReq, principal, remote, command, yield, purpose, scope, commandDigest)
+		if executeErr == nil {
+			r.consumePendingCommandConfirmation(remote.ID, command, purpose, scope)
+		}
+		return result, executeErr
 	}
 
 	return r.executeCommandTask(ctx, envReq, principal, remote, command, commandYield(envReq.Payload), purpose, scope, commandDigest)
@@ -204,6 +209,24 @@ func commandYield(payload map[string]any) time.Duration {
 		yield = 60_000
 	}
 	return time.Duration(yield) * time.Millisecond
+}
+
+func (r *Runtime) hasPendingCommandConfirmation(remoteSessionID, command, purpose, scope string) bool {
+	for _, pending := range r.approvals.ListRemoteSession(remoteSessionID) {
+		if pending.Tool == "command_execute" && pending.Command == command && pending.Purpose == purpose && pending.Scope == scope {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Runtime) consumePendingCommandConfirmation(remoteSessionID, command, purpose, scope string) {
+	for _, pending := range r.approvals.ListRemoteSession(remoteSessionID) {
+		if pending.Tool == "command_execute" && pending.Command == command && pending.Purpose == purpose && pending.Scope == scope {
+			_, _ = r.approvals.Consume(pending.ID)
+			return
+		}
+	}
 }
 
 func (r *Runtime) toolTaskManage(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

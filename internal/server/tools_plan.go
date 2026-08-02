@@ -18,10 +18,10 @@ func planTaskInputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"task_id":     stringSchema("optional stable Plan Task identifier"),
-			"title":       stringSchema("task title"),
-			"description": stringSchema("task description"),
-			"depends_on":  arraySchema(map[string]any{"type": "string"}, "task identifiers that must finish first"),
+			"task_id":     stringSchema("建议提供的唯一语义稳定 Plan Task ID；后续操作必须使用 create/get 返回的精确值"),
+			"title":       stringSchema("任务标题"),
+			"description": stringSchema("任务描述"),
+			"depends_on":  arraySchema(map[string]any{"type": "string"}, "必须先完成的任务 ID"),
 		},
 		"required": []string{"title"},
 	}
@@ -31,8 +31,8 @@ func planEvidenceSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"kind":         stringSchema("changeset, execution_task, artifact, source, or verification"),
-			"reference_id": stringSchema("server-issued evidence reference"),
+			"kind":         stringSchema("证据类型：changeset、execution_task、artifact、source 或 verification"),
+			"reference_id": stringSchema("服务端签发的证据引用"),
 			"metadata":     map[string]any{"type": "object", "additionalProperties": true},
 		},
 		"required": []string{"kind", "reference_id"},
@@ -44,10 +44,10 @@ func planOperationSchema() map[string]any {
 		"type": "object",
 		"properties": map[string]any{
 			"action":      map[string]any{"type": "string", "enum": []string{"add", "update", "remove"}},
-			"task_id":     stringSchema("Plan Task identifier"),
-			"title":       stringSchema("task title"),
-			"description": stringSchema("task description"),
-			"depends_on":  arraySchema(map[string]any{"type": "string"}, "task identifiers that must finish first"),
+			"task_id":     stringSchema("由 plan_manage create/get 返回的精确 Plan Task ID；不得猜测"),
+			"title":       stringSchema("任务标题"),
+			"description": stringSchema("任务描述"),
+			"depends_on":  arraySchema(map[string]any{"type": "string"}, "必须先完成的任务 ID"),
 		},
 		"required": []string{"action"},
 	}

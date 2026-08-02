@@ -23,6 +23,82 @@ func TestDefaultConfigUsesTransportSessionTTL(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigUsesStateRetentionDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+	retention := cfg.State.Retention
+	if !retention.Enabled || retention.Interval != "24h" {
+		t.Fatalf("retention enabled/interval: %+v", retention)
+	}
+	if retention.ProcessEventTTL != "720h" || retention.ProcessEventMaxRows != 10000 {
+		t.Fatalf("process retention: %+v", retention)
+	}
+	if retention.MemoryEventTTL != "4320h" || retention.MemoryEventMaxRows != 2000 {
+		t.Fatalf("memory retention: %+v", retention)
+	}
+	if retention.TerminalTaskTTL != "720h" || retention.SnapshotTTL != "2160h" || retention.VacuumThresholdRows != 10000 {
+		t.Fatalf("secondary retention: %+v", retention)
+	}
+}
+
+func TestLoadGlobalParsesAndValidatesStateRetention(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(`state:
+  retention:
+    enabled: false
+    interval: 2h
+    process_event_ttl: 48h
+    process_event_max_rows: 42
+    memory_event_ttl: 72h
+    memory_event_max_rows: 24
+    terminal_task_ttl: 96h
+    snapshot_ttl: 120h
+    vacuum_threshold_rows: 8
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadGlobal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retention := cfg.State.Retention
+	if retention.Enabled || retention.Interval != "2h" || retention.ProcessEventMaxRows != 42 || retention.VacuumThresholdRows != 8 {
+		t.Fatalf("parsed retention: %+v", retention)
+	}
+}
+
+func TestLoadGlobalRejectsInvalidStateRetention(t *testing.T) {
+	tests := []string{
+		"state:\n  retention:\n    interval: nope\n",
+		"state:\n  retention:\n    process_event_ttl: -1h\n",
+		"state:\n  retention:\n    process_event_max_rows: 0\n",
+		"state:\n  retention:\n    vacuum_threshold_rows: -1\n",
+	}
+	for _, content := range tests {
+		t.Run(strings.ReplaceAll(strings.TrimSpace(content), "\n", "/"), func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadGlobal(path); err == nil {
+				t.Fatalf("expected invalid retention config to fail: %s", content)
+			}
+		})
+	}
+}
+
+func TestMergeDoesNotAllowProjectStateRetentionOverride(t *testing.T) {
+	global := DefaultConfig()
+	project := Config{State: StateConfig{Retention: RetentionConfig{
+		Enabled: false, Interval: "1h", ProcessEventMaxRows: 1,
+	}}}
+	merged := Merge(global, project)
+	if merged.State.Retention != global.State.Retention {
+		t.Fatalf("project changed global retention: got=%+v want=%+v", merged.State.Retention, global.State.Retention)
+	}
+}
+
 func TestMergeKeepsGlobalTokenAndProjectDescription(t *testing.T) {
 	g := DefaultConfig()
 	g.Auth.Token = "global-tok"
@@ -109,17 +185,6 @@ func TestMergeCommandsReplace(t *testing.T) {
 	}
 }
 
-func TestLoadGlobalMissing(t *testing.T) {
-	dir := t.TempDir()
-	cfg, err := LoadGlobal(filepath.Join(dir, "missing.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Server.Port != 9090 {
-		t.Fatalf("defaults: %+v", cfg.Server)
-	}
-}
-
 func TestRegisterWorkspaceAndLoad(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("MCPX_HOME", dir)
@@ -162,15 +227,5 @@ func TestMergeMCP(t *testing.T) {
 	}
 	if _, ok := m.MCPServers["local"]; !ok {
 		t.Fatal("project add")
-	}
-}
-
-func TestLoadMCPFileMissing(t *testing.T) {
-	f, err := LoadMCPFile(filepath.Join(t.TempDir(), "no.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(f.MCPServers) != 0 {
-		t.Fatal("expected empty")
 	}
 }

@@ -73,3 +73,17 @@ func TestFindChangeExecuteRequestPrunesExpiredEntries(t *testing.T) {
 		t.Fatal("expired request was not pruned")
 	}
 }
+
+func TestRetentionWorkerStopsBeforeStateClose(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	rt.startRetention()
+	if rt.retentionDone == nil {
+		t.Fatal("retention worker was not started")
+	}
+	if err := rt.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if rt.retentionDone != nil || rt.retentionCancel != nil {
+		t.Fatal("retention worker was not stopped")
+	}
+}

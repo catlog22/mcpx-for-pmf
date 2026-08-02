@@ -74,7 +74,11 @@ func LoadGlobal(path string) (Config, error) {
 	if err := ValidateSecurityRules(overlay.Security); err != nil {
 		return base, fmt.Errorf("validate %s: %w", path, err)
 	}
-	return merge(base, overlay, true), nil
+	merged := merge(base, overlay, true)
+	if err := ValidateRetention(merged.State.Retention); err != nil {
+		return base, fmt.Errorf("validate %s: %w", path, err)
+	}
+	return merged, nil
 }
 
 // LoadProject loads project .mcpx.yaml; missing file yields zero Config overlay.
@@ -107,6 +111,9 @@ func Merge(global, project Config) Config {
 // project configuration from redefining process-wide HTTP authentication.
 func merge(global, project Config, mergeAuth bool) Config {
 	out := global
+	if mergeAuth {
+		out.State.Retention = mergeRetention(global.State.Retention, project.State.Retention)
+	}
 
 	if project.Server.Host != "" {
 		out.Server.Host = project.Server.Host

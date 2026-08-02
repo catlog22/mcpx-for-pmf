@@ -13,7 +13,7 @@ type Decision int
 const (
 	// Allow executes without human confirmation.
 	Allow Decision = iota
-	// Confirm requires approval.confirm before execute.
+	// Confirm requires explicit user semantic confirmation before execute.
 	Confirm
 	// Deny rejects the command.
 	Deny
@@ -46,7 +46,7 @@ func ParseDefault(s string) Decision {
 	}
 }
 
-// MatchCommand decides whether a command is allowed, needs approval, or must
+// MatchCommand decides whether a command is allowed, needs confirmation, or must
 // be rejected. deny/allow rules match whole commands or individual && / ;
 // segments; pipes, redirections, background operators, and command substitution
 // are structurally rejected because they cannot be split safely.

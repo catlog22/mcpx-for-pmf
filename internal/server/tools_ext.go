@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -111,11 +112,16 @@ func (r *Runtime) toolFileChanges(ctx context.Context, req mcp.CallToolRequest) 
 		return fail, nil
 	}
 	since, _ := envReq.Payload["since"].(string)
+	since = strings.TrimSpace(since)
+	if since == "" {
+		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "snapshot_required", "snapshot_id is required; call workspace_state with action=snapshot first")
+	}
 	old, err := r.fileSnapshots.Get(ctx, remote.ID, since)
 	if err != nil {
 		code := "snap_error"
 		if errors.Is(err, filesnapshot.ErrNotFound) {
-			code = "not_found"
+			code = "snapshot_not_found"
+			err = fmt.Errorf("snapshot %q was not found; call workspace_state with action=snapshot and retry with its snapshot_id", since)
 		}
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, code, err.Error())
 	}
@@ -350,7 +356,7 @@ func (r *Runtime) toolSkillExecute(ctx context.Context, req mcp.CallToolRequest)
 	skills := skill.LoadAll(eff.Discovery.Skills.Dirs, remote.WorkspacePath)
 	sk, ok := skill.Find(skills, name)
 	if !ok {
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "not_found", "skill not found")
+		return r.skillNotFound(envReq, remote.ID, remote.WorkspaceName, name)
 	}
 	out, err := skill.Execute(ctx, sk, remote.WorkspacePath, args)
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -20,13 +21,21 @@ import (
 const observationSummaryMaxBytes = 8 << 10
 const observationWriteTimeout = 2 * time.Second
 
+type observationTaskStreamKey struct {
+	taskID          string
+	remoteSessionID string
+	stream          string
+}
+
 // observationBridge is the single write boundary for the workspace observer.
 // Store.Append always happens before Broker.Publish so a live observer can
 // recover every event from SQLite after a disconnect or buffer overflow.
 type observationBridge struct {
-	store   *observation.Store
-	broker  *observation.Broker
-	resolve func(context.Context, envelope.Request) (string, string)
+	store           *observation.Store
+	broker          *observation.Broker
+	resolve         func(context.Context, envelope.Request) (string, string)
+	outputStateMu   sync.Mutex
+	outputSanitizer map[observationTaskStreamKey]*observation.TextStreamSanitizer
 }
 
 func (b *observationBridge) Record(ctx context.Context, event observation.Event) error {
@@ -212,10 +221,13 @@ func (r *Runtime) observeAppliedChangeset(ctx context.Context, req envelope.Requ
 }
 
 func (r *Runtime) observeTaskOutput(chunk terminal.OutputChunk) {
-	if r == nil || r.observation == nil || len(chunk.Data) == 0 {
+	if r == nil || r.observation == nil || (len(chunk.Data) == 0 && !chunk.Final) {
 		return
 	}
-	text, truncated := observation.SanitizeText(string(chunk.Data), observation.MaxEventBytes)
+	text, truncated := r.observation.sanitizeTaskOutput(chunk)
+	if text == "" && len(chunk.Data) == 0 {
+		return
+	}
 	encoded, err := json.Marshal(map[string]any{
 		"text":  text,
 		"bytes": len(chunk.Data),
@@ -238,6 +250,29 @@ func (r *Runtime) observeTaskOutput(chunk terminal.OutputChunk) {
 		Offset:          chunk.Offset,
 		Truncated:       truncated,
 	})
+}
+
+func (b *observationBridge) sanitizeTaskOutput(chunk terminal.OutputChunk) (string, bool) {
+	key := observationTaskStreamKey{
+		taskID:          chunk.TaskID,
+		remoteSessionID: chunk.RemoteSessionID,
+		stream:          chunk.Stream,
+	}
+	b.outputStateMu.Lock()
+	defer b.outputStateMu.Unlock()
+	if b.outputSanitizer == nil {
+		b.outputSanitizer = make(map[observationTaskStreamKey]*observation.TextStreamSanitizer)
+	}
+	sanitizer := b.outputSanitizer[key]
+	if sanitizer == nil {
+		sanitizer = &observation.TextStreamSanitizer{}
+		b.outputSanitizer[key] = sanitizer
+	}
+	text, truncated := sanitizer.SanitizeChunk(string(chunk.Data), chunk.Final, observation.MaxEventBytes)
+	if chunk.Final {
+		delete(b.outputSanitizer, key)
+	}
+	return text, truncated
 }
 
 func marshalObservationValue(value any) ([]byte, bool) {

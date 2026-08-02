@@ -100,7 +100,7 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req mcp.CallToolRequest) 
 
 	gitHead, treeDigest := workspaceRevision(ctx, wsPath)
 	activeChangesets, _ := r.changesets.History(ctx, session.ID, 5)
-	pendingApprovals := r.approvals.ListRemoteSession(session.ID)
+	pendingConfirmations := pendingConfirmationItems(r.approvals.ListRemoteSession(session.ID))
 	taskList, _ := r.tasks.List(session.ID, 20)
 	artifacts, _ := r.artifacts.List(ctx, session.ID, "", 20)
 
@@ -125,6 +125,7 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req mcp.CallToolRequest) 
 	}
 
 	data := map[string]any{
+		"remote_session_id": session.ID,
 		"mcpx": map[string]any{
 			"version": build.Version, "commit": build.Commit, "build_time": build.Date,
 		},
@@ -148,12 +149,12 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req mcp.CallToolRequest) 
 		"git": map[string]any{
 			"head": gitHead, "tree_digest": treeDigest,
 		},
-		"active_changesets": activeChangesets,
-		"pending_approvals": pendingApprovals,
-		"tasks":             taskList,
-		"artifacts":         artifacts,
-		"schema_source":     "tools/list",
-		"client_refresh":    clientRefreshPayload(envReq.Payload, revisions),
+		"active_changesets":     activeChangesets,
+		"pending_confirmations": pendingConfirmations,
+		"tasks":                 taskList,
+		"artifacts":             artifacts,
+		"schema_source":         "tools/list",
+		"client_refresh":        clientRefreshPayload(envReq.Payload, revisions),
 		"recommended_workflows": map[string]any{
 			"bootstrap":     []string{"session_open"},
 			"source_change": []string{"context_query", "file_read", "change_execute", "command_execute"},

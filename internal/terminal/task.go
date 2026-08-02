@@ -41,6 +41,7 @@ type OutputChunk struct {
 	Command         string
 	Stream          string
 	Offset          int64
+	Final           bool
 	Data            []byte
 }
 
@@ -51,18 +52,18 @@ type OutputSink func(OutputChunk)
 
 // Task is a background command.
 type Task struct {
-	ID                   string
-	ObservationRequestID string
-	ObservationTool      string
-	RemoteSessionID      string
-	WorkspaceName        string
-	Command              string
-	WorkDir              string
-	Status               TaskStatus
-	PID                  int
-	ExitCode             *int
-	StartedAt            time.Time
-	FinishedAt           *time.Time
+	ID              string
+	RequestID       string
+	Tool            string
+	RemoteSessionID string
+	WorkspaceName   string
+	Command         string
+	WorkDir         string
+	Status          TaskStatus
+	PID             int
+	ExitCode        *int
+	StartedAt       time.Time
+	FinishedAt      *time.Time
 
 	mu            sync.Mutex
 	logBuf        bytes.Buffer
@@ -185,7 +186,7 @@ func (m *TaskManager) start(_ context.Context, requestID, tool, remoteSessionID,
 	m.mu.Unlock()
 
 	t := &Task{
-		ID: id, ObservationRequestID: requestID, ObservationTool: tool,
+		ID: id, RequestID: requestID, Tool: tool,
 		RemoteSessionID: remoteSessionID, WorkspaceName: workspaceName, Command: command,
 		WorkDir: workDir, Status: TaskRunning, StartedAt: time.Now().UTC(), db: m.db,
 		cmd: cmd, cancel: cancel, done: make(chan struct{}), outputSink: m.emitOutput,
@@ -253,10 +254,11 @@ func (m *TaskManager) start(_ context.Context, requestID, tool, remoteSessionID,
 	go func() {
 		err := cmd.Wait()
 		t.mu.Lock()
-		defer t.mu.Unlock()
-		defer close(t.done)
 		if t.Status == TaskKilled {
 			t.finishLocked(TaskKilled, -1)
+			t.mu.Unlock()
+			t.emitOutputFinal()
+			close(t.done)
 			return
 		}
 		t.Status = TaskExited
@@ -270,6 +272,9 @@ func (m *TaskManager) start(_ context.Context, requestID, tool, remoteSessionID,
 		}
 		t.ExitCode = &code
 		t.finishLocked(TaskExited, code)
+		t.mu.Unlock()
+		t.emitOutputFinal()
+		close(t.done)
 		cancel()
 	}()
 	return t, nil
@@ -323,7 +328,7 @@ func (w *lockedWriter) Write(p []byte) (int, error) {
 	}
 	sink := w.t.outputSink
 	chunk := OutputChunk{
-		TaskID: w.t.ID, RequestID: w.t.ObservationRequestID, Tool: w.t.ObservationTool,
+		TaskID: w.t.ID, RequestID: w.t.RequestID, Tool: w.t.Tool,
 		RemoteSessionID: w.t.RemoteSessionID, WorkspaceName: w.t.WorkspaceName,
 		Command: w.t.Command, Stream: w.stream, Offset: offset, Data: append([]byte(nil), p...),
 	}
@@ -332,6 +337,22 @@ func (w *lockedWriter) Write(p []byte) (int, error) {
 		sink(chunk)
 	}
 	return n, nil
+}
+
+func (t *Task) emitOutputFinal() {
+	t.mu.Lock()
+	sink := t.outputSink
+	chunks := []OutputChunk{
+		{TaskID: t.ID, RequestID: t.RequestID, Tool: t.Tool, RemoteSessionID: t.RemoteSessionID, WorkspaceName: t.WorkspaceName, Command: t.Command, Stream: "stdout", Offset: t.stdoutOffset, Final: true},
+		{TaskID: t.ID, RequestID: t.RequestID, Tool: t.Tool, RemoteSessionID: t.RemoteSessionID, WorkspaceName: t.WorkspaceName, Command: t.Command, Stream: "stderr", Offset: t.stderrOffset, Final: true},
+	}
+	t.mu.Unlock()
+	if sink == nil {
+		return
+	}
+	for _, chunk := range chunks {
+		sink(chunk)
+	}
 }
 
 func writeBounded(file *os.File, size *int64, content []byte, truncated *bool) error {

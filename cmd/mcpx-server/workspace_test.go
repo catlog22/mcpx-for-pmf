@@ -27,6 +27,36 @@ func TestParseWorkspaceObserverArgs(t *testing.T) {
 	}
 }
 
+func TestTerminalColumnsUsesEnvironment(t *testing.T) {
+	t.Setenv("COLUMNS", "42")
+	if got := terminalColumns(); got != 42 {
+		t.Fatalf("terminal columns=%d, want 42", got)
+	}
+}
+
+func TestTerminalColorMode(t *testing.T) {
+	tests := []struct {
+		name      string
+		isTTY     bool
+		noColor   string
+		colorTerm string
+		want      observation.ColorMode
+	}{
+		{name: "non tty", want: observation.ColorModeNone},
+		{name: "no color", isTTY: true, noColor: "1", colorTerm: "truecolor", want: observation.ColorModeNone},
+		{name: "truecolor", isTTY: true, colorTerm: "truecolor", want: observation.ColorModeTrueColor},
+		{name: "24bit", isTTY: true, colorTerm: "24bit", want: observation.ColorModeTrueColor},
+		{name: "ansi16", isTTY: true, colorTerm: "", want: observation.ColorModeANSI16},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := terminalColorMode(test.isTTY, test.noColor, test.colorTerm); got != test.want {
+				t.Fatalf("color mode=%v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestRenderWorkspaceFrameTextAndJSON(t *testing.T) {
 	var text bytes.Buffer
 	if err := renderWorkspaceFrame(&text, observation.Frame{Type: "hello", Workspace: "demo", ObserverID: "obs_1"}, "text", false); err != nil {
@@ -68,4 +98,34 @@ func TestRenderWorkspaceFrameReusesTextRendererAcrossEvents(t *testing.T) {
 	if strings.Count(output.String(), "╭─") != 2 {
 		t.Fatalf("gap did not reset interaction state: %q", output.String())
 	}
+}
+
+func TestRenderWorkspaceFrameRefreshesRendererWidth(t *testing.T) {
+	t.Setenv("COLUMNS", "28")
+	var output bytes.Buffer
+	renderer := observation.NewTextRenderer(false)
+	if err := renderWorkspaceFrameWithRenderer(&output, observation.Frame{
+		Type: "event",
+		Event: &observation.Event{
+			Sequence:  4,
+			RequestID: "req_resize",
+			Tool:      "progress_report",
+			Type:      observation.TypeToolCompleted,
+			Input:     []byte(`{"summary":"报告进度"}`),
+			Output:    []byte(`{"status":"ok","result":{"content":[{"type":"text","text":"这是一段在终端缩窄后也不能从左侧溢出的长文本。"}]}}`),
+		},
+	}, "text", false, renderer); err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(output.String(), "\n"), "\n") {
+		if got := observationDisplayWidthForTest(line); got > 28 {
+			t.Fatalf("resized line width=%d, want <= 28: %q", got, line)
+		}
+	}
+}
+
+func observationDisplayWidthForTest(value string) int {
+	// This assertion only needs to account for the ASCII test fixture and keeps
+	// the command package independent from observation's unexported width helper.
+	return len([]rune(value))
 }

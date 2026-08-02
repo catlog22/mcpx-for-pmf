@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -60,10 +62,14 @@ func runWorkspaceObserver(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	client := observation.NewClient(observation.SocketPath(home))
-	color := options.Format == "text" && stdoutIsTTY() && os.Getenv("NO_COLOR") == ""
+	colorMode := observation.ColorModeNone
+	if options.Format == "text" {
+		colorMode = terminalColorMode(stdoutIsTTY(), os.Getenv("NO_COLOR"), os.Getenv("COLORTERM"))
+	}
+	color := colorMode != observation.ColorModeNone
 	var textRenderer *observation.TextRenderer
 	if options.Format == "text" {
-		textRenderer = observation.NewTextRenderer(color)
+		textRenderer = observation.NewTextRendererWithMode(colorMode, terminalColumns())
 	}
 	err = client.Run(ctx, observation.SubscribeRequest{
 		Type: "subscribe", Workspace: options.Workspace, HistoryLimit: options.History, Format: options.Format,
@@ -77,21 +83,38 @@ func runWorkspaceObserver(args []string) int {
 	return 0
 }
 
+func terminalColorMode(isTTY bool, noColor, colorTerm string) observation.ColorMode {
+	if !isTTY || strings.TrimSpace(noColor) != "" {
+		return observation.ColorModeNone
+	}
+	switch strings.ToLower(strings.TrimSpace(colorTerm)) {
+	case "truecolor", "24bit":
+		return observation.ColorModeTrueColor
+	default:
+		return observation.ColorModeANSI16
+	}
+}
+
 func renderWorkspaceFrame(w io.Writer, frame observation.Frame, format string, color bool) error {
 	var renderer *observation.TextRenderer
 	if format == "text" {
-		renderer = observation.NewTextRenderer(color)
+		renderer = observation.NewTextRendererWithWidth(color, terminalColumns())
 	}
 	return renderWorkspaceFrameWithRenderer(w, frame, format, color, renderer)
 }
 
 func renderWorkspaceFrameWithRenderer(w io.Writer, frame observation.Frame, format string, color bool, renderer *observation.TextRenderer) error {
+	if format == "text" && renderer != nil {
+		// Refresh on every frame so a terminal resize cannot leave body lines
+		// wider than the current viewport and wrap their continuation at column 0.
+		renderer.SetWidth(terminalColumns())
+	}
 	if frame.Type == "event" && frame.Event != nil {
 		if format == "json" {
 			return observation.RenderJSON(w, *frame.Event)
 		}
 		if renderer == nil {
-			renderer = observation.NewTextRenderer(color)
+			renderer = observation.NewTextRendererWithWidth(color, terminalColumns())
 		}
 		return renderer.RenderEvent(w, *frame.Event)
 	}
@@ -150,4 +173,29 @@ func printWorkspaceUsage(w io.Writer) {
 func stdoutIsTTY() bool {
 	info, err := os.Stdout.Stat()
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func terminalColumns() int {
+	if columns, err := strconv.Atoi(strings.TrimSpace(os.Getenv("COLUMNS"))); err == nil && columns > 0 {
+		return columns
+	}
+	info, err := os.Stdin.Stat()
+	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+		return 0
+	}
+	command := exec.Command("stty", "size")
+	command.Stdin = os.Stdin
+	output, err := command.Output()
+	if err != nil {
+		return 0
+	}
+	fields := strings.Fields(string(output))
+	if len(fields) != 2 {
+		return 0
+	}
+	columns, err := strconv.Atoi(fields[1])
+	if err != nil || columns <= 0 {
+		return 0
+	}
+	return columns
 }
