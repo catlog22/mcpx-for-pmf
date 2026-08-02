@@ -3,7 +3,6 @@ package observation
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -14,7 +13,7 @@ func startTestSocket(t *testing.T) (*Store, *Broker, string) {
 	db := openObservationTestDB(t)
 	store := NewStore(db.DB())
 	broker := NewBroker()
-	path := fmt.Sprintf("/tmp/mcpx-observer-%d.sock", time.Now().UnixNano())
+	path := testObserverPath(t)
 	server := NewSocketServer(path, store, broker, func(workspace string) bool { return workspace == "mcpx" })
 	if err := server.Start(); err != nil {
 		t.Fatal(err)
@@ -123,7 +122,7 @@ func TestClientDeduplicatesEventSequences(t *testing.T) {
 }
 
 func TestClientReportsUnavailableSocketImmediately(t *testing.T) {
-	client := NewClient("/tmp/mcpx-observer-does-not-exist.sock")
+	client := NewClient(testObserverPath(t))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := client.Run(ctx, SubscribeRequest{Workspace: "mcpx"}, func(Frame) error { return nil }); err == nil {
