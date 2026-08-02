@@ -82,7 +82,7 @@ func TestResolveRemoteSessionWorkspaceWithoutTransportBinding(t *testing.T) {
 func TestWorkspaceInfoDoesNotAutoSelectSingleWorkspace(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	var req mcp.CallToolRequest
-	req.Params.Arguments = map[string]any{"action": "project"}
+	req.Params.Arguments = map[string]any{"intent": "inspect the project workspace", "action": "project"}
 	out, err := rt.toolRuntimeInspect(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)

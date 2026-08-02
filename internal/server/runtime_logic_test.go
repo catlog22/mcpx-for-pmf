@@ -100,6 +100,7 @@ func TestTerminalExecRunsAfterApproval(t *testing.T) {
 
 	var req mcp.CallToolRequest
 	req.Params.Arguments = map[string]any{
+		"intent":            "request an approved command",
 		"remote_session_id": created.Session.ID,
 		"command":           "echo approved-run",
 		"purpose":           "run the command test",
@@ -120,6 +121,7 @@ func TestTerminalExecRunsAfterApproval(t *testing.T) {
 	}
 	approvalReq := mcp.CallToolRequest{}
 	approvalReq.Params.Arguments = map[string]any{
+		"intent":            "confirm the command approval",
 		"remote_session_id": created.Session.ID, "approval_id": approvalID, "approve": true,
 	}
 	approved, err := rt.toolApprovalConfirm(context.Background(), approvalReq)
@@ -170,6 +172,7 @@ func TestTerminalStartUsesCommandPolicy(t *testing.T) {
 	}
 	var req mcp.CallToolRequest
 	req.Params.Arguments = map[string]any{
+		"intent":            "verify command policy",
 		"remote_session_id": created.Session.ID,
 		"command":           "echo must-not-start",
 		"purpose":           "verify denied command policy",

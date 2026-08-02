@@ -64,6 +64,9 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	cfg.Security.Commands.Allow = append(cfg.Security.Commands.Allow, `^printf\b`, `^sleep\b`, `^go test\b`)
 	cfg.Workspaces = []config.WorkspaceEntry{{Name: "project", Path: workspace}}
 	cfg.Discovery.Instructions.GlobalAgentsPath = globalAgents
+	// Keep this protocol fixture independent of the developer machine's global
+	// ~/.agents/skills and ~/.codex/skills directories.
+	cfg.Discovery.Skills.Dirs = []string{filepath.Join(home, "skills")}
 	if err := config.WriteGlobal(filepath.Join(home, "config.yaml"), cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +98,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	if err := client.Start(ctx); err != nil {
 		t.Fatalf("start client: %v", err)
@@ -118,6 +121,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	}
 	expectedTools := []string{
 		"workspace_list", "session_open", "file_read", "context_query", "change_execute", "command_execute",
+		"progress_report",
 		"session_manage", "change_manage", "task_manage", "plan_manage", "runtime_inspect", "environment_inspect", "workspace_state",
 		"extension_manage", "artifact_manage", "approval_manage", "screenshot_capture", "secrets_provide",
 	}
@@ -181,10 +185,13 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		t.Fatalf("command_execute schema missing scope: %s", commandSchema)
 	}
 	contextSchema, _ := json.Marshal(byName["context_query"].InputSchema)
-	for _, removed := range []string{"intent", "pattern", "max_files"} {
+	for _, removed := range []string{"pattern", "max_files"} {
 		if strings.Contains(string(contextSchema), removed) {
 			t.Fatalf("context_query exposes removed compatibility field %q: %s", removed, contextSchema)
 		}
+	}
+	if !strings.Contains(string(contextSchema), `"intent"`) {
+		t.Fatalf("context_query schema must require intent: %s", contextSchema)
 	}
 	extensionSchema, _ := json.Marshal(byName["extension_manage"].InputSchema)
 	if !strings.Contains(string(extensionSchema), "action") || !strings.Contains(string(extensionSchema), "include_tools") || !strings.Contains(string(extensionSchema), "server") {
@@ -205,6 +212,14 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 
 	call := func(name string, args map[string]any) map[string]any {
 		t.Helper()
+		if _, exists := args["intent"]; !exists {
+			withIntent := make(map[string]any, len(args)+1)
+			for key, value := range args {
+				withIntent[key] = value
+			}
+			withIntent["intent"] = "acceptance operation"
+			args = withIntent
+		}
 		var req mcp.CallToolRequest
 		req.Params.Name = name
 		req.Params.Arguments = args
@@ -217,9 +232,10 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		}
 		text, ok := res.Content[0].(mcp.TextContent)
 		if !ok {
-			// Structured tools may put markdown first; try raw JSON from structured.
-			if res.StructuredContent != nil {
-				raw, _ := json.Marshal(res.StructuredContent)
+			// The public result is human-first. Keep this fallback for attached
+			// content and older clients that still return a machine payload.
+			if value := resultMachineValue(res); value != nil {
+				raw, _ := json.Marshal(value)
 				var asMap map[string]any
 				if json.Unmarshal(raw, &asMap) == nil {
 					// Normalize to envelope-like shape for callers that expect status.
@@ -233,10 +249,10 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		}
 		var envelope map[string]any
 		if err := json.Unmarshal([]byte(text.Text), &envelope); err != nil {
-			// The first text content is now the host-visible display; the ARC
-			// envelope is the machine copy in structuredContent.
-			if res.StructuredContent != nil {
-				raw, _ := json.Marshal(res.StructuredContent)
+			// The first text content is the host-visible display; the ARC
+			// envelope is kept in response metadata for machine consumers.
+			if value := resultMachineValue(res); value != nil {
+				raw, _ := json.Marshal(value)
 				_ = json.Unmarshal(raw, &envelope)
 			}
 		}

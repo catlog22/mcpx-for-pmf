@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
+
+	"mcpx/internal/arc"
 )
 
 func decodeToolResult(t *testing.T, result *mcp.CallToolResult) map[string]any {
@@ -17,8 +19,8 @@ func decodeToolResult(t *testing.T, result *mcp.CallToolResult) map[string]any {
 			}
 		}
 	}
-	if result.StructuredContent != nil {
-		raw, err := json.Marshal(result.StructuredContent)
+	if value := resultMachineValue(result); value != nil {
+		raw, err := json.Marshal(value)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -36,4 +38,34 @@ func decodeToolResult(t *testing.T, result *mcp.CallToolResult) map[string]any {
 	}
 	t.Fatalf("tool returned no decodable result: %+v", result)
 	return nil
+}
+
+func resultMachineValue(result *mcp.CallToolResult) any {
+	if result == nil {
+		return nil
+	}
+	if result.StructuredContent != nil {
+		return result.StructuredContent
+	}
+	if result.Meta != nil {
+		return result.Meta.AdditionalFields[arc.ResultMetadataKey]
+	}
+	return nil
+}
+
+func decodeARCEnvelope(t *testing.T, result *mcp.CallToolResult) map[string]any {
+	t.Helper()
+	value := resultMachineValue(result)
+	if value == nil {
+		t.Fatalf("ARC result missing: %+v", result)
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	return envelope
 }

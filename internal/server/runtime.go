@@ -27,6 +27,7 @@ import (
 	"mcpx/internal/filesnapshot"
 	"mcpx/internal/logging"
 	"mcpx/internal/oauth"
+	"mcpx/internal/observation"
 	"mcpx/internal/plan"
 	"mcpx/internal/remotesession"
 	"mcpx/internal/screenshot"
@@ -51,26 +52,28 @@ type Options struct {
 
 // Runtime is the MCPX process root.
 type Runtime struct {
-	opts          Options
-	cfg           config.Config
-	reg           *workspace.Registry
-	approvals     *approval.Store
-	audit         *audit.Logger
-	globalCfgPath string
-	tasks         *terminal.TaskManager
-	secrets       *secrets.Store
-	oauth         *oauth.Server
-	state         *state.Store
-	remote        *remotesession.Service
-	environment   *environment.Service
-	changesets    *changeset.Service
-	workspaceDiff *workspacechanges.Service
-	fileSnapshots *filesnapshot.Store
-	artifacts     *artifact.Service
-	plans         *plan.Service
-	screenshot    screenCapturer
-	closeOnce     sync.Once
-	closeErr      error
+	opts           Options
+	cfg            config.Config
+	reg            *workspace.Registry
+	approvals      *approval.Store
+	audit          *audit.Logger
+	globalCfgPath  string
+	tasks          *terminal.TaskManager
+	secrets        *secrets.Store
+	oauth          *oauth.Server
+	state          *state.Store
+	remote         *remotesession.Service
+	environment    *environment.Service
+	changesets     *changeset.Service
+	workspaceDiff  *workspacechanges.Service
+	fileSnapshots  *filesnapshot.Store
+	artifacts      *artifact.Service
+	plans          *plan.Service
+	screenshot     screenCapturer
+	observation    *observationBridge
+	observerSocket *observation.SocketServer
+	closeOnce      sync.Once
+	closeErr       error
 
 	// For schema revision and capability catalog.
 	toolIndex   map[string]mcp.Tool
@@ -222,6 +225,20 @@ func New(opts Options) (*Runtime, error) {
 			Date:    firstNonEmpty(opts.Date, "unknown"),
 		},
 	}
+	runtime.observation = &observationBridge{
+		store:   observation.NewStore(stateStore.DB()),
+		broker:  observation.NewBroker(),
+		resolve: runtime.observationTarget,
+	}
+	taskManager.SetOutputSink(runtime.observeTaskOutput)
+	runtime.observerSocket = observation.NewSocketServer(
+		observation.SocketPath(home), runtime.observation.store, runtime.observation.broker,
+		func(name string) bool {
+			_, ok := reg.Get(strings.TrimSpace(name))
+			return ok
+		},
+	)
+	runtime.remote.SetEventObserver(runtime.observeRemoteEvent)
 	// Build the catalog snapshot once at construction time so direct service
 	// calls and the real MCP server observe the same registered schema.
 	catalog := mcpserver.NewMCPServer("mcpx", runtime.build.Version, mcpserver.WithToolCapabilities(true))
@@ -340,6 +357,12 @@ func (r *Runtime) Start() error {
 		mcpserver.WithInstructions(agentGuidanceInstructions()),
 	)
 	r.registerTools(s)
+	if r.observerSocket != nil {
+		if err := r.observerSocket.Start(); err != nil {
+			logging.With("component", "workspace_observer").Error("start socket failed", "err", err)
+			return fmt.Errorf("start workspace observer: %w", err)
+		}
+	}
 	// Snapshot registered tools for schema revision / client refresh (A01).
 	if listed := s.ListTools(); listed != nil {
 		r.toolIndexMu.Lock()
@@ -413,11 +436,21 @@ func (r *Runtime) Close() error {
 		return nil
 	}
 	r.closeOnce.Do(func() {
+		if r.observerSocket != nil {
+			if err := r.observerSocket.Close(); err != nil {
+				r.closeErr = err
+			}
+		}
+		if r.observation != nil && r.observation.broker != nil {
+			r.observation.broker.Close()
+		}
 		if r.tasks != nil {
 			r.tasks.Close()
 		}
 		if r.state != nil {
-			r.closeErr = r.state.Close()
+			if err := r.state.Close(); r.closeErr == nil {
+				r.closeErr = err
+			}
 		}
 	})
 	return r.closeErr

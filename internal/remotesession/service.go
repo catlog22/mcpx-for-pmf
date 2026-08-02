@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"mcpx/internal/auth"
@@ -26,12 +27,35 @@ var (
 )
 
 type Service struct {
-	db  *sql.DB
-	now func() time.Time
+	db         *sql.DB
+	now        func() time.Time
+	observer   EventObserver
+	observerMu sync.RWMutex
 }
+
+// EventObserver receives a committed Remote Session event. Observers must
+// treat the callback as best-effort and must not mutate the business event.
+type EventObserver func(Session, Event)
 
 func NewService(db *sql.DB) *Service {
 	return &Service{db: db, now: time.Now}
+}
+
+// SetEventObserver configures an optional lifecycle bridge for read-only
+// observers. The callback runs after the business transaction has committed.
+func (s *Service) SetEventObserver(observer EventObserver) {
+	s.observerMu.Lock()
+	s.observer = observer
+	s.observerMu.Unlock()
+}
+
+func (s *Service) notifyEvent(session Session, event Event) {
+	s.observerMu.RLock()
+	observer := s.observer
+	s.observerMu.RUnlock()
+	if observer != nil {
+		observer(session, event)
+	}
 }
 
 type Session struct {
@@ -185,9 +209,12 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, in Creat
 		handoffID, session.ID, tokenDigest(resumeToken), principal.ID, now.UnixMilli(), expiresAt.UnixMilli()); err != nil {
 		return CreateResult{}, err
 	}
-	if err := insertEventTx(ctx, tx, Event{RemoteSessionID: session.ID, PrincipalID: principal.ID, ClientName: in.ClientName, Type: "remote_session.created", Summary: session.Label, CreatedAt: now}); err != nil {
+	createdEvent := Event{RemoteSessionID: session.ID, PrincipalID: principal.ID, ClientName: in.ClientName, Type: "remote_session.created", Summary: session.Label, CreatedAt: now}
+	sequence, err := insertEventTx(ctx, tx, createdEvent)
+	if err != nil {
 		return CreateResult{}, err
 	}
+	createdEvent.Sequence = sequence
 	result := CreateResult{Session: session, ResumeToken: resumeToken, ExpiresAt: expiresAt}
 	if in.ClientRequestID != "" {
 		// Idempotency records deliberately exclude the one-time resume token.
@@ -208,6 +235,7 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, in Creat
 	if err := tx.Commit(); err != nil {
 		return CreateResult{}, err
 	}
+	s.notifyEvent(session, createdEvent)
 	return result, nil
 }
 
@@ -398,13 +426,21 @@ func (s *Service) Attach(ctx context.Context, principal auth.Principal, token, c
 	if err := recordClientTx(ctx, tx, sessionID, principal.ID, clientName, clientVersion, now); err != nil {
 		return Session{}, err
 	}
-	if err := insertEventTx(ctx, tx, Event{RemoteSessionID: sessionID, PrincipalID: principal.ID, ClientName: clientName, Type: "remote_session.attached", Summary: "attached as " + role, CreatedAt: now}); err != nil {
+	attachedEvent := Event{RemoteSessionID: sessionID, PrincipalID: principal.ID, ClientName: clientName, Type: "remote_session.attached", Summary: "attached as " + role, CreatedAt: now}
+	sequence, err := insertEventTx(ctx, tx, attachedEvent)
+	if err != nil {
 		return Session{}, err
 	}
+	attachedEvent.Sequence = sequence
 	if err := tx.Commit(); err != nil {
 		return Session{}, err
 	}
-	return s.Get(ctx, principal, sessionID)
+	session, err := s.Get(ctx, principal, sessionID)
+	if err != nil {
+		return Session{}, err
+	}
+	s.notifyEvent(session, attachedEvent)
+	return session, nil
 }
 
 func (s *Service) Close(ctx context.Context, principal auth.Principal, sessionID, status string) (Session, error) {
@@ -425,14 +461,21 @@ func (s *Service) Close(ctx context.Context, principal auth.Principal, sessionID
 }
 
 func (s *Service) AddEvent(ctx context.Context, principal auth.Principal, event Event) error {
-	if _, err := s.Get(ctx, principal, event.RemoteSessionID); err != nil {
+	session, err := s.Get(ctx, principal, event.RemoteSessionID)
+	if err != nil {
 		return err
 	}
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = s.now().UTC()
 	}
 	event.PrincipalID = principal.ID
-	return insertEvent(ctx, s.db, event)
+	sequence, err := insertEvent(ctx, s.db, event)
+	if err != nil {
+		return err
+	}
+	event.Sequence = sequence
+	s.notifyEvent(session, event)
+	return nil
 }
 
 func (s *Service) Events(ctx context.Context, principal auth.Principal, sessionID string, in EventsInput) ([]Event, error) {
@@ -524,22 +567,30 @@ func scanSession(row scanner) (Session, error) {
 	return session, nil
 }
 
-func insertEvent(ctx context.Context, db *sql.DB, event Event) error {
+func insertEvent(ctx context.Context, db *sql.DB, event Event) (int64, error) {
 	metadata, _ := json.Marshal(event.Metadata)
-	_, err := db.ExecContext(ctx, `INSERT INTO remote_session_events
+	result, err := db.ExecContext(ctx, `INSERT INTO remote_session_events
         (remote_session_id, principal_id, client_name, event_type, operation_id, summary, resource_uri, metadata_json, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, event.RemoteSessionID, nullable(event.PrincipalID), nullable(event.ClientName),
 		event.Type, nullable(event.OperationID), event.Summary, nullable(event.ResourceURI), string(metadata), event.CreatedAt.UnixMilli())
-	return err
+	if err != nil {
+		return 0, err
+	}
+	sequence, err := result.LastInsertId()
+	return sequence, err
 }
 
-func insertEventTx(ctx context.Context, tx *sql.Tx, event Event) error {
+func insertEventTx(ctx context.Context, tx *sql.Tx, event Event) (int64, error) {
 	metadata, _ := json.Marshal(event.Metadata)
-	_, err := tx.ExecContext(ctx, `INSERT INTO remote_session_events
+	result, err := tx.ExecContext(ctx, `INSERT INTO remote_session_events
         (remote_session_id, principal_id, client_name, event_type, operation_id, summary, resource_uri, metadata_json, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, event.RemoteSessionID, nullable(event.PrincipalID), nullable(event.ClientName),
 		event.Type, nullable(event.OperationID), event.Summary, nullable(event.ResourceURI), string(metadata), event.CreatedAt.UnixMilli())
-	return err
+	if err != nil {
+		return 0, err
+	}
+	sequence, err := result.LastInsertId()
+	return sequence, err
 }
 
 func validStatus(status string) bool {

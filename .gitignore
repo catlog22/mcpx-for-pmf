@@ -6,6 +6,4 @@
 .goreleaser.baseline*
 
 # local product docs (not in repo)
-/prd/
-/docs/superpowers/
-/.firecrawl/
+/docs/

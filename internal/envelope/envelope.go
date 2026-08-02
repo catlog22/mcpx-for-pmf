@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+const MaxIntentBytes = 512
+
 // Status is the unified response status.
 type Status string
 
@@ -26,6 +28,8 @@ type Request struct {
 	// RequestID and StartedAtMs are populated by the Gateway Runtime Context,
 	// never by MCP tool arguments.
 	RequestID       string         `json:"-"`
+	Intent          string         `json:"intent,omitempty"`
+	ProgressSummary string         `json:"progress_summary,omitempty"`
 	RemoteSessionID string         `json:"remote_session_id,omitempty"`
 	Workspace       string         `json:"workspace,omitempty"`
 	StartedAtMs     int64          `json:"-"`
@@ -168,7 +172,7 @@ func ParseRequest(raw json.RawMessage) (Request, error) {
 		return Request{}, err
 	}
 	for key, value := range flat {
-		if key == "remote_session_id" || key == "workspace" || key == "payload" || isRuntimeField(key) {
+		if key == "intent" || key == "progress_summary" || key == "remote_session_id" || key == "workspace" || key == "payload" || isRuntimeField(key) {
 			continue
 		}
 		if _, exists := req.Payload[key]; !exists {

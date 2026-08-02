@@ -90,6 +90,11 @@ func TestCapabilityListIncludesInstructionsSkillsAndRoleState(t *testing.T) {
 	t.Cleanup(func() { _ = runtime.Close() })
 	ctx := authContextForCapabilities()
 	created := callEnvelope(t, runtime.toolSessionOpen, ctx, map[string]any{"workspace": "project"})
+	createdData := created["data"].(map[string]any)
+	openedSkills := createdData["skills"].(map[string]any)["items"].([]any)
+	if len(openedSkills) != 1 || openedSkills[0].(map[string]any)["name"] != "review" {
+		t.Fatalf("session_open skills should follow server config: %+v", createdData["skills"])
+	}
 	remoteID, _ := created["remote_session_id"].(string)
 	response := callEnvelope(t, runtime.toolCapabilityList, ctx, map[string]any{"remote_session_id": remoteID})
 	data := response["data"].(map[string]any)
@@ -117,7 +122,7 @@ func TestCapabilityListIncludesInstructionsSkillsAndRoleState(t *testing.T) {
 	}
 
 	var readRequest mcp.CallToolRequest
-	readRequest.Params.Arguments = map[string]any{"remote_session_id": remoteID, "id": "project"}
+	readRequest.Params.Arguments = map[string]any{"intent": "read project instructions", "remote_session_id": remoteID, "id": "project"}
 	readResult, err := runtime.toolAgentInstructionRead(ctx, readRequest)
 	if err != nil {
 		t.Fatal(err)

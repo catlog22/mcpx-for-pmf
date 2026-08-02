@@ -61,7 +61,27 @@ func (r *Runtime) remoteRequest(ctx context.Context, req mcp.CallToolRequest) (e
 		out, _ := r.resultJSON(resp)
 		return envReq, auth.Principal{}, out
 	}
+	if err := validateIntent(envReq.Intent); err != nil {
+		code := "INTENT_REQUIRED"
+		if strings.TrimSpace(envReq.Intent) != "" {
+			code = "INTENT_TOO_LONG"
+		}
+		resp := envelope.Fail(envelope.StatusError, envReq.RequestID, envReq.Workspace, nil, code, err.Error())
+		out, _ := r.resultJSON(resp)
+		return envReq, principal, out
+	}
 	return envReq, principal, nil
+}
+
+func validateIntent(intent string) error {
+	intent = strings.TrimSpace(intent)
+	if intent == "" {
+		return fmt.Errorf("intent is required")
+	}
+	if len(intent) > envelope.MaxIntentBytes {
+		return fmt.Errorf("intent exceeds %d bytes", envelope.MaxIntentBytes)
+	}
+	return nil
 }
 
 func (r *Runtime) remoteResult(envReq envelope.Request, remoteSessionID, workspace string, data any) (*mcp.CallToolResult, error) {

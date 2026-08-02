@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -38,17 +37,7 @@ func TestInstrumentToolPublishesARCPresentationAndPreservesAttachments(t *testin
 	if !strings.Contains(text.Text, "### Changeset chg_test") {
 		t.Fatalf("code change text must be the rendered display, got: %q", text.Text)
 	}
-	if wrapped.StructuredContent == nil {
-		t.Fatal("structured content missing")
-	}
-	raw, err := json.Marshal(wrapped.StructuredContent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var envelope map[string]any
-	if err := json.Unmarshal(raw, &envelope); err != nil {
-		t.Fatal(err)
-	}
+	envelope := decodeARCEnvelope(t, wrapped)
 	mcpx, _ := envelope["mcpx"].(map[string]any)
 	if mcpx["version"] != "1.2" {
 		t.Fatalf("ARC version = %v", mcpx["version"])

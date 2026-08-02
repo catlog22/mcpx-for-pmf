@@ -87,17 +87,7 @@ func TestInstrumentToolUsesRuntimeContextWithoutArgumentMetadata(t *testing.T) {
 	if err != nil || !called {
 		t.Fatalf("instrumented call err=%v called=%v", err, called)
 	}
-	if result.StructuredContent == nil {
-		t.Fatal("ARC structured content missing")
-	}
-	raw, err := json.Marshal(result.StructuredContent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var envelope map[string]any
-	if err := json.Unmarshal(raw, &envelope); err != nil {
-		t.Fatal(err)
-	}
+	envelope := decodeARCEnvelope(t, result)
 	mcpx, _ := envelope["mcpx"].(map[string]any)
 	trace, _ := mcpx["trace"].(map[string]any)
 	if trace["request_id"] != "req_context" || trace["trace_id"] != "trace_context" || trace["span_id"] != "span_context" {

@@ -33,6 +33,7 @@ func TestChangeExecuteDoesNotWriteDiffFileToWorkspace(t *testing.T) {
 
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]any{
+		"intent":            "apply a file change",
 		"remote_session_id": created.Session.ID,
 		"summary":           "return diff without workspace artifact",
 		"operations": []map[string]any{
@@ -99,6 +100,7 @@ func TestChangeExecutePatchTooLargeHasRecovery(t *testing.T) {
 	content := strings.Repeat("line\n", 20)
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]any{
+		"intent":            "apply an oversized patch",
 		"remote_session_id": created.Session.ID,
 		"summary":           "oversized patch",
 		"operations": []map[string]any{
@@ -146,6 +148,7 @@ func TestChangeExecuteMissingRevisionHasRecovery(t *testing.T) {
 
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]any{
+		"intent":            "replace a file with a stale revision",
 		"remote_session_id": created.Session.ID,
 		"summary":           "replace without revision",
 		"operations": []map[string]any{
@@ -191,6 +194,7 @@ func TestChangePrepareDuplicatePathHasRecovery(t *testing.T) {
 
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]any{
+		"intent":            "prepare the duplicate-path change",
 		"remote_session_id": created.Session.ID,
 		"action":            "prepare",
 		"summary":           "duplicate path",

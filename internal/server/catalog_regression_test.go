@@ -36,9 +36,12 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 	if commandSchema.Properties["purpose"] == nil || commandSchema.Properties["scope"] == nil {
 		t.Fatalf("command_execute schema must expose purpose and scope: %+v", commandSchema.Properties)
 	}
+	if _, exists := tools["session_open"].Tool.InputSchema.Properties["include_skills"]; exists {
+		t.Fatal("session_open must not expose request-level include_skills; use server discovery.skills config")
+	}
 
 	var request mcp.CallToolRequest
-	request.Params.Arguments = map[string]any{"workspace": "demo"}
+	request.Params.Arguments = map[string]any{"intent": "open the demo workspace", "workspace": "demo"}
 	result, err := rt.toolSessionOpen(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +66,7 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 	remote := data["remote_session"].(map[string]any)
 	remoteID := remote["id"].(string)
 	var capabilityRequest mcp.CallToolRequest
-	capabilityRequest.Params.Arguments = map[string]any{"action": "capabilities", "remote_session_id": remoteID}
+	capabilityRequest.Params.Arguments = map[string]any{"intent": "inspect capabilities", "action": "capabilities", "remote_session_id": remoteID}
 	capabilityResult, err := rt.toolRuntimeInspect(context.Background(), capabilityRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +78,7 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 		}
 	}
 
-	capabilityRequest.Params.Arguments = map[string]any{"action": "capabilities", "remote_session_id": remoteID, "include_tool_schemas": true}
+	capabilityRequest.Params.Arguments = map[string]any{"intent": "inspect capability schemas", "action": "capabilities", "remote_session_id": remoteID, "include_tool_schemas": true}
 	capabilityResult, err = rt.toolRuntimeInspect(context.Background(), capabilityRequest)
 	if err != nil {
 		t.Fatal(err)

@@ -21,6 +21,8 @@ func main() {
 	// Subcommands (before flag.Parse so they own their flags).
 	if len(os.Args) >= 2 {
 		switch os.Args[1] {
+		case "workspace":
+			os.Exit(runWorkspaceObserver(os.Args[2:]))
 		case "oauth-register":
 			os.Exit(runOAuthRegister(os.Args[2:]))
 		case "help", "-h", "--help":
@@ -67,6 +69,7 @@ func printUsage() {
 
 Usage:
   mcpx-server [flags]                 启动 Streamable HTTP 服务
+  mcpx-server workspace [flags] <name> 只读观测 Workspace 事件
   mcpx-server oauth-register [url]    动态注册 OAuth 客户端（粘贴 ChatGPT 回调 URL）
   mcpx-server -version
 

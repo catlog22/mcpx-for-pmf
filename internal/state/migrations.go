@@ -307,6 +307,27 @@ var migrations = []string{
 	`ALTER TABLE approvals ADD COLUMN content_key TEXT NOT NULL DEFAULT '';
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_approvals_content_key
 		ON approvals(remote_session_id, content_key) WHERE status = 'pending' AND content_key <> '';`,
+	`CREATE TABLE IF NOT EXISTS observation_events (
+		sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+		workspace_name TEXT NOT NULL,
+		remote_session_id TEXT NOT NULL DEFAULT '',
+		request_id TEXT NOT NULL DEFAULT '',
+		operation_id TEXT NOT NULL DEFAULT '',
+		tool_name TEXT NOT NULL DEFAULT '',
+		event_type TEXT NOT NULL,
+		intent TEXT NOT NULL DEFAULT '',
+		input_json TEXT NOT NULL DEFAULT '{}',
+		output_json TEXT NOT NULL DEFAULT '{}',
+		summary TEXT NOT NULL DEFAULT '',
+		resource_uri TEXT NOT NULL DEFAULT '',
+		stream TEXT NOT NULL DEFAULT '',
+		stream_offset INTEGER NOT NULL DEFAULT 0,
+		truncated INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_observation_events_workspace_sequence
+		ON observation_events(workspace_name, sequence);`,
+	`ALTER TABLE observation_events ADD COLUMN progress_summary TEXT NOT NULL DEFAULT '';`,
 }
 
 func applyMigrations(ctx context.Context, db *sql.DB) error {

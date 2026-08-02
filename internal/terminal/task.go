@@ -29,6 +29,24 @@ const (
 	TaskFailed      TaskStatus = "failed"
 )
 
+// OutputChunk is a single stdout/stderr increment emitted after the task log
+// writer has accepted the bytes. Offset is the absolute byte offset before
+// this chunk within its stream.
+type OutputChunk struct {
+	TaskID          string
+	RemoteSessionID string
+	WorkspaceName   string
+	Command         string
+	Stream          string
+	Offset          int64
+	Data            []byte
+}
+
+// OutputSink observes task output. Implementations must be prepared for
+// concurrent calls and should return quickly; the callback runs outside the
+// task mutex but on the command's output-copy path.
+type OutputSink func(OutputChunk)
+
 // Task is a background command.
 type Task struct {
 	ID              string
@@ -59,11 +77,14 @@ type Task struct {
 	stderrBuf     bytes.Buffer
 	stdoutBase    int
 	stderrBase    int
+	stdoutOffset  int64
+	stderrOffset  int64
 	stdin         io.WriteCloser
 	done          chan struct{}
 	db            *sql.DB
 	cmd           *exec.Cmd
 	cancel        context.CancelFunc
+	outputSink    func(OutputChunk)
 }
 
 const maxTaskLogBytes = 1 << 20
@@ -71,16 +92,38 @@ const maxPersistedTaskLogBytes = 32 << 20
 
 // TaskManager tracks long tasks per process.
 type TaskManager struct {
-	mu     sync.Mutex
-	tasks  map[string]*Task
-	seq    uint64
-	db     *sql.DB
-	logDir string
+	mu         sync.Mutex
+	tasks      map[string]*Task
+	seq        uint64
+	db         *sql.DB
+	logDir     string
+	sinkMu     sync.RWMutex
+	outputSink OutputSink
 }
 
 // NewTaskManager creates an empty manager.
 func NewTaskManager() *TaskManager {
 	return &TaskManager{tasks: map[string]*Task{}}
+}
+
+// SetOutputSink replaces the non-blocking task output observer. Passing nil
+// disables observation without changing task execution or log persistence.
+func (m *TaskManager) SetOutputSink(sink OutputSink) {
+	if m == nil {
+		return
+	}
+	m.sinkMu.Lock()
+	m.outputSink = sink
+	m.sinkMu.Unlock()
+}
+
+func (m *TaskManager) emitOutput(chunk OutputChunk) {
+	m.sinkMu.RLock()
+	sink := m.outputSink
+	m.sinkMu.RUnlock()
+	if sink != nil {
+		sink(chunk)
+	}
 }
 
 // NewPersistentTaskManager restores queryable task metadata and marks tasks
@@ -134,7 +177,7 @@ func (m *TaskManager) start(_ context.Context, remoteSessionID, workspaceName, w
 	t := &Task{
 		ID: id, RemoteSessionID: remoteSessionID, WorkspaceName: workspaceName, Command: command,
 		WorkDir: workDir, Status: TaskRunning, StartedAt: time.Now().UTC(), db: m.db,
-		cmd: cmd, cancel: cancel, done: make(chan struct{}),
+		cmd: cmd, cancel: cancel, done: make(chan struct{}), outputSink: m.emitOutput,
 	}
 	if m.db != nil {
 		t.logPath = filepath.Join(m.logDir, id+".log")
@@ -228,9 +271,9 @@ type lockedWriter struct {
 
 func (w *lockedWriter) Write(p []byte) (int, error) {
 	w.t.mu.Lock()
-	defer w.t.mu.Unlock()
 	n := len(p)
 	if err := writeBounded(w.t.logFile, &w.t.logSize, p, &w.t.logTruncated); err != nil {
+		w.t.mu.Unlock()
 		return n, err
 	}
 	var (
@@ -244,8 +287,18 @@ func (w *lockedWriter) Write(p []byte) (int, error) {
 	} else {
 		streamFile, streamSize, streamBuf, streamBase = w.t.stdoutLogFile, &w.t.stdoutLogSize, &w.t.stdoutBuf, &w.t.stdoutBase
 	}
+	offset := w.t.stdoutOffset
+	if w.stream == "stderr" {
+		offset = w.t.stderrOffset
+	}
 	if err := writeBounded(streamFile, streamSize, p, &w.t.logTruncated); err != nil {
+		w.t.mu.Unlock()
 		return n, err
+	}
+	if w.stream == "stderr" {
+		w.t.stderrOffset += int64(n)
+	} else {
+		w.t.stdoutOffset += int64(n)
 	}
 	_, _ = streamBuf.Write(p)
 	if overflow := streamBuf.Len() - maxTaskLogBytes; overflow > 0 {
@@ -256,6 +309,15 @@ func (w *lockedWriter) Write(p []byte) (int, error) {
 	if overflow := w.t.logBuf.Len() - maxTaskLogBytes; overflow > 0 {
 		w.t.logBuf.Next(overflow)
 		w.t.logBase += overflow
+	}
+	sink := w.t.outputSink
+	chunk := OutputChunk{
+		TaskID: w.t.ID, RemoteSessionID: w.t.RemoteSessionID, WorkspaceName: w.t.WorkspaceName,
+		Command: w.t.Command, Stream: w.stream, Offset: offset, Data: append([]byte(nil), p...),
+	}
+	w.t.mu.Unlock()
+	if sink != nil {
+		sink(chunk)
 	}
 	return n, nil
 }

@@ -62,7 +62,7 @@ func TestParseRequest(t *testing.T) {
 }
 
 func TestParseRequestMergesFlatArgumentsIntoPayload(t *testing.T) {
-	req, err := ParseRequest(json.RawMessage(`{"workspace":"demo","command":"pwd","payload":{"command":"echo legacy"},"task_id":"t1"}`))
+	req, err := ParseRequest(json.RawMessage(`{"intent":"inspect workspace","progress_summary":"已完成定位，下一步读取文件","workspace":"demo","command":"pwd","payload":{"command":"echo legacy"},"task_id":"t1"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,5 +71,17 @@ func TestParseRequestMergesFlatArgumentsIntoPayload(t *testing.T) {
 	}
 	if req.Payload["task_id"] != "t1" {
 		t.Fatalf("flat argument missing: %+v", req.Payload)
+	}
+	if req.Intent != "inspect workspace" {
+		t.Fatalf("intent missing: %q", req.Intent)
+	}
+	if req.ProgressSummary != "已完成定位，下一步读取文件" {
+		t.Fatalf("progress summary missing: %q", req.ProgressSummary)
+	}
+	if _, exists := req.Payload["intent"]; exists {
+		t.Fatalf("intent leaked into payload: %+v", req.Payload)
+	}
+	if _, exists := req.Payload["progress_summary"]; exists {
+		t.Fatalf("progress summary leaked into payload: %+v", req.Payload)
 	}
 }
