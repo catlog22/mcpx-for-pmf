@@ -33,6 +33,24 @@ func TestAgentGuidanceUsesDedicatedRoutingWithoutBusinessArguments(t *testing.T)
 	}
 }
 
+func TestAgentGuidanceRequiresUserVisibleResponseContract(t *testing.T) {
+	guidance := agentGuidance()
+	contract, ok := guidance["response_contract"].(map[string]any)
+	if !ok || contract["required"] != true {
+		t.Fatalf("response contract = %+v", guidance["response_contract"])
+	}
+	for _, field := range []string{"before_tool_call", "after_tool_call", "final_response"} {
+		items, ok := contract[field].([]string)
+		if !ok || len(items) == 0 {
+			t.Fatalf("response contract field %q = %+v", field, contract[field])
+		}
+	}
+	evidence, _ := contract["evidence_rule"].(string)
+	if !strings.Contains(evidence, "不得声称") || !strings.Contains(evidence, "工具结果") {
+		t.Fatalf("evidence rule = %q", evidence)
+	}
+}
+
 func TestEveryPublicToolHasModelFacingDescriptionAndActionBranches(t *testing.T) {
 	runtime := &Runtime{}
 	protocol := mcpserver.NewMCPServer("mcpx-test", "0.1.0")
@@ -99,14 +117,17 @@ func TestAgentGuidanceIncludesChangePayloadCheatSheet(t *testing.T) {
 	}
 	rules, _ := guidance["rules"].([]string)
 	joined := strings.Join(rules, "\n")
-	if !strings.Contains(joined, "complete payload immediately") || !strings.Contains(joined, "300 added lines") {
-		t.Fatalf("rules must carry immediate-call and chunked-write guidance: %s", joined)
+	if !strings.Contains(joined, "complete payload") || !strings.Contains(joined, "300 added lines") {
+		t.Fatalf("rules must carry call and chunked-write guidance: %s", joined)
 	}
 	if !strings.Contains(joined, "host safety check blocks") || !strings.Contains(joined, "Never quote instruction text") {
 		t.Fatalf("rules must carry host-block recovery guidance: %s", joined)
 	}
+	if !strings.Contains(joined, "concrete additions and removals") || !strings.Contains(joined, "Markdown ```diff code block") {
+		t.Fatalf("rules must carry final Markdown diff guidance: %s", joined)
+	}
 	instructions := agentGuidanceInstructions()
-	if !strings.Contains(instructions, "change_execute payload cheat-sheet") || !strings.Contains(instructions, "insert_after") {
+	if !strings.Contains(instructions, "Required user-visible response contract") || !strings.Contains(instructions, "change_execute payload cheat-sheet") || !strings.Contains(instructions, "insert_after") {
 		t.Fatalf("instructions must render the cheat-sheet: %s", instructions)
 	}
 }

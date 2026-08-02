@@ -10,10 +10,11 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"mcpx/internal/changeset"
 	"mcpx/internal/remotesession"
 )
 
-func TestChangeExecutePersistsDiffFile(t *testing.T) {
+func TestChangeExecuteDoesNotWriteDiffFileToWorkspace(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	principal, err := rt.principalFromContext(context.Background())
 	if err != nil {
@@ -33,7 +34,7 @@ func TestChangeExecutePersistsDiffFile(t *testing.T) {
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]any{
 		"remote_session_id": created.Session.ID,
-		"summary":           "persist diff",
+		"summary":           "return diff without workspace artifact",
 		"operations": []map[string]any{
 			{"operation": "create", "path": "hello.go", "content": "package demo\n\nconst Hello = 1\n"},
 		},
@@ -44,12 +45,36 @@ func TestChangeExecutePersistsDiffFile(t *testing.T) {
 	}
 	response := decodeToolResult(t, result)
 	data, _ := response["data"].(map[string]any)
-	diffFile, _ := data["diff_file"].(string)
-	if !strings.HasPrefix(diffFile, ".mcpx/diffs/") || !strings.HasSuffix(diffFile, ".diff") {
-		t.Fatalf("change result must expose a persisted diff file: %+v", data)
+	if _, exists := data["diff_file"]; exists {
+		t.Fatalf("change result must not expose a workspace diff file: %+v", data)
 	}
-	if _, err := os.Stat(filepath.Join(registered.Path, filepath.FromSlash(diffFile))); err != nil {
-		t.Fatalf("persisted diff file missing: %v", err)
+	if _, err := os.Stat(filepath.Join(registered.Path, ".mcpx")); !os.IsNotExist(err) {
+		t.Fatalf("change execution must not create workspace .mcpx artifacts: %v", err)
+	}
+}
+
+func TestChangeSummaryIncludesPerFileDiffPreview(t *testing.T) {
+	item := changeset.Changeset{
+		ID: "chg_preview",
+		Files: []changeset.FileChange{{
+			Operation: "update",
+			Path:      "ChatGPT-互联网医院小程序修复.txt",
+			Original:  []byte("旧消息链路\n"),
+			Proposed:  []byte("新消息链路\n"),
+		}},
+	}
+
+	dto := changeSummaryDTO(item)
+	files, ok := dto["files"].([]map[string]any)
+	if !ok || len(files) != 1 {
+		t.Fatalf("per-file DTO missing: %+v", dto["files"])
+	}
+	if files[0]["path"] != item.Files[0].Path {
+		t.Fatalf("per-file path = %v", files[0]["path"])
+	}
+	diff, _ := files[0]["diff"].(string)
+	if !strings.Contains(diff, "-旧消息链路") || !strings.Contains(diff, "+新消息链路") {
+		t.Fatalf("per-file diff preview must include concrete changes: %q", diff)
 	}
 }
 

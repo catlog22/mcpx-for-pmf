@@ -224,8 +224,8 @@ func TestChangesetMCPDiffAndApprovalSurviveTransportChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := preparedResult.Content[0].(mcp.TextContent).Text
-	if strings.Contains(text, "Value = 2") || !strings.Contains(text, "Changeset") {
-		t.Fatalf("content should be a concise diff summary:\n%s", text)
+	if !strings.Contains(text, "```diff") || !strings.Contains(text, "Value = 2") || !strings.Contains(text, "demo.go") {
+		t.Fatalf("content should include a Markdown diff with the changed file:\n%s", text)
 	}
 	preparedDTO, ok := preparedResult.StructuredContent.(map[string]any)
 	if !ok {
@@ -262,6 +262,15 @@ func TestChangesetMCPDiffAndApprovalSurviveTransportChange(t *testing.T) {
 	}
 	pendingData := pending["data"].(map[string]any)
 	approvalID := pendingData["approval_id"].(string)
+	pendingFiles, _ := pendingData["files"].([]any)
+	if len(pendingFiles) != 1 {
+		t.Fatalf("approval response must include changed files: %+v", pendingData)
+	}
+	pendingFile, _ := pendingFiles[0].(map[string]any)
+	pendingDiff, _ := pendingFile["diff"].(string)
+	if !strings.Contains(pendingDiff, "-const Value = 1") || !strings.Contains(pendingDiff, "+const Value = 2") {
+		t.Fatalf("approval response must include concrete file diff: %+v", pendingFile)
+	}
 	missingSession := callEnvelope(t, runtime.toolApprovalConfirm, contextFor("transport-confirm-missing"), map[string]any{
 		"approval_id": approvalID,
 		"approve":     true,

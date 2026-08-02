@@ -1294,19 +1294,26 @@ func digestFiles(files []FileChange) string {
 func unifiedDiff(files []FileChange) string {
 	var builder strings.Builder
 	for _, item := range files {
-		oldPath, newPath := "a/"+item.Path, "b/"+item.Path
-		oldContent, newContent := item.Original, item.Proposed
-		switch item.Operation {
-		case "create":
-			oldPath = "/dev/null"
-		case "delete":
-			newPath = "/dev/null"
-		case "rename":
-			newPath, newContent = "b/"+item.NewPath, item.Original
-		}
-		builder.WriteString(diffFile(oldPath, newPath, oldContent, newContent))
+		builder.WriteString(UnifiedDiffForFile(item))
 	}
 	return builder.String()
+}
+
+// UnifiedDiffForFile returns the displayable Unified Diff for one file change.
+// It is shared by the Changeset result and its per-file UI presentation so
+// both views describe the same proposed content.
+func UnifiedDiffForFile(item FileChange) string {
+	oldPath, newPath := "a/"+item.Path, "b/"+item.Path
+	oldContent, newContent := item.Original, item.Proposed
+	switch item.Operation {
+	case "create":
+		oldPath = "/dev/null"
+	case "delete":
+		newPath = "/dev/null"
+	case "rename":
+		newPath, newContent = "b/"+item.NewPath, item.Original
+	}
+	return diffFile(oldPath, newPath, oldContent, newContent)
 }
 
 func diffFile(oldPath, newPath string, oldContent, newContent []byte) string {

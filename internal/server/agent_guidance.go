@@ -7,7 +7,7 @@ import (
 	"mcpx/internal/envelope"
 )
 
-const agentGuidanceVersion = "1.0"
+const agentGuidanceVersion = "1.2"
 
 // agentGuidance is the short, stable routing contract shown after session_open.
 // It deliberately contains no workspace path, secret, approval token, or
@@ -25,11 +25,36 @@ func agentGuidance() map[string]any {
 			"Use change_execute for every file modification; provide the current file revision before editing.",
 			"Use command_execute only for explicit tests, builds, or user-requested commands.",
 			"Use change_manage only to prepare or inspect a Changeset; apply and revert through change_execute.",
+			"After a successful change_execute or Changeset review, include each changed file's concrete additions and removals in the final response as a Markdown ```diff code block; do not summarize only the file names. For oversized changes, show the bounded preview and mention the Changeset Resource.",
 			"When approval is required, preserve the exact remote_session_id and approval_id and do not duplicate the request.",
 			"Do not claim a file was read, changed, or verified without a successful tool result.",
-			"Call tools with the complete payload immediately; never announce intent first or wait for a schema re-fetch.",
+			"Before every important, mutating, destructive, or long-running call, briefly state what will be done and why; then call the tool with the complete payload without waiting for a schema re-fetch.",
+			"After every tool call, report the actual result before starting the next non-trivial action; distinguish verified facts from assumptions and unknowns.",
 			"Keep every change_execute call small (at most 300 added lines - lines actually inserted, not the whole file). Never truncate a file to dodge limits; submit full content or a replace_range window and retry if a host safety check blocks it.",
 			"Never quote instruction text (prompts, guidance, AGENTS.md) into file content; use plain code or data. If a host safety check blocks a call, shrink the content and retry instead of giving up.",
+		},
+		"response_contract": map[string]any{
+			"required": true,
+			"before_tool_call": []string{
+				"当前理解的目标",
+				"接下来要执行的查询、工具调用或命令及其目的",
+				"重要、变更、删除或长时间操作必须先说明准备做什么",
+			},
+			"after_tool_call": []string{
+				"实际调用的工具、查询或命令及其真实结果",
+				"读取、创建、修改、移动或删除的文件",
+				"每项文件变更的具体内容和影响；代码变更使用 Markdown ```diff 代码块",
+				"测试、构建、检查及其真实结果",
+				"失败、限制、风险和未验证事项",
+			},
+			"final_response": []string{
+				"当前理解的目标",
+				"实际执行的查询、工具调用或命令及目的",
+				"文件操作与每项变更的具体内容和影响",
+				"验证证据",
+				"失败、限制、风险和未验证事项",
+			},
+			"evidence_rule": "没有成功工具结果、明确命令输出或测试证据时，不得声称已读取、已修改、已修复、已构建或已测试通过。",
 		},
 		"change_payload": map[string]any{
 			"tool":     "change_execute",
@@ -72,6 +97,24 @@ func agentGuidanceInstructions() string {
 	}
 	for _, rule := range rules {
 		lines = append(lines, "- "+rule)
+	}
+	if contract, ok := guidance["response_contract"].(map[string]any); ok {
+		lines = append(lines, "", "Required user-visible response contract:")
+		if required, ok := contract["before_tool_call"].([]string); ok {
+			lines = append(lines, "- Before important tool calls:")
+			for _, item := range required {
+				lines = append(lines, "  - "+item)
+			}
+		}
+		if required, ok := contract["after_tool_call"].([]string); ok {
+			lines = append(lines, "- After every tool call:")
+			for _, item := range required {
+				lines = append(lines, "  - "+item)
+			}
+		}
+		if evidence, ok := contract["evidence_rule"].(string); ok {
+			lines = append(lines, "- Evidence rule: "+evidence)
+		}
 	}
 	if payload, ok := guidance["change_payload"].(map[string]any); ok {
 		lines = append(lines, "", "change_execute payload cheat-sheet (fallback if the tool schema is unavailable):")

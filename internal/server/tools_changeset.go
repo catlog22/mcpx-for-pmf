@@ -5,9 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
@@ -51,7 +50,7 @@ func (r *Runtime) toolChangePrepare(ctx context.Context, req mcp.CallToolRequest
 		return r.changeError(envReq, session.ID, session.WorkspaceName, err)
 	}
 	_ = r.remote.AddEvent(ctx, principal, remotesession.Event{RemoteSessionID: session.ID, Type: "changeset.prepared", OperationID: prepared.ID, Summary: prepared.Summary})
-	return changeDiffResult(session.WorkspacePath, prepared), nil
+	return changeDiffResult(prepared), nil
 }
 
 func (r *Runtime) toolChangeDiff(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -67,7 +66,7 @@ func (r *Runtime) toolChangeDiff(ctx context.Context, req mcp.CallToolRequest) (
 	if item.RemoteSessionID != session.ID {
 		return r.changeError(envReq, session.ID, session.WorkspaceName, changeset.ErrNotFound)
 	}
-	return changeDiffResult(session.WorkspacePath, item), nil
+	return changeDiffResult(item), nil
 }
 
 func (r *Runtime) toolChangeApply(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -106,11 +105,11 @@ func (r *Runtime) toolChangeApply(ctx context.Context, req mcp.CallToolRequest) 
 		if approvalErr != nil {
 			return r.terminalError(envReq, session.ID, session.WorkspaceName, "approval_store_error", approvalErr.Error())
 		}
+		approvalData := changeSummaryDTO(item)
+		approvalData["approval_id"] = approvalID
+		approvalData["next_action"] = nextAction("approval_manage", map[string]any{"remote_session_id": session.ID, "action": "approve", "approval_id": approvalID})
 		response := envelope.Fail(envelope.StatusNeedConfirmation, envReq.RequestID, session.WorkspaceName,
-			map[string]any{
-				"approval_id": approvalID, "changeset_id": item.ID, "digest": item.Digest,
-				"next_action": nextAction("approval_manage", map[string]any{"remote_session_id": session.ID, "action": "approve", "approval_id": approvalID}),
-			}, "APPROVAL_REQUIRED", "Changeset apply requires approval")
+			approvalData, "APPROVAL_REQUIRED", "Changeset apply requires approval")
 		response.RemoteSessionID = session.ID
 		return r.resultJSON(response)
 	}
@@ -154,7 +153,7 @@ func (r *Runtime) toolChangeRevert(ctx context.Context, req mcp.CallToolRequest)
 		return r.changeError(envReq, session.ID, session.WorkspaceName, err)
 	}
 	_ = r.remote.AddEvent(ctx, principal, remotesession.Event{RemoteSessionID: session.ID, Type: "changeset.revert_prepared", OperationID: revert.ID, Summary: revert.Summary})
-	return changeDiffResult(session.WorkspacePath, revert), nil
+	return changeDiffResult(revert), nil
 }
 
 func (r *Runtime) changeRequest(ctx context.Context, req mcp.CallToolRequest, edit bool) (envelope.Request, auth.Principal, remotesession.Session, *mcp.CallToolResult) {
@@ -208,38 +207,35 @@ func parseChangeOperations(value any) ([]changeset.Operation, error) {
 }
 
 const (
-	diffInlineMaxBytes = 256 << 10 // 256 KiB inline budget
-	diffPreviewLines   = 100
+	diffInlineMaxBytes       = 256 << 10 // 256 KiB inline budget
+	diffPreviewLines         = 100
+	diffFilePreviewMaxBytes  = 32 << 10 // 32 KiB per-file UI preview budget
+	diffFilesPreviewMaxBytes = 64 << 10 // 64 KiB aggregate per-file UI preview budget
 )
-
-// changesetDiffsDir is the workspace-relative directory for persisted diffs.
-const changesetDiffsDir = ".mcpx/diffs"
-
-// writeChangesetDiffFile persists the complete Unified Diff under the
-// workspace so hosts and users can open it directly and file_read can resume
-// it. Failures are silent: the change result must not depend on the file.
-func writeChangesetDiffFile(workspacePath string, item changeset.Changeset) string {
-	if workspacePath == "" || item.UnifiedDiff == "" || item.ID == "" {
-		return ""
-	}
-	dir := filepath.Join(workspacePath, filepath.FromSlash(changesetDiffsDir))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return ""
-	}
-	if err := os.WriteFile(filepath.Join(dir, item.ID+".diff"), []byte(item.UnifiedDiff), 0o644); err != nil {
-		return ""
-	}
-	return changesetDiffsDir + "/" + item.ID + ".diff"
-}
 
 func changeSummaryDTO(item changeset.Changeset) map[string]any {
 	files := make([]map[string]any, 0, len(item.Files))
+	previewBudget := diffFilesPreviewMaxBytes
 	for _, f := range item.Files {
-		files = append(files, map[string]any{
+		file := map[string]any{
 			"path": f.Path, "new_path": f.NewPath, "operation": f.Operation,
 			"original_sha256": f.OriginalSHA256, "proposed_sha256": f.ProposedSHA256,
 			"expected_sha256": f.ExpectedSHA256,
-		})
+		}
+		if previewBudget > 0 {
+			fileBudget := diffFilePreviewMaxBytes
+			if previewBudget < fileBudget {
+				fileBudget = previewBudget
+			}
+			if preview, truncated := fileDiffPreview(f, fileBudget); preview != "" {
+				file["diff"] = preview
+				previewBudget -= len(preview)
+				if truncated {
+					file["diff_truncated"] = true
+				}
+			}
+		}
+		files = append(files, file)
 	}
 	diffBytes := len(item.UnifiedDiff)
 	uri := fmt.Sprintf("mcpx://remote-sessions/%s/changesets/%s/diff", item.RemoteSessionID, item.ID)
@@ -262,35 +258,117 @@ func changeSummaryDTO(item changeset.Changeset) map[string]any {
 	}
 }
 
+func fileDiffPreview(item changeset.FileChange, maxBytes int) (string, bool) {
+	diff := changeset.UnifiedDiffForFile(item)
+	if diff == "" || maxBytes <= 0 {
+		return "", false
+	}
+	preview := trimDiffPreview(diff, diffPreviewLines)
+	if len(preview) <= maxBytes {
+		return preview, preview != diff
+	}
+	suffix := "\n... (file diff preview truncated; see the changeset diff resource)"
+	if maxBytes <= len(suffix) {
+		return suffix[:maxBytes], true
+	}
+	limit := maxBytes - len(suffix)
+	for limit > 0 && !utf8.ValidString(preview[:limit]) {
+		limit--
+	}
+	return preview[:limit] + suffix, true
+}
+
 func trimDiffPreview(diff string, maxLines int) string {
 	lines := strings.Split(diff, "\n")
 	if len(lines) <= maxLines {
 		return diff
 	}
-	return strings.Join(lines[:maxLines], "\n") + fmt.Sprintf("\n... (%d more lines; see the persisted diff file)", len(lines)-maxLines)
+	return strings.Join(lines[:maxLines], "\n") + fmt.Sprintf("\n... (%d more lines; see the changeset diff resource)", len(lines)-maxLines)
 }
 
-func changeDiffResult(workspacePath string, item changeset.Changeset) *mcp.CallToolResult {
-	return changeDiffResultFromDTO(workspacePath, item, changeSummaryDTO(item))
+func changeDiffResult(item changeset.Changeset) *mcp.CallToolResult {
+	return changeDiffResultFromDTO(item, changeSummaryDTO(item))
 }
 
-func changeDiffResultFromDTO(workspacePath string, item changeset.Changeset, dto map[string]any) *mcp.CallToolResult {
-	if rel := writeChangesetDiffFile(workspacePath, item); rel != "" {
-		dto["diff_file"] = rel
-	}
+func changeDiffResultFromDTO(item changeset.Changeset, dto map[string]any) *mcp.CallToolResult {
 	diffMeta, _ := dto["diff"].(map[string]any)
 	mode, _ := diffMeta["mode"].(string)
 	fallback := fmt.Sprintf("Changeset %s digest=%s files=%d diff_mode=%s", item.ID, item.Digest, len(item.Files), mode)
-	// content is a model-facing summary; the complete diff stays inline in
-	// structuredContent (up to the inline budget) or as a bounded preview for
-	// oversized diffs. No file resource is attached to the conversation.
-	result := mcp.NewToolResultStructured(dto, fallback)
-	if mode == "resource" {
-		preview, _ := diffMeta["unified_diff_preview"].(string)
-		summary := fallback + "\n\n```diff\n" + preview + "\n```"
-		result = mcp.NewToolResultStructured(dto, summary)
+	// Keep the first text content useful even for hosts that do not consume
+	// ARC structuredContent. The public wrapper renders the same data again,
+	// while direct MCP clients still receive a Markdown diff in the session.
+	if markdown := changesetDiffMarkdown(dto); markdown != "" {
+		fallback += "\n\n" + markdown
 	}
-	return result
+	return mcp.NewToolResultStructured(dto, fallback)
+}
+
+func changesetDiffMarkdown(dto map[string]any) string {
+	files := changesetResultFiles(dto["files"])
+	var builder strings.Builder
+	truncated := false
+	for _, file := range files {
+		diff, _ := file["diff"].(string)
+		path, _ := file["path"].(string)
+		if strings.TrimSpace(diff) == "" || path == "" {
+			continue
+		}
+		label := path
+		if newPath, _ := file["new_path"].(string); newPath != "" && newPath != path {
+			label += " → " + newPath
+		}
+		op, _ := file["operation"].(string)
+		fmt.Fprintf(&builder, "#### `%s`", label)
+		if op != "" {
+			builder.WriteString(" · ")
+			builder.WriteString(op)
+		}
+		builder.WriteString("\n\n```diff\n")
+		builder.WriteString(diff)
+		builder.WriteString("\n```")
+		if value, _ := file["diff_truncated"].(bool); value {
+			truncated = true
+		}
+	}
+	if builder.Len() > 0 {
+		diffMeta, _ := dto["diff"].(map[string]any)
+		if diffMeta["mode"] == "resource" {
+			truncated = true
+		}
+		if truncated {
+			if resourceURI, _ := diffMeta["resource_uri"].(string); resourceURI != "" {
+				builder.WriteString("\n\n> 完整变更见 Changeset Resource。")
+			}
+		}
+		return builder.String()
+	}
+
+	diffMeta, _ := dto["diff"].(map[string]any)
+	diff, _ := diffMeta["unified_diff"].(string)
+	if diff == "" {
+		diff, _ = diffMeta["unified_diff_preview"].(string)
+	}
+	if diff == "" {
+		return ""
+	}
+	return "```diff\n" + trimDiffPreview(diff, diffPreviewLines) + "\n```"
+}
+
+func changesetResultFiles(value any) []map[string]any {
+	switch files := value.(type) {
+	case []map[string]any:
+		return files
+	case []any:
+		result := make([]map[string]any, 0, len(files))
+		for _, raw := range files {
+			if file, ok := raw.(map[string]any); ok {
+				result = append(result, file)
+			}
+		}
+		return result
+	default:
+		return nil
+	}
 }
 
 func (r *Runtime) changeError(envReq envelope.Request, remoteSessionID, workspace string, err error) (*mcp.CallToolResult, error) {

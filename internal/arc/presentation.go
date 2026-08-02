@@ -116,7 +116,7 @@ func hostSupports(host HostCapabilities, renderer string) bool {
 }
 
 // renderDiffMaxLines caps the inline diff shown in the host-visible text.
-// Larger diffs point to the persisted diff file (see change_execute results).
+// Larger diffs point to the Changeset Resource (see change_execute results).
 const renderDiffMaxLines = 200
 
 // RenderContent builds the host-visible text for a result according to the
@@ -141,6 +141,9 @@ func renderCodeChange(data map[string]any) string {
 	if changesetID != "" {
 		fmt.Fprintf(&b, "### Changeset %s", changesetID)
 	}
+	if status, _ := data["status"].(string); status == "need_confirmation" {
+		b.WriteString("\n\n> ⚠️ 此变更需要确认后才能应用。")
+	}
 	diffMeta, _ := data["diff"].(map[string]any)
 	diffText, _ := diffMeta["unified_diff"].(string)
 	if diffText == "" {
@@ -151,10 +154,10 @@ func renderCodeChange(data map[string]any) string {
 		fmt.Fprintf(&b, " · +%d −%d", totalAdded, totalRemoved)
 	}
 	fileStats := diffStatsByPath(diffText)
-	if files, ok := data["files"].([]any); ok && len(files) > 0 {
+	files := changeFiles(data["files"])
+	if len(files) > 0 {
 		b.WriteString("\n\n| 文件 | 操作 | 变更 |\n|---|---|---|\n")
-		for _, raw := range files {
-			file, _ := raw.(map[string]any)
+		for _, file := range files {
 			path, _ := file["path"].(string)
 			op, _ := file["operation"].(string)
 			if path == "" {
@@ -163,7 +166,8 @@ func renderCodeChange(data map[string]any) string {
 			fmt.Fprintf(&b, "| `%s` | %s | %s |\n", path, op, formatDiffStats(fileStats[path]))
 		}
 	}
-	if diffText != "" {
+	fileDiffRendered, fileDiffTruncated := renderFileDiffs(&b, files)
+	if !fileDiffRendered && diffText != "" {
 		display, truncated := trimDiffForRender(diffText)
 		b.WriteString("\n```diff\n")
 		b.WriteString(display)
@@ -171,14 +175,69 @@ func renderCodeChange(data map[string]any) string {
 		if truncated {
 			resourceURI, _ := diffMeta["resource_uri"].(string)
 			if resourceURI != "" {
-				b.WriteString("\n> 剩余部分见 Resource 或 diff 文件。\n")
+				b.WriteString("\n> 剩余部分见 Changeset Resource。\n")
+			}
+		}
+	} else if fileDiffRendered {
+		fileDiffTruncated = fileDiffTruncated || diffMeta["mode"] == "resource"
+		if fileDiffTruncated {
+			resourceURI, _ := diffMeta["resource_uri"].(string)
+			if resourceURI != "" {
+				b.WriteString("\n\n> 完整变更见 Changeset Resource。")
 			}
 		}
 	}
-	if diffFile, _ := data["diff_file"].(string); diffFile != "" {
-		fmt.Fprintf(&b, "\n完整 diff 已写入 `%s`（可用 `file_read` 读取）\n", diffFile)
-	}
 	return strings.TrimSpace(b.String())
+}
+
+func changeFiles(value any) []map[string]any {
+	switch files := value.(type) {
+	case []map[string]any:
+		return files
+	case []any:
+		result := make([]map[string]any, 0, len(files))
+		for _, raw := range files {
+			if file, ok := raw.(map[string]any); ok {
+				result = append(result, file)
+			}
+		}
+		return result
+	default:
+		return nil
+	}
+}
+
+func renderFileDiffs(builder *strings.Builder, files []map[string]any) (rendered, truncated bool) {
+	for _, file := range files {
+		diff, _ := file["diff"].(string)
+		if strings.TrimSpace(diff) == "" {
+			continue
+		}
+		path, _ := file["path"].(string)
+		if path == "" {
+			continue
+		}
+		label := path
+		if newPath, _ := file["new_path"].(string); newPath != "" && newPath != path {
+			label += " → " + newPath
+		}
+		op, _ := file["operation"].(string)
+		builder.WriteString("\n\n#### `")
+		builder.WriteString(label)
+		builder.WriteString("`")
+		if op != "" {
+			builder.WriteString(" · ")
+			builder.WriteString(op)
+		}
+		builder.WriteString("\n\n```diff\n")
+		builder.WriteString(diff)
+		builder.WriteString("\n```")
+		rendered = true
+		if value, _ := file["diff_truncated"].(bool); value {
+			truncated = true
+		}
+	}
+	return rendered, truncated
 }
 
 type diffStats struct {
@@ -191,15 +250,33 @@ type diffStats struct {
 func diffStatsByPath(diffText string) map[string]diffStats {
 	stats := make(map[string]diffStats)
 	path := ""
+	oldPath := ""
+	inHunk := false
 	for _, line := range strings.Split(diffText, "\n") {
 		if strings.HasPrefix(line, "diff --git ") {
 			path = diffPathFromHeader(line)
+			inHunk = false
 			if path != "" {
 				stats[path] = diffStats{}
 			}
 			continue
 		}
-		if path == "" || strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---") {
+		if !inHunk && strings.HasPrefix(line, "--- ") {
+			oldPath = strings.TrimPrefix(line, "--- ")
+			continue
+		}
+		if !inHunk && strings.HasPrefix(line, "+++ ") {
+			path = diffPathFromUnifiedHeaders(oldPath, strings.TrimPrefix(line, "+++ "))
+			if path != "" {
+				stats[path] = diffStats{}
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "@@ ") {
+			inHunk = true
+			continue
+		}
+		if !inHunk || path == "" {
 			continue
 		}
 		switch {
@@ -214,6 +291,15 @@ func diffStatsByPath(diffText string) map[string]diffStats {
 		}
 	}
 	return stats
+}
+
+func diffPathFromUnifiedHeaders(oldPath, newPath string) string {
+	oldPath = strings.TrimPrefix(oldPath, "a/")
+	newPath = strings.TrimPrefix(newPath, "b/")
+	if newPath != "/dev/null" && newPath != "" {
+		return newPath
+	}
+	return oldPath
 }
 
 func diffPathFromHeader(line string) string {

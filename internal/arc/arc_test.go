@@ -2,6 +2,7 @@ package arc
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -71,6 +72,24 @@ func TestWrapToolResultMapsApprovalToErrorAction(t *testing.T) {
 	actions := result["actions"].([]any)
 	if len(actions) != 1 || actions[0].(map[string]any)["type"] != "approval" {
 		t.Fatalf("actions = %+v", actions)
+	}
+}
+
+func TestWrapToolResultRendersApprovalCodeChangeDiff(t *testing.T) {
+	raw := mcp.NewToolResultText(`{"ok":false,"status":"need_confirmation","data":{"approval_id":"ap_123","changeset_id":"chg_approval","files":[{"path":"demo.go","operation":"update","diff":"--- a/demo.go\n+++ b/demo.go\n@@ -1 +1 @@\n-const Value = 1\n+const Value = 2\n"}],"diff":{"mode":"inline","resource_uri":"mcpx://remote-sessions/rs1/changesets/chg_approval/diff"},"next_action":{"tool":"approval_manage","arguments":{"action":"approve","approval_id":"ap_123"}}},"error":{"code":"APPROVAL_REQUIRED","message":"approval required"}}`)
+	written := WrapToolResult("change_execute", ResultContext{}, raw)
+	result := decodeEnvelope(t, written)["mcpx"].(map[string]any)["result"].(map[string]any)
+	if result["type"] != "code_change" || result["schema"] != SchemaCodeChange {
+		t.Fatalf("result = %+v", result)
+	}
+	if result["hints"].(map[string]any)["preferred_behavior"] != "ask_confirm" {
+		t.Fatalf("hints = %+v", result["hints"])
+	}
+	text := written.Content[0].(mcp.TextContent).Text
+	for _, want := range []string{"需要确认后才能应用", "```diff", "-const Value = 1", "+const Value = 2"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("approval diff missing %q: %s", want, text)
+		}
 	}
 }
 
