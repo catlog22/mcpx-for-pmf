@@ -191,7 +191,11 @@ func classify(tool string, isError bool, data map[string]any, summary string) (s
 		if status == "need_confirmation" || status == "need_secret" || hasAnyKey(data, "approval_id") {
 			behavior = "ask_confirm"
 		}
-		return "error", errorData(data), Hints{PreferredBehavior: behavior}, actionsFrom(data)
+		errorResult := errorData(data)
+		if hasAnyKey(errorResult, "changeset_id") && hasAnyKey(errorResult, "files", "diff") {
+			return "code_change", errorResult, Hints{PreferredBehavior: behavior}, actionsFrom(data)
+		}
+		return "error", errorResult, Hints{PreferredBehavior: behavior}, actionsFrom(data)
 	}
 
 	inner := nestedData(data)
@@ -523,7 +527,11 @@ func resultDataSchema(name string) map[string]any {
 		return object(map[string]any{
 			"changeset_id": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"},
 			"summary": map[string]any{"type": "string"}, "digest": map[string]any{"type": "string"},
-			"files": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "diff": map[string]any{"type": "object"},
+			"files": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{
+				"path": map[string]any{"type": "string"}, "new_path": map[string]any{"type": "string"},
+				"operation": map[string]any{"type": "string"}, "diff": map[string]any{"type": "string"},
+				"diff_truncated": map[string]any{"type": "boolean"},
+			}}}, "diff": map[string]any{"type": "object"},
 			"applied": map[string]any{"type": "boolean"}, "verify": map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
 		})
 	case SchemaTable:

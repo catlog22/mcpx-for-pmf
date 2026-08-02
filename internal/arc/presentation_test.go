@@ -18,13 +18,12 @@ func TestRenderContentRendersCodeChangeDiff(t *testing.T) {
 			"resource_uri":  "mcpx://remote-sessions/rs1/changesets/chg_1/diff",
 			"preview_lines": 100,
 		},
-		"diff_file": ".mcpx/diffs/chg_1.diff",
 	}
 	text, ok := RenderContent("code_change", "diff", "summary text", data)
 	if !ok {
 		t.Fatal("code_change diff renderer must produce a dedicated view")
 	}
-	for _, want := range []string{"### Changeset chg_1", "| `demo.go` | update | +1 −1 |", "```diff", diff, "`.mcpx/diffs/chg_1.diff`"} {
+	for _, want := range []string{"### Changeset chg_1", "| `demo.go` | update | +1 −1 |", "```diff", diff} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("rendered diff missing %q:\n%s", want, text)
 		}
@@ -107,6 +106,32 @@ func TestRenderContentReportsPerFileDiffStats(t *testing.T) {
 	text, ok := RenderContent("code_change", "diff", "summary", data)
 	if !ok || !strings.Contains(text, "| `one.go` | update | +1 −0 |") || !strings.Contains(text, "| `two.go` | update | +1 −1 |") {
 		t.Fatalf("per-file diff stats = (%q, %v)", text, ok)
+	}
+}
+
+func TestRenderContentShowsPerFileDiffDetails(t *testing.T) {
+	path := "ChatGPT-互联网医院小程序修复.txt"
+	data := map[string]any{
+		"changeset_id": "chg_detail",
+		"files": []map[string]any{{
+			"path":      path,
+			"operation": "update",
+			"diff":      "--- a/" + path + "\n+++ b/" + path + "\n@@ -1 +1 @@\n-旧消息链路\n+新消息链路\n",
+		}},
+		"diff": map[string]any{
+			"mode":         "inline",
+			"resource_uri": "mcpx://remote-sessions/rs1/changesets/chg_detail/diff",
+		},
+	}
+
+	text, ok := RenderContent("code_change", "diff", "summary", data)
+	if !ok {
+		t.Fatal("code_change diff renderer must produce a dedicated view")
+	}
+	for _, want := range []string{"#### `" + path + "`", "-旧消息链路", "+新消息链路"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("per-file diff detail missing %q:\n%s", want, text)
+		}
 	}
 }
 

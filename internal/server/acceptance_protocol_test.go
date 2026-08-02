@@ -247,11 +247,12 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 			result, _ := mcpx["result"].(map[string]any)
 			status := "ok"
 			okValue := true
+			hints, _ := result["hints"].(map[string]any)
 			if result["type"] == "error" {
 				status, okValue = "error", false
-				if hints, _ := result["hints"].(map[string]any); hints["preferred_behavior"] == "ask_confirm" {
-					status = "need_confirmation"
-				}
+			}
+			if hints["preferred_behavior"] == "ask_confirm" {
+				status, okValue = "need_confirmation", false
 			}
 			normalized := map[string]any{"ok": okValue, "status": status, "data": result["data"], "_arc": envelope, "_result": res, "_text": text.Text}
 			if resultData, ok := result["data"].(map[string]any); ok {
@@ -286,7 +287,8 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	}
 	guidance, _ := openData["agent_guidance"].(map[string]any)
 	routing, _ := guidance["tool_routing"].(map[string]any)
-	if guidance["version"] != "1.0" || !containsAnyString(routing["modify_files"], "change_execute") {
+	responseContract, _ := guidance["response_contract"].(map[string]any)
+	if guidance["version"] != agentGuidanceVersion || !containsAnyString(routing["modify_files"], "change_execute") || responseContract["required"] != true {
 		t.Fatalf("session_open guidance missing or incomplete: %+v", guidance)
 	}
 	remoteSession, _ := openData["remote_session"].(map[string]any)

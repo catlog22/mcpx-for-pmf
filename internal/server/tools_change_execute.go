@@ -143,7 +143,7 @@ func (r *Runtime) toolChangeExecute(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	if !apply {
-		out := changeDiffResultFromDTO(session.WorkspacePath, prepared, resultPayload)
+		out := changeDiffResultFromDTO(prepared, resultPayload)
 		return out, nil
 	}
 
@@ -165,12 +165,10 @@ func (r *Runtime) toolChangeExecute(ctx context.Context, req mcp.CallToolRequest
 		if approvalErr != nil {
 			return r.terminalError(envReq, session.ID, session.WorkspaceName, "approval_store_error", approvalErr.Error())
 		}
+		resultPayload["approval_id"] = approvalID
+		resultPayload["next_action"] = nextAction("approval_manage", map[string]any{"remote_session_id": session.ID, "action": "approve", "approval_id": approvalID})
 		response := envelope.Fail(envelope.StatusNeedConfirmation, envReq.RequestID, session.WorkspaceName,
-			map[string]any{
-				"approval_id": approvalID, "changeset_id": prepared.ID, "digest": prepared.Digest,
-				"diff":        resultPayload["diff"],
-				"next_action": nextAction("approval_manage", map[string]any{"remote_session_id": session.ID, "action": "approve", "approval_id": approvalID}),
-			}, "APPROVAL_REQUIRED", "source change requires approval")
+			resultPayload, "APPROVAL_REQUIRED", "source change requires approval")
 		response.RemoteSessionID = session.ID
 		return r.resultJSON(response)
 	}
@@ -196,7 +194,7 @@ func (r *Runtime) toolChangeExecute(ctx context.Context, req mcp.CallToolRequest
 		resultPayload["verify"] = verifyResults
 	}
 
-	return changeDiffResultFromDTO(session.WorkspacePath, prepared, resultPayload), nil
+	return changeDiffResultFromDTO(prepared, resultPayload), nil
 }
 
 func (r *Runtime) patchTooLargeResult(envReq envelope.Request, session remotesession.Session, changedLines, maxLines int) (*mcp.CallToolResult, error) {
@@ -229,7 +227,7 @@ func (r *Runtime) executePreparedChange(ctx context.Context, envReq envelope.Req
 		return r.changeError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("changeset digest mismatch for %s", path))
 	}
 	if apply, exists := envReq.Payload["apply"].(bool); exists && !apply {
-		return changeDiffResult(session.WorkspacePath, item), nil
+		return changeDiffResult(item), nil
 	}
 	return r.applyPreparedChange(ctx, envReq, principal, session, item, "change_execute")
 }
@@ -255,7 +253,7 @@ func (r *Runtime) executeRevertChange(ctx context.Context, envReq envelope.Reque
 	}
 	_ = r.remote.AddEvent(ctx, principal, remotesession.Event{RemoteSessionID: session.ID, Type: "changeset.revert_prepared", OperationID: revert.ID, Summary: revert.Summary})
 	if apply, exists := envReq.Payload["apply"].(bool); exists && !apply {
-		return changeDiffResult(session.WorkspacePath, revert), nil
+		return changeDiffResult(revert), nil
 	}
 	return r.applyPreparedChange(ctx, envReq, principal, session, revert, "change_execute")
 }
@@ -311,7 +309,7 @@ func (r *Runtime) replayChangeExecute(envReq envelope.Request, session remoteses
 			return result
 		}
 	}
-	return changeDiffResultFromDTO(session.WorkspacePath, item, payload)
+	return changeDiffResultFromDTO(item, payload)
 }
 
 func formatSourceContent(ctx context.Context, workspacePath string, content []byte) ([]byte, error) {

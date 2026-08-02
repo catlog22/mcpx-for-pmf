@@ -78,7 +78,7 @@ flowchart TB
 | `Mcp-Session-Id`    | 临时，可在重连或切换客户端时变化      | Streamable HTTP 传输状态                                         |
 | `remote_session_id` | SQLite 持久化，可跨连接和进程重启查询 | Workspace、成员权限、Changeset、任务、审批、快照和产物的业务主键 |
 
-源码修改默认采用 Diff First 流程：读取源码与 SHA-256 → 准备 Changeset → 展示 Unified Diff → 校验 revision 和策略 → 事务应用。工具结果内联返回（上限 `limits.max_result_bytes`，默认 256KB）：命令 stdout/stderr 直接内联，Diff 返回预览；完整 Unified Diff 持久化在 `{workspace}/.mcpx/diffs/<changeset_id>.diff`，任务日志和已注册 Artifact 可通过 `mcpx://remote-sessions/...` Resource Link 读取。
+源码修改默认采用 Diff First 流程：读取源码与 SHA-256 → 准备 Changeset → 展示 Unified Diff → 校验 revision 和策略 → 事务应用。工具结果内联返回（上限 `limits.max_result_bytes`，默认 256KB）：命令 stdout/stderr 直接内联，变更文件条目包含每文件 Diff 预览；完整 Unified Diff 保存在 Changeset 状态中，并可通过 `mcpx://remote-sessions/...` Resource Link 读取，不会写入 workspace。
 
 ---
 
@@ -339,26 +339,26 @@ curl -sS -m 5 \
 
 客户端里名称形如 **`mcpx__workspace_list`**（服务器名 + 双下划线 + 工具名）。
 
-| 类别 | 工具 | 用途 |
-| --- | --- | --- |
-| 高频开发 | `workspace_list` | 查询已注册 Workspace。 |
-| 高频开发 | `session_open` | 一次创建或恢复 Remote Session，并返回初始化上下文。 |
-| 高频开发 | `file_read` | 读取单文件或 `items[]` 批量文件窗口，返回独立 SHA-256；修改前必须先读取当前内容。 |
-| 高频开发 | `context_query` | 通过 `query` / `search` / `list` 动作获取受预算限制的源码上下文。 |
-| 高频开发 | `change_execute` | 一次完成普通修改的 Changeset、策略检查、原子 Apply 和可选验证。 |
-| 高频开发 | `command_execute` | 执行命令或项目任务；10 秒内返回结果，超时转统一 Task；stdout/stderr 内联返回（上限 256KB）。 |
-| 领域管理 | `session_manage` | `list`、`get`、`events`、`update`、`handoff`、`attach`、`close`。 |
-| 领域管理 | `change_manage` | 仅用于 `prepare`、`diff`、`history`；Apply 和回滚统一通过 `change_execute`。 |
-| 领域管理 | `plan_manage` | 创建与推进持久化开发 Plan（`create` / `advance` / `list` / `get`…），只管理计划状态与证据。 |
-| 领域管理 | `task_manage` | `attach`、`status`、`logs`、`list`、`stop`、`ports`、`diagnostics`、`stdin`。 |
-| 领域管理 | `runtime_inspect` | `capabilities`、`project`、`instructions`。 |
-| 领域管理 | `environment_inspect` | 查看环境并保存或比较快照。 |
-| 领域管理 | `workspace_state` | `changes`、`snapshot`、`diff`、`watch`。 |
-| 领域管理 | `extension_manage` | 统一 `list`、`describe`、`call` Skills 和上游 MCP。 |
-| 领域管理 | `artifact_manage` | `list`、`read`、`register` Artifact。 |
-| 领域管理 | `approval_manage` | `list`、`approve`、`deny` 高风险操作。 |
-| 特殊能力 | `screenshot_capture` | 截取显示器或区域。 |
-| 特殊能力 | `secrets_provide` | 提供仅进程内可用的 Secret 引用。 |
+| 类别     | 工具                  | 用途                                                                                         |
+| -------- | --------------------- | -------------------------------------------------------------------------------------------- |
+| 高频开发 | `workspace_list`      | 查询已注册 Workspace。                                                                       |
+| 高频开发 | `session_open`        | 一次创建或恢复 Remote Session，并返回初始化上下文。                                          |
+| 高频开发 | `file_read`           | 读取单文件或 `items[]` 批量文件窗口，返回独立 SHA-256；修改前必须先读取当前内容。            |
+| 高频开发 | `context_query`       | 通过 `query` / `search` / `list` 动作获取受预算限制的源码上下文。                            |
+| 高频开发 | `change_execute`      | 一次完成普通修改的 Changeset、策略检查、原子 Apply 和可选验证。                              |
+| 高频开发 | `command_execute`     | 执行命令或项目任务；10 秒内返回结果，超时转统一 Task；stdout/stderr 内联返回（上限 256KB）。 |
+| 领域管理 | `session_manage`      | `list`、`get`、`events`、`update`、`handoff`、`attach`、`close`。                            |
+| 领域管理 | `change_manage`       | 仅用于 `prepare`、`diff`、`history`；Apply 和回滚统一通过 `change_execute`。                 |
+| 领域管理 | `plan_manage`         | 创建与推进持久化开发 Plan（`create` / `advance` / `list` / `get`…），只管理计划状态与证据。  |
+| 领域管理 | `task_manage`         | `attach`、`status`、`logs`、`list`、`stop`、`ports`、`diagnostics`、`stdin`。                |
+| 领域管理 | `runtime_inspect`     | `capabilities`、`project`、`instructions`。                                                  |
+| 领域管理 | `environment_inspect` | 查看环境并保存或比较快照。                                                                   |
+| 领域管理 | `workspace_state`     | `changes`、`snapshot`、`diff`、`watch`。                                                     |
+| 领域管理 | `extension_manage`    | 统一 `list`、`describe`、`call` Skills 和上游 MCP。                                          |
+| 领域管理 | `artifact_manage`     | `list`、`read`、`register` Artifact。                                                        |
+| 领域管理 | `approval_manage`     | `list`、`approve`、`deny` 高风险操作。                                                       |
+| 特殊能力 | `screenshot_capture`  | 截取显示器或区域。                                                                           |
+| 特殊能力 | `secrets_provide`     | 提供仅进程内可用的 Secret 引用。                                                             |
 
 `tools/list` 只暴露以上 **18** 个工具。低频操作必须通过其领域工具的 `action` 分支调用；文件读取和普通修改分别统一使用 `file_read`、`change_execute`。所有直接文件修改都必须经过 `change_execute`，不能通过 `command_execute` 或 `change_manage` 绕过。
 
@@ -371,7 +371,7 @@ curl -sS -m 5 \
 5. 用 `command_execute` 运行测试或命令；超过 10 秒时按响应中的 `task_manage(action="attach")` 继续。
 6. 用 `workspace_state(action="changes")` 检查最终变更；跨客户端接力使用 `session_manage(action="handoff" | "attach")`。
 
-大型 Unified Diff、任务日志和已注册 Artifact 通过 `mcpx://remote-sessions/...` Resource 读取。命令输出与 Diff 预览默认内联（上限 256KB），超过时返回截断提示与持久化文件位置，`content` 只保留模型摘要，大内容不会在多个响应字段中镜像。
+大型 Unified Diff、任务日志和已注册 Artifact 通过 `mcpx://remote-sessions/...` Resource 读取。命令输出与 Diff 预览默认内联（上限 256KB），代码变更 UI 和工具文本按文件展示具体增删内容，超过时返回截断提示与 Resource Link；完整大内容不会在多个响应字段中镜像。
 
 ### 机器可读能力发现
 
@@ -380,7 +380,7 @@ MCP 标准 `tools/list` 是工具名称、描述、参数 JSON Schema 和 Annota
 - `tool_schema_revision`：由实际注册工具的名称、描述、Schema 与 Annotation 计算；新建 Session 不会改变它。
 - `capability_manifest_revision`、`guidance_revision`、`instruction_revision`、`skill_revision`、`mcp_revision`、`session_capability_revision`：可分别判断哪些能力需要刷新。
 - `tools`：每个公开工具的领域、状态、角色限制和是否要求 `remote_session_id`。
-- `agent_guidance`、`instructions`、Skills、上游 MCP、Resource URI 模板和推荐调用链。`agent_guidance` 默认返回，不受指令正文或上游发现开关影响。
+- `agent_guidance`、`instructions`、Skills、上游 MCP、Resource URI 模板和推荐调用链。`agent_guidance` 默认返回，不受指令正文或上游发现开关影响；其中 `response_contract` 要求模型在重要操作前说明目的、完成后报告真实结果、文件变更、验证证据与风险，不得无证据宣称完成。
 
 客户端首次连接应调用 `tools/list`；绑定 Workspace 或 Remote Session 后调用 `runtime_inspect(action="capabilities")`。`session_open` 接受 `known_revisions`，未变化的 Skills、上游 MCP、指令和 Session capability 会在响应中标为 `omitted`，避免重复传输。
 
@@ -415,14 +415,14 @@ MCP 标准 `tools/list` 是工具名称、描述、参数 JSON Schema 和 Annota
 
 除 `patch` 外，`operations` 还支持按内容精确编辑的快捷操作，均要求 `base_sha256`（当前 revision）：
 
-| 操作 | 参数 | 用途 |
-| --- | --- | --- |
-| `replace_exact` | `match` + `content` | 精确替换唯一出现的一段文本 |
-| `insert_before` / `insert_after` | `match` + `content` | 在某段文本前/后插入（插入完整行时 `content` 需自带结尾换行） |
-| `delete_exact` | `match` | 删除唯一出现的一段文本 |
-| `replace_range` | `range_start` + `range_end` + `content` | 按 1 起始行号替换区间，适合大文件局部修改 |
+| 操作                             | 参数                                    | 用途                                                         |
+| -------------------------------- | --------------------------------------- | ------------------------------------------------------------ |
+| `replace_exact`                  | `match` + `content`                     | 精确替换唯一出现的一段文本                                   |
+| `insert_before` / `insert_after` | `match` + `content`                     | 在某段文本前/后插入（插入完整行时 `content` 需自带结尾换行） |
+| `delete_exact`                   | `match`                                 | 删除唯一出现的一段文本                                       |
+| `replace_range`                  | `range_start` + `range_end` + `content` | 按 1 起始行号替换区间，适合大文件局部修改                    |
 
-行尾兼容：提交的 `content` / `patch` / `match` 会自动归一化到目标文件的换行符（CRLF/LF），小改动不会翻转整个文件的行尾风格。`security.files.max_patch_lines` 按**真实差异行数**计算（公共前缀/后缀之外的中间段），大文件内的小改动不会被误判超限；全量替换则按整体行数计，超限会返回 `PATCH_TOO_LARGE` 及拆分建议。完整 Diff 预览内联返回，全文持久化在 `{workspace}/.mcpx/diffs/<changeset_id>.diff`。
+行尾兼容：提交的 `content` / `patch` / `match` 会自动归一化到目标文件的换行符（CRLF/LF），小改动不会翻转整个文件的行尾风格。`security.files.max_patch_lines` 按**真实差异行数**计算（公共前缀/后缀之外的中间段），大文件内的小改动不会被误判超限；全量替换则按整体行数计，超限会返回 `PATCH_TOO_LARGE` 及拆分建议。完整 Diff 预览内联返回，每个文件条目同时提供受限 Diff 预览，全文通过 Changeset Resource 读取，不会写入 workspace。
 
 截图工具使用 `environment_inspect` 返回的显示器索引。`fullscreen` 截取完整显示器；`region` 使用全局 `x / y / width / height` 坐标。`compression` 支持 `none`、`balanced` 和 `small`。截图只通过 MCP 响应返回，不默认写入项目或 SQLite。
 
@@ -548,11 +548,13 @@ MCPX 仅用于学习、研究和经授权的开发环境自动化。使用者应
 
 ## Star History
 
-<a href="https://www.star-history.com/?type=date&repos=opentokenz%2Fmcpx">
+## Star History
+
+<a href="https://www.star-history.com/?repos=opentokenz%2Fmcpx&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=opentokenz/mcpx&type=date&theme=dark&legend=top-left&sealed_token=PoZfjzlwyeL85OQdDvxeP6Blj9F9VUyGyuIeGt7ZmSapcaehW_KhED6OQScGiTNktj67Qr3rHEUlx3HlP9dwISaLzajjiKSnz7IycM3hik-OwrPhQftqpfXSt13q5uysWBPGr4Z0BsBzfm0beORdMaKoevID9qcnKL3-q4LrKGInQJZaioUTS-KE5uJ-" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=opentokenz/mcpx&type=date&legend=top-left&sealed_token=PoZfjzlwyeL85OQdDvxeP6Blj9F9VUyGyuIeGt7ZmSapcaehW_KhED6OQScGiTNktj67Qr3rHEUlx3HlP9dwISaLzajjiKSnz7IycM3hik-OwrPhQftqpfXSt13q5uysWBPGr4Z0BsBzfm0beORdMaKoevID9qcnKL3-q4LrKGInQJZaioUTS-KE5uJ-" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=opentokenz/mcpx&type=date&legend=top-left&sealed_token=PoZfjzlwyeL85OQdDvxeP6Blj9F9VUyGyuIeGt7ZmSapcaehW_KhED6OQScGiTNktj67Qr3rHEUlx3HlP9dwISaLzajjiKSnz7IycM3hik-OwrPhQftqpfXSt13q5uysWBPGr4Z0BsBzfm0beORdMaKoevID9qcnKL3-q4LrKGInQJZaioUTS-KE5uJ-" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=opentokenz/mcpx&type=date&theme=dark&legend=top-left&sealed_token=jUtxc1OYmFK08WQj99XkmFzM0HRA-hpQB7I9wHBLMBGHx-67q1wA2YAs4xsVkz5atYfU4hBNzBeZ1PgKY6SZM1t4MY6U70cFpKG49h7I-p1HEzbjWiJMh5EIJ2wl7Mc4ihBZ05TXuvpgxIR_0SppHmEn18A66kOXgnljlPGZm18kCP52p6jPzPM1hH_v" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=opentokenz/mcpx&type=date&legend=top-left&sealed_token=jUtxc1OYmFK08WQj99XkmFzM0HRA-hpQB7I9wHBLMBGHx-67q1wA2YAs4xsVkz5atYfU4hBNzBeZ1PgKY6SZM1t4MY6U70cFpKG49h7I-p1HEzbjWiJMh5EIJ2wl7Mc4ihBZ05TXuvpgxIR_0SppHmEn18A66kOXgnljlPGZm18kCP52p6jPzPM1hH_v" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=opentokenz/mcpx&type=date&legend=top-left&sealed_token=jUtxc1OYmFK08WQj99XkmFzM0HRA-hpQB7I9wHBLMBGHx-67q1wA2YAs4xsVkz5atYfU4hBNzBeZ1PgKY6SZM1t4MY6U70cFpKG49h7I-p1HEzbjWiJMh5EIJ2wl7Mc4ihBZ05TXuvpgxIR_0SppHmEn18A66kOXgnljlPGZm18kCP52p6jPzPM1hH_v" />
  </picture>
 </a>
 
