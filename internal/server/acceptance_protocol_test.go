@@ -35,7 +35,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		"demo.go":                     "package demo\n\nconst Value = 1\n",
 		"a.go":                        "package demo\n\nfunc Alpha() int { return 1 }\n",
 		"b.go":                        "package demo\n\nfunc Beta() int { return 2 }\n",
-		"delete_me.txt":               "remove through approval\n",
+		"delete_me.txt":               "remove through confirmation\n",
 		"AGENTS.md":                   "# Project: chinese comments\n",
 		"frontend/AGENTS.md":          "# frontend: use pnpm\n",
 		"frontend/src/AGENTS.md":      "# src: no generated\n",
@@ -123,7 +123,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		"workspace_list", "session_open", "file_read", "context_query", "change_execute", "command_execute",
 		"progress_report",
 		"session_manage", "change_manage", "task_manage", "plan_manage", "runtime_inspect", "environment_inspect", "workspace_state",
-		"extension_manage", "artifact_manage", "approval_manage", "screenshot_capture", "secrets_provide",
+		"extension_manage", "artifact_manage", "screenshot_capture", "secrets_provide",
 	}
 	if len(byName) != len(expectedTools) {
 		t.Fatalf("tools/list count=%d, want %d: %v", len(byName), len(expectedTools), byName)
@@ -311,6 +311,9 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	remoteID, _ := remoteSession["id"].(string)
 	if remoteID == "" {
 		t.Fatalf("session_open missing remote_session.id: %+v", openData)
+	}
+	if openData["remote_session_id"] != remoteID {
+		t.Fatalf("session_open missing top-level remote_session_id: %+v", openData)
 	}
 	revs, _ := openData["revisions"].(map[string]any)
 	for _, key := range []string{
@@ -619,13 +622,15 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		"operations": []any{map[string]any{"operation": "delete", "path": "delete_me.txt", "base_sha256": fmt.Sprintf("sha256:%x", deleteSum[:])}},
 	})
 	if pendingDelete["status"] != "need_confirmation" {
-		t.Fatalf("delete must require approval: %+v", pendingDelete)
+		t.Fatalf("delete must require semantic confirmation: %+v", pendingDelete)
 	}
 	pendingData, _ := pendingDelete["data"].(map[string]any)
-	approvalID, _ := pendingData["approval_id"].(string)
-	approvedDelete := call("approval_manage", map[string]any{"action": "approve", "remote_session_id": remoteID, "approval_id": approvalID})
+	approvedDelete := call("change_execute", map[string]any{
+		"remote_session_id": remoteID, "changeset_id": pendingData["changeset_id"],
+		"expected_digest": pendingData["digest"], "user_confirmed": true,
+	})
 	if approvedDelete["status"] != "ok" {
-		t.Fatalf("approval_manage did not resume the original Changeset: %+v", approvedDelete)
+		t.Fatalf("semantic confirmation did not resume the original Changeset: %+v", approvedDelete)
 	}
 	if _, err := os.Stat(filepath.Join(workspace, "delete_me.txt")); !os.IsNotExist(err) {
 		t.Fatalf("approved delete did not remove target: %v", err)

@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"mcpx/internal/auth"
 )
 
@@ -168,10 +170,11 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, in Creat
 		}
 	}
 
-	sessionID, err := randomID("rs_", 16)
+	sessionUUID, err := uuid.NewRandom()
 	if err != nil {
 		return CreateResult{}, err
 	}
+	sessionID := sessionUUID.String()
 	handoffID, err := randomID("rsh_", 12)
 	if err != nil {
 		return CreateResult{}, err

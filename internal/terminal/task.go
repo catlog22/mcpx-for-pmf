@@ -34,11 +34,14 @@ const (
 // this chunk within its stream.
 type OutputChunk struct {
 	TaskID          string
+	RequestID       string
+	Tool            string
 	RemoteSessionID string
 	WorkspaceName   string
 	Command         string
 	Stream          string
 	Offset          int64
+	Final           bool
 	Data            []byte
 }
 
@@ -50,6 +53,8 @@ type OutputSink func(OutputChunk)
 // Task is a background command.
 type Task struct {
 	ID              string
+	RequestID       string
+	Tool            string
 	RemoteSessionID string
 	WorkspaceName   string
 	Command         string
@@ -147,10 +152,16 @@ func NewPersistentTaskManager(db *sql.DB, logDir string) (*TaskManager, error) {
 
 // StartRemote launches a durable task owned by a Remote Session.
 func (m *TaskManager) StartRemote(ctx context.Context, remoteSessionID, workspaceName, workDir, command string) (*Task, error) {
-	return m.start(ctx, remoteSessionID, workspaceName, workDir, command)
+	return m.start(ctx, "", "", remoteSessionID, workspaceName, workDir, command)
 }
 
-func (m *TaskManager) start(_ context.Context, remoteSessionID, workspaceName, workDir, command string) (*Task, error) {
+// StartRemoteWithObservation launches a task and carries its originating MCP
+// request through output callbacks without changing ordinary task callers.
+func (m *TaskManager) StartRemoteWithObservation(ctx context.Context, requestID, tool, remoteSessionID, workspaceName, workDir, command string) (*Task, error) {
+	return m.start(ctx, requestID, tool, remoteSessionID, workspaceName, workDir, command)
+}
+
+func (m *TaskManager) start(_ context.Context, requestID, tool, remoteSessionID, workspaceName, workDir, command string) (*Task, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
@@ -175,7 +186,8 @@ func (m *TaskManager) start(_ context.Context, remoteSessionID, workspaceName, w
 	m.mu.Unlock()
 
 	t := &Task{
-		ID: id, RemoteSessionID: remoteSessionID, WorkspaceName: workspaceName, Command: command,
+		ID: id, RequestID: requestID, Tool: tool,
+		RemoteSessionID: remoteSessionID, WorkspaceName: workspaceName, Command: command,
 		WorkDir: workDir, Status: TaskRunning, StartedAt: time.Now().UTC(), db: m.db,
 		cmd: cmd, cancel: cancel, done: make(chan struct{}), outputSink: m.emitOutput,
 	}
@@ -242,10 +254,11 @@ func (m *TaskManager) start(_ context.Context, remoteSessionID, workspaceName, w
 	go func() {
 		err := cmd.Wait()
 		t.mu.Lock()
-		defer t.mu.Unlock()
-		defer close(t.done)
 		if t.Status == TaskKilled {
 			t.finishLocked(TaskKilled, -1)
+			t.mu.Unlock()
+			t.emitOutputFinal()
+			close(t.done)
 			return
 		}
 		t.Status = TaskExited
@@ -259,6 +272,9 @@ func (m *TaskManager) start(_ context.Context, remoteSessionID, workspaceName, w
 		}
 		t.ExitCode = &code
 		t.finishLocked(TaskExited, code)
+		t.mu.Unlock()
+		t.emitOutputFinal()
+		close(t.done)
 		cancel()
 	}()
 	return t, nil
@@ -312,7 +328,8 @@ func (w *lockedWriter) Write(p []byte) (int, error) {
 	}
 	sink := w.t.outputSink
 	chunk := OutputChunk{
-		TaskID: w.t.ID, RemoteSessionID: w.t.RemoteSessionID, WorkspaceName: w.t.WorkspaceName,
+		TaskID: w.t.ID, RequestID: w.t.RequestID, Tool: w.t.Tool,
+		RemoteSessionID: w.t.RemoteSessionID, WorkspaceName: w.t.WorkspaceName,
 		Command: w.t.Command, Stream: w.stream, Offset: offset, Data: append([]byte(nil), p...),
 	}
 	w.t.mu.Unlock()
@@ -320,6 +337,22 @@ func (w *lockedWriter) Write(p []byte) (int, error) {
 		sink(chunk)
 	}
 	return n, nil
+}
+
+func (t *Task) emitOutputFinal() {
+	t.mu.Lock()
+	sink := t.outputSink
+	chunks := []OutputChunk{
+		{TaskID: t.ID, RequestID: t.RequestID, Tool: t.Tool, RemoteSessionID: t.RemoteSessionID, WorkspaceName: t.WorkspaceName, Command: t.Command, Stream: "stdout", Offset: t.stdoutOffset, Final: true},
+		{TaskID: t.ID, RequestID: t.RequestID, Tool: t.Tool, RemoteSessionID: t.RemoteSessionID, WorkspaceName: t.WorkspaceName, Command: t.Command, Stream: "stderr", Offset: t.stderrOffset, Final: true},
+	}
+	t.mu.Unlock()
+	if sink == nil {
+		return
+	}
+	for _, chunk := range chunks {
+		sink(chunk)
+	}
 }
 
 func writeBounded(file *os.File, size *int64, content []byte, truncated *bool) error {

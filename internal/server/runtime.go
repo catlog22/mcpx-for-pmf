@@ -32,7 +32,6 @@ import (
 	"mcpx/internal/remotesession"
 	"mcpx/internal/screenshot"
 	"mcpx/internal/secrets"
-	"mcpx/internal/security"
 	"mcpx/internal/skill"
 	"mcpx/internal/state"
 	"mcpx/internal/terminal"
@@ -52,28 +51,31 @@ type Options struct {
 
 // Runtime is the MCPX process root.
 type Runtime struct {
-	opts           Options
-	cfg            config.Config
-	reg            *workspace.Registry
-	approvals      *approval.Store
-	audit          *audit.Logger
-	globalCfgPath  string
-	tasks          *terminal.TaskManager
-	secrets        *secrets.Store
-	oauth          *oauth.Server
-	state          *state.Store
-	remote         *remotesession.Service
-	environment    *environment.Service
-	changesets     *changeset.Service
-	workspaceDiff  *workspacechanges.Service
-	fileSnapshots  *filesnapshot.Store
-	artifacts      *artifact.Service
-	plans          *plan.Service
-	screenshot     screenCapturer
-	observation    *observationBridge
-	observerSocket *observation.SocketServer
-	closeOnce      sync.Once
-	closeErr       error
+	opts            Options
+	cfg             config.Config
+	reg             *workspace.Registry
+	approvals       *approval.Store
+	audit           *audit.Logger
+	globalCfgPath   string
+	tasks           *terminal.TaskManager
+	secrets         *secrets.Store
+	oauth           *oauth.Server
+	state           *state.Store
+	remote          *remotesession.Service
+	environment     *environment.Service
+	changesets      *changeset.Service
+	workspaceDiff   *workspacechanges.Service
+	fileSnapshots   *filesnapshot.Store
+	artifacts       *artifact.Service
+	plans           *plan.Service
+	retention       *state.RetentionService
+	retentionCancel context.CancelFunc
+	retentionDone   chan struct{}
+	screenshot      screenCapturer
+	observation     *observationBridge
+	observerSocket  *observation.SocketServer
+	closeOnce       sync.Once
+	closeErr        error
 
 	// For schema revision and capability catalog.
 	toolIndex   map[string]mcp.Tool
@@ -84,7 +86,6 @@ type Runtime struct {
 	changeExecuteMu       sync.Mutex
 	projectConfigMu       sync.RWMutex
 	projectConfigs        map[string]projectConfigCacheEntry
-	approvalMu            sync.Mutex
 	build                 BuildInfo
 }
 
@@ -186,7 +187,8 @@ func New(opts Options) (*Runtime, error) {
 		_ = stateStore.Close()
 		return nil, fmt.Errorf("initialize environment service: %w", err)
 	}
-	taskManager, err := terminal.NewPersistentTaskManager(stateStore.DB(), filepath.Join(home, "tasks"))
+	taskLogDir := filepath.Join(home, "tasks")
+	taskManager, err := terminal.NewPersistentTaskManager(stateStore.DB(), taskLogDir)
 	if err != nil {
 		_ = stateStore.Close()
 		return nil, fmt.Errorf("initialize terminal tasks: %w", err)
@@ -195,6 +197,11 @@ func New(opts Options) (*Runtime, error) {
 	if err := changesetService.Recover(context.Background()); err != nil {
 		_ = stateStore.Close()
 		return nil, fmt.Errorf("recover changesets: %w", err)
+	}
+	retentionService, err := state.NewRetentionService(stateStore.DB(), taskLogDir, cfg.State.Retention)
+	if err != nil {
+		_ = stateStore.Close()
+		return nil, fmt.Errorf("initialize state retention: %w", err)
 	}
 
 	runtime := &Runtime{
@@ -215,6 +222,7 @@ func New(opts Options) (*Runtime, error) {
 		fileSnapshots:         filesnapshot.NewStore(stateStore.DB()),
 		artifacts:             artifact.NewService(stateStore.DB()),
 		plans:                 plan.NewService(stateStore.DB()),
+		retention:             retentionService,
 		screenshot:            screenshot.NewService(),
 		toolIndex:             map[string]mcp.Tool{},
 		changeExecuteRequests: map[string]changeExecuteRequest{},
@@ -363,6 +371,7 @@ func (r *Runtime) Start() error {
 			return fmt.Errorf("start workspace observer: %w", err)
 		}
 	}
+	r.startRetention()
 	// Snapshot registered tools for schema revision / client refresh (A01).
 	if listed := s.ListTools(); listed != nil {
 		r.toolIndexMu.Lock()
@@ -436,6 +445,7 @@ func (r *Runtime) Close() error {
 		return nil
 	}
 	r.closeOnce.Do(func() {
+		r.stopRetention()
 		if r.observerSocket != nil {
 			if err := r.observerSocket.Close(); err != nil {
 				r.closeErr = err
@@ -454,6 +464,86 @@ func (r *Runtime) Close() error {
 		}
 	})
 	return r.closeErr
+}
+
+func (r *Runtime) startRetention() {
+	if r == nil || r.retention == nil || !r.cfg.State.Retention.Enabled || r.retentionDone != nil {
+		return
+	}
+	interval, _, _, _, _, err := r.cfg.State.Retention.RetentionDurations()
+	if err != nil {
+		logging.With("component", "state_retention").Error("invalid retention interval", "err", err)
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	r.retentionCancel = cancel
+	r.retentionDone = done
+	go func() {
+		defer close(done)
+		r.runRetention(ctx)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				r.runRetention(ctx)
+			}
+		}
+	}()
+}
+
+func (r *Runtime) stopRetention() {
+	if r == nil || r.retentionCancel == nil {
+		return
+	}
+	r.retentionCancel()
+	if r.retentionDone != nil {
+		<-r.retentionDone
+	}
+	r.retentionCancel = nil
+	r.retentionDone = nil
+}
+
+func (r *Runtime) runRetention(ctx context.Context) {
+	if r == nil || r.retention == nil {
+		return
+	}
+	report, err := r.retention.RunOnce(ctx)
+	if err != nil {
+		logging.With("component", "state_retention").Error("state cleanup failed", "err", err)
+		r.recordRetentionNotice("state cleanup failed: " + err.Error())
+		return
+	}
+	for _, message := range report.Errors {
+		logging.With("component", "state_retention").Error("state maintenance warning", "err", message)
+		r.recordRetentionNotice("state maintenance warning: " + message)
+	}
+	if report.Disabled || report.TotalDeleted() == 0 {
+		return
+	}
+	logging.With("component", "state_retention").Info("state cleanup completed",
+		"observation_events", report.DeletedObservationEvents,
+		"terminal_tasks", report.DeletedTerminalTasks,
+		"file_snapshots", report.DeletedFileSnapshots,
+		"environment_snapshots", report.DeletedEnvironmentSnaps,
+		"ephemeral_records", report.DeletedEphemeralRecords,
+		"vacuumed", report.Vacuumed,
+	)
+}
+
+func (r *Runtime) recordRetentionNotice(summary string) {
+	if r == nil || r.observation == nil {
+		return
+	}
+	_ = r.observation.Record(context.Background(), observation.Event{
+		Workspace: "runtime",
+		Type:      observation.TypeObserverNotice,
+		Summary:   summary,
+		CreatedAt: time.Now().UTC(),
+	})
 }
 
 func isLoopbackAddr(addr string) bool {
@@ -880,139 +970,4 @@ func (r *Runtime) capExecResult(res terminal.Result) map[string]any {
 		out["truncated"] = true
 	}
 	return out
-}
-
-func (r *Runtime) toolApprovalConfirm(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	r.approvalMu.Lock()
-	defer r.approvalMu.Unlock()
-	envReq, principal, fail := r.remoteRequest(ctx, req)
-	if fail != nil {
-		return fail, nil
-	}
-	remoteSessionID, err := requireRemoteSessionID(envReq)
-	if err != nil {
-		return r.remoteError(envReq, "", "", err)
-	}
-	remote, err := r.remote.Get(ctx, principal, remoteSessionID)
-	if err != nil {
-		return r.remoteError(envReq, remoteSessionID, "", err)
-	}
-	if remote.Role != "owner" && remote.Role != "approver" {
-		return r.remoteError(envReq, remote.ID, remote.WorkspaceName, remotesession.ErrForbidden)
-	}
-	aid, _ := envReq.Payload["approval_id"].(string)
-	aid = strings.TrimSpace(aid)
-	if aid == "" {
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "approval_id_required", "approval_id is required")
-	}
-	approve, _ := envReq.Payload["approve"].(bool)
-	p, ok := r.approvals.Get(aid)
-	if !ok {
-		pendingCount := len(r.approvals.ListRemoteSession(remote.ID))
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "not_found", fmt.Sprintf("unknown approval_id %q; pending approvals=%d", aid, pendingCount))
-	}
-	if p.RemoteSessionID != remote.ID {
-		return r.remoteError(envReq, remote.ID, remote.WorkspaceName, remotesession.ErrForbidden)
-	}
-	if approve {
-		switch p.Tool {
-		case "change_apply", "change_execute":
-			item, changeErr := r.changesets.Get(ctx, p.ChangesetID)
-			if changeErr != nil {
-				return r.changeError(envReq, remote.ID, remote.WorkspaceName, changeErr)
-			}
-			if item.RemoteSessionID != remote.ID || item.Digest != p.ChangesetDigest {
-				return r.changeError(envReq, remote.ID, remote.WorkspaceName, fmt.Errorf("changeset digest mismatch"))
-			}
-			effective := r.effectiveConfig(remote.WorkspacePath)
-			_, changedLines, deniedPath := evaluateChangesetPolicy(effective, item.Files)
-			if deniedPath != "" {
-				return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "file_denied", "file denied by policy: "+deniedPath)
-			}
-			if effective.Security.Files.MaxPatchLines > 0 && changedLines > effective.Security.Files.MaxPatchLines {
-				return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "patch_too_large", "Changeset exceeds max_patch_lines")
-			}
-			operations := make([]changeset.Operation, 0, len(item.Files))
-			for _, file := range item.Files {
-				operations = append(operations, changeset.Operation{Path: file.Path, NewPath: file.NewPath})
-			}
-			if _, instructionErr := r.resolveChangeInstructions(remote.WorkspacePath, operations); instructionErr != nil {
-				return r.changeError(envReq, remote.ID, remote.WorkspaceName, instructionErr)
-			}
-		case "command_execute":
-			if !r.effectiveConfig(remote.WorkspacePath).Terminal.Enabled {
-				return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "disabled", "terminal tools are disabled")
-			}
-			if security.MatchCommand(r.effectiveConfig(remote.WorkspacePath).Security.Commands, p.Command) == security.Deny {
-				return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "denied", "command denied by policy")
-			}
-		}
-	}
-	if !approve {
-		r.approvals.Consume(aid)
-		r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "approval_confirm", Status: "ok", ApprovalID: aid, Detail: map[string]any{"approve": false}})
-		return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, map[string]any{"approval_id": aid, "approved": false})
-	}
-	switch p.Tool {
-	case "change_apply", "change_execute":
-		item, err := r.changesets.Get(ctx, p.ChangesetID)
-		if err != nil {
-			return r.changeError(envReq, remote.ID, remote.WorkspaceName, err)
-		}
-		if item.RemoteSessionID != remote.ID || item.Digest != p.ChangesetDigest {
-			return r.changeError(envReq, remote.ID, remote.WorkspaceName, fmt.Errorf("changeset digest mismatch"))
-		}
-		envReq.RemoteSessionID = remote.ID
-		result, applyErr := r.applyChangeset(ctx, envReq, principal.ID, remote, item)
-		if applyErr == nil {
-			if applied, getErr := r.changesets.Get(ctx, item.ID); getErr == nil && applied.Status == "applied" {
-				_, _ = r.approvals.Consume(aid)
-			}
-		}
-		return result, applyErr
-	case "command_execute":
-		envReq.RemoteSessionID = remote.ID
-		scope := p.Scope
-		if scope == "" {
-			scope = "workspace"
-		}
-		if p.CommandDigest != "" && p.CommandDigest != commandRequestDigest(p.RequestID, remote.ID, remote.WorkspaceName, p.Command, p.Purpose, scope) {
-			return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "approval_mismatch", "approved command context no longer matches")
-		}
-		yield := time.Duration(p.CommandYieldMs) * time.Millisecond
-		if yield <= 0 {
-			yield = defaultCommandYield
-		}
-		result, executeErr := r.executeCommandTask(ctx, envReq, principal, remote, p.Command, yield, p.Purpose, scope, p.CommandDigest)
-		if executeErr == nil && result != nil && result.StructuredContent != nil {
-			_, _ = r.approvals.Consume(aid)
-		}
-		return result, executeErr
-	default:
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "unsupported", "unknown pending tool")
-	}
-}
-
-func (r *Runtime) toolApprovalList(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	envReq, _, remote, fail := r.changeRequest(ctx, req, false)
-	if fail != nil {
-		return fail, nil
-	}
-	if remote.Role != "owner" && remote.Role != "approver" {
-		return r.remoteError(envReq, remote.ID, remote.WorkspaceName, remotesession.ErrForbidden)
-	}
-	list := r.approvals.ListRemoteSession(remote.ID)
-	items := make([]map[string]any, 0, len(list))
-	for _, p := range list {
-		items = append(items, map[string]any{
-			"approval_id":    p.ID,
-			"tool":           p.Tool,
-			"summary":        p.Summary,
-			"workspace":      p.Workspace,
-			"purpose":        p.Purpose,
-			"scope":          p.Scope,
-			"command_digest": p.CommandDigest,
-		})
-	}
-	return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, map[string]any{"approvals": items})
 }

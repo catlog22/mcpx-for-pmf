@@ -58,37 +58,37 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 	}
 
 	// Confirm rules create a pending action carrying the exact command context.
-	approvalRequest := mcp.CallToolRequest{}
-	approvalRequest.Params.Arguments = map[string]any{
-		"intent":            "request approval for a command",
-		"remote_session_id": created.Session.ID, "command": "echo approval",
-		"purpose": "verify approval context", "scope": "workspace",
+	confirmationRequest := mcp.CallToolRequest{}
+	confirmationRequest.Params.Arguments = map[string]any{
+		"intent":            "request semantic confirmation for a command",
+		"remote_session_id": created.Session.ID, "command": "echo confirmation",
+		"purpose": "verify confirmation context", "scope": "workspace",
 	}
-	approvalResult, err := rt.toolCommandExecute(context.Background(), approvalRequest)
+	confirmationResult, err := rt.toolCommandExecute(context.Background(), confirmationRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	approvalResponse := decodeToolResult(t, approvalResult)
-	approvalData, _ := approvalResponse["data"].(map[string]any)
-	if approvalResponse["status"] != "need_confirmation" || approvalData["purpose"] != "verify approval context" || approvalData["scope"] != "workspace" {
-		t.Fatalf("confirm rule must create approval: %+v", approvalResponse)
+	confirmationResponse := decodeToolResult(t, confirmationResult)
+	confirmationData, _ := confirmationResponse["data"].(map[string]any)
+	if confirmationResponse["status"] != "need_confirmation" || confirmationData["purpose"] != "verify confirmation context" || confirmationData["scope"] != "workspace" {
+		t.Fatalf("confirm rule must create semantic confirmation: %+v", confirmationResponse)
 	}
-	if digest, _ := approvalData["command_digest"].(string); !strings.HasPrefix(digest, "sha256:") {
-		t.Fatalf("missing command digest: %+v", approvalData)
+	if digest, _ := confirmationData["command_digest"].(string); !strings.HasPrefix(digest, "sha256:") {
+		t.Fatalf("missing command digest: %+v", confirmationData)
 	}
-	approvalID, _ := approvalData["approval_id"].(string)
 	confirmRequest := mcp.CallToolRequest{}
 	confirmRequest.Params.Arguments = map[string]any{
-		"intent":            "confirm the approved command",
-		"remote_session_id": created.Session.ID, "approval_id": approvalID, "approve": true,
+		"intent":            "用户已确认执行该命令",
+		"remote_session_id": created.Session.ID, "command": "echo confirmation",
+		"purpose": "verify confirmation context", "scope": "workspace", "user_confirmed": true,
 	}
-	confirmed, err := rt.toolApprovalConfirm(context.Background(), confirmRequest)
+	confirmed, err := rt.toolCommandExecute(context.Background(), confirmRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	confirmedResponse := decodeToolResult(t, confirmed)
 	if confirmedResponse["status"] != "ok" {
-		t.Fatalf("approved command failed: %+v", confirmedResponse)
+		t.Fatalf("confirmed command failed: %+v", confirmedResponse)
 	}
 
 	valid := mcp.CallToolRequest{}

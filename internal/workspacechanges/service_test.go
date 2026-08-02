@@ -82,6 +82,77 @@ func TestInspectAttributesRemoteSessionChanges(t *testing.T) {
 	}
 }
 
+func TestNonGitWorkspaceHasNoGitBaselineButCanBeInspected(t *testing.T) {
+	root := t.TempDir()
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	principal := auth.Principal{ID: "principal-test", Kind: "test", SubjectHash: "subject-test"}
+	created, err := remotesession.NewService(store.DB()).Create(ctx, principal, remotesession.CreateInput{
+		WorkspaceName: "plain", WorkspacePath: root, Label: "non-git workspace",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store.DB())
+	if err := service.CaptureBaseline(ctx, created.Session.ID, root); err != nil {
+		t.Fatalf("non-Git baseline should be a no-op: %v", err)
+	}
+	report, err := service.Inspect(ctx, created.Session.ID, "plain", root, true)
+	if err != nil {
+		t.Fatalf("non-Git inspection should return a structured report: %v", err)
+	}
+	if report.GitAvailable || report.GitHead != "" || len(report.Entries) != 0 {
+		t.Fatalf("unexpected non-Git report: %+v", report)
+	}
+}
+
+func TestInspectHandlesGitRepositoryCreatedAfterSessionOpen(t *testing.T) {
+	root := t.TempDir()
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	principal := auth.Principal{ID: "principal-test", Kind: "test", SubjectHash: "subject-test"}
+	created, err := remotesession.NewService(store.DB()).Create(ctx, principal, remotesession.CreateInput{
+		WorkspaceName: "late-git", WorkspacePath: root, Label: "repository created after session",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store.DB())
+	if err := service.CaptureBaseline(ctx, created.Session.ID, root); err != nil {
+		t.Fatal(err)
+	}
+
+	git(t, root, "init")
+	git(t, root, "config", "user.email", "test@example.invalid")
+	git(t, root, "config", "user.name", "MCPX Test")
+	write(t, root, "tracked.txt", "base\n")
+	git(t, root, "add", "tracked.txt")
+	git(t, root, "commit", "-m", "base")
+	write(t, root, "created-after-session.txt", "changed\n")
+
+	report, err := service.Inspect(ctx, created.Session.ID, "late-git", root, true)
+	if err != nil {
+		t.Fatalf("inspection after Git initialization must not require a missing baseline: %v", err)
+	}
+	if !report.GitAvailable {
+		t.Fatalf("Git repository was not detected: %+v", report)
+	}
+	if report.BaselineHead == "" {
+		t.Fatalf("fallback baseline head is missing: %+v", report)
+	}
+	if len(report.Entries) != 1 || report.Entries[0].Attribution != "external" {
+		t.Fatalf("late Git change attribution=%+v, want one external entry", report.Entries)
+	}
+}
+
 func TestInspectAggregatesNestedGitRoots(t *testing.T) {
 	root := t.TempDir()
 	// The aggregate root itself is not a Git repository; a and b are two

@@ -63,6 +63,44 @@ func TestReadAndPatch(t *testing.T) {
 	}
 }
 
+func TestReadFullReturnsWholeTextAndMIME(t *testing.T) {
+	root := t.TempDir()
+	content := []byte("<!doctype html>\n<html><body>preview</body></html>\n")
+	if err := os.WriteFile(filepath.Join(root, "preview.html"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := ReadFull(FullReadOptions{WorkspaceRoot: root, Path: "preview.html", MaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result.Content) != string(content) || result.MIMEType != "text/html" || result.Size != int64(len(content)) {
+		t.Fatalf("full read=%+v", result)
+	}
+	if !strings.HasPrefix(result.SHA256, "sha256:") {
+		t.Fatalf("missing full-file hash: %q", result.SHA256)
+	}
+}
+
+func TestReadFullPreservesBinaryAndRejectsOversize(t *testing.T) {
+	root := t.TempDir()
+	content := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff}
+	if err := os.WriteFile(filepath.Join(root, "preview.png"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := ReadFull(FullReadOptions{WorkspaceRoot: root, Path: "preview.png", MaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result.Content) != string(content) || result.MIMEType != "image/png" {
+		t.Fatalf("binary full read=%+v", result)
+	}
+	if _, err := ReadFull(FullReadOptions{WorkspaceRoot: root, Path: "preview.png", MaxBytes: 4}); err == nil {
+		t.Fatal("oversize full read should fail")
+	}
+}
+
 func TestSearchReplaceUnique(t *testing.T) {
 	root := t.TempDir()
 	_ = os.WriteFile(filepath.Join(root, "f.txt"), []byte("aa aa"), 0o644)

@@ -2,14 +2,17 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"mcpx/internal/config"
 	"mcpx/internal/envelope"
+	"mcpx/internal/file"
 	"mcpx/internal/instruction"
 	"mcpx/internal/security"
 	"mcpx/internal/source"
@@ -27,7 +30,14 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req mcp.CallToolReque
 	if fail != nil {
 		return fail, nil
 	}
+	mode := sourceReadMode(envReq.Payload)
+	if mode != "window" && mode != "full" {
+		return r.sourceError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("unsupported file_read mode %q", mode))
+	}
 	if raw, ok := envReq.Payload["items"].([]any); ok && len(raw) > 0 {
+		if mode == "full" {
+			return r.sourceError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("full mode currently accepts one path; read each preview file separately"))
+		}
 		if len(raw) > 20 {
 			return r.sourceError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("items exceeds maximum of 20"))
 		}
@@ -103,6 +113,9 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req mcp.CallToolReque
 	if path == "" {
 		return r.sourceError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("path or items is required"))
 	}
+	if mode == "full" {
+		return r.toolFileReadFull(envReq, session.ID, session.WorkspaceName, session.WorkspacePath, path)
+	}
 	if security.MatchFile(r.effectiveConfig(session.WorkspacePath).Security.Files, path) != security.Allow {
 		response := envelope.Fail(envelope.StatusDenied, envReq.RequestID, session.WorkspaceName, map[string]any{"path": path}, "FILE_DENIED", "file denied by policy")
 		response.RemoteSessionID = session.ID
@@ -122,6 +135,99 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req mcp.CallToolReque
 	return mcp.NewToolResultStructured(data, sourceReadDisplay(data, summary)), nil
 }
 
+func (r *Runtime) toolFileReadFull(envReq envelope.Request, remoteSessionID, workspace, workspacePath, path string) (*mcp.CallToolResult, error) {
+	if security.MatchFile(r.effectiveConfig(workspacePath).Security.Files, path) != security.Allow {
+		response := envelope.Fail(envelope.StatusDenied, envReq.RequestID, workspace, map[string]any{"path": path}, "FILE_DENIED", "file denied by policy")
+		response.RemoteSessionID = remoteSessionID
+		return r.resultJSON(response)
+	}
+	read, err := file.ReadFull(file.FullReadOptions{
+		WorkspaceRoot: workspacePath,
+		Path:          path,
+		MaxBytes:      r.effectiveConfig(workspacePath).Security.Files.MaxReadBytes,
+	})
+	if err != nil {
+		return r.sourceError(envReq, remoteSessionID, workspace, err)
+	}
+	data := fullFileReadData(read)
+	summary := fmt.Sprintf("Read %s in full (%d bytes, %s).", path, read.Size, read.MIMEType)
+	result := mcp.NewToolResultStructured(data, fullFileReadDisplay(read, data, summary))
+	if strings.HasPrefix(read.MIMEType, "image/") {
+		result.Content = append(result.Content, mcp.NewImageContent(base64.StdEncoding.EncodeToString(read.Content), read.MIMEType))
+	}
+	return result, nil
+}
+
+func sourceReadMode(payload map[string]any) string {
+	mode, _ := payload["mode"].(string)
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		return "window"
+	}
+	return mode
+}
+
+func fullFileReadData(read file.FullReadResult) map[string]any {
+	data := map[string]any{
+		"path":       read.Path,
+		"mode":       "full",
+		"mime_type":  read.MIMEType,
+		"size_bytes": read.Size,
+		"sha256":     read.SHA256,
+	}
+	if strings.HasPrefix(read.MIMEType, "image/") && read.MIMEType != "image/svg+xml" {
+		data["encoding"] = "base64"
+		return data
+	}
+	if fullReadIsText(read.MIMEType, read.Content) {
+		content := string(read.Content)
+		data["content"] = content
+		data["encoding"] = "utf-8"
+		data["total_lines"] = fullReadLineCount(content)
+		return data
+	}
+	data["content"] = base64.StdEncoding.EncodeToString(read.Content)
+	data["encoding"] = "base64"
+	return data
+}
+
+func fullReadIsText(mimeType string, content []byte) bool {
+	if !utf8.Valid(content) {
+		return false
+	}
+	return strings.HasPrefix(mimeType, "text/") ||
+		strings.Contains(mimeType, "json") ||
+		strings.Contains(mimeType, "xml") ||
+		strings.Contains(mimeType, "yaml") ||
+		strings.Contains(mimeType, "javascript")
+}
+
+func fullReadLineCount(content string) int {
+	if content == "" {
+		return 0
+	}
+	lines := strings.Count(content, "\n")
+	if !strings.HasSuffix(content, "\n") {
+		lines++
+	}
+	return lines
+}
+
+func fullFileReadDisplay(read file.FullReadResult, data map[string]any, summary string) string {
+	if read.MIMEType == "text/html" && utf8.Valid(read.Content) {
+		content := string(read.Content)
+		fence := "```"
+		if strings.Contains(content, fence) {
+			fence = "````"
+		}
+		if !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		return fence + "html\n" + content + fence + "\n\nRevision: `" + read.SHA256 + "`"
+	}
+	return sourceReadDisplay(data, summary)
+}
+
 // sourceReadDisplay is the host/model-facing representation of file_read.
 // The public ARC wrapper keeps the complete machine data in response metadata;
 // the first text content remains useful to a terminal agent without requiring
@@ -134,11 +240,17 @@ func sourceReadDisplay(data map[string]any, summary string) string {
 	for _, item := range sourceReadItems(data) {
 		path, _ := item["path"].(string)
 		content, _ := item["content"].(string)
-		if path == "" || content == "" {
+		if path == "" {
+			continue
+		}
+		if content == "" {
 			if errValue, ok := item["error"].(map[string]any); ok {
 				if message, _ := errValue["message"].(string); message != "" {
 					fmt.Fprintf(&builder, "\n\n`%s`: %s", path, message)
 				}
+			}
+			if revision, _ := item["sha256"].(string); strings.TrimSpace(revision) != "" {
+				fmt.Fprintf(&builder, "\n\nRevision: `%s`", revision)
 			}
 			continue
 		}
@@ -162,6 +274,9 @@ func sourceReadDisplay(data map[string]any, summary string) string {
 		builder.WriteString("```")
 		if truncated, _ := item["truncated"].(bool); truncated {
 			builder.WriteString("\n\n> 内容已截断；请继续调用 `file_read` 读取后续内容。")
+		}
+		if revision, _ := item["sha256"].(string); strings.TrimSpace(revision) != "" {
+			fmt.Fprintf(&builder, "\n\nRevision: `%s`", revision)
 		}
 	}
 	return builder.String()

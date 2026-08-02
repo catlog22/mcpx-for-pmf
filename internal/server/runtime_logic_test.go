@@ -57,7 +57,7 @@ func TestExecPipelineAllowConfirmDeny(t *testing.T) {
 		t.Fatal("allow")
 	}
 	if security.MatchCommand(eff.Security.Commands, "npm install") != security.Confirm {
-		t.Fatal("confirm rules must require approval")
+		t.Fatal("confirm rules must require semantic confirmation")
 	}
 	if security.MatchCommand(eff.Security.Commands, "rm -rf /") != security.Deny {
 		t.Fatal("deny")
@@ -68,14 +68,14 @@ func TestExecPipelineAllowConfirmDeny(t *testing.T) {
 	}
 }
 
-func TestTerminalExecRunsAfterApproval(t *testing.T) {
+func TestTerminalExecRunsAfterSemanticConfirmation(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("MCPX_HOME", home)
 	ws := filepath.Join(home, "proj")
 	_ = os.MkdirAll(ws, 0o755)
 	cfg := config.DefaultConfig()
 	cfg.Workspaces = []config.WorkspaceEntry{{Name: "proj", Path: ws}}
-	// Confirm rules require approval before starting the task.
+	// Confirm rules require semantic confirmation before starting the task.
 	cfg.Security.Commands = config.CommandRules{
 		Confirm: []string{`^echo\b`},
 	}
@@ -92,7 +92,7 @@ func TestTerminalExecRunsAfterApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
-		WorkspaceName: "proj", WorkspacePath: ws, Label: "no approval test",
+		WorkspaceName: "proj", WorkspacePath: ws, Label: "no confirmation test",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -112,19 +112,19 @@ func TestTerminalExecRunsAfterApproval(t *testing.T) {
 	}
 	response := decodeToolResult(t, out)
 	if response["status"] != "need_confirmation" {
-		t.Fatalf("command must require approval: %+v", response)
+		t.Fatalf("command must require semantic confirmation: %+v", response)
 	}
 	data, _ := response["data"].(map[string]any)
-	approvalID, _ := data["approval_id"].(string)
-	if approvalID == "" {
-		t.Fatalf("missing approval id: %+v", response)
+	if data["confirmation_required"] != true || data["command"] != "echo approved-run" {
+		t.Fatalf("confirmation response missing semantic prompt: %+v", response)
 	}
-	approvalReq := mcp.CallToolRequest{}
-	approvalReq.Params.Arguments = map[string]any{
-		"intent":            "confirm the command approval",
-		"remote_session_id": created.Session.ID, "approval_id": approvalID, "approve": true,
+	confirmReq := mcp.CallToolRequest{}
+	confirmReq.Params.Arguments = map[string]any{
+		"intent":            "用户已确认执行该命令",
+		"remote_session_id": created.Session.ID, "command": "echo approved-run",
+		"purpose": "run the command test", "scope": "workspace", "user_confirmed": true,
 	}
-	approved, err := rt.toolApprovalConfirm(context.Background(), approvalReq)
+	approved, err := rt.toolCommandExecute(context.Background(), confirmReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestTerminalExecRunsAfterApproval(t *testing.T) {
 		t.Fatalf("stdout %v", data)
 	}
 	if pending := rt.approvals.ListRemoteSession(created.Session.ID); len(pending) != 0 {
-		t.Fatalf("approval must be consumed after execution: %+v", pending)
+		t.Fatalf("confirmation must be consumed after execution: %+v", pending)
 	}
 }
 

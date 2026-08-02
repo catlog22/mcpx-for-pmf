@@ -201,7 +201,7 @@ func classify(tool string, isError bool, data map[string]any, summary string) (s
 	if isError || isErrorData(data) {
 		behavior := "summarize"
 		status, _ := data["status"].(string)
-		if status == "need_confirmation" || status == "need_secret" || hasAnyKey(data, "approval_id") {
+		if status == "need_confirmation" || status == "need_secret" {
 			behavior = "ask_confirm"
 		}
 		errorResult := errorData(data)
@@ -244,7 +244,7 @@ func classify(tool string, isError bool, data map[string]any, summary string) (s
 	if completed, ok := inner["completed_in_call"].(bool); ok && !completed {
 		behavior = "continue"
 	}
-	if data["status"] == "need_confirmation" || hasAnyKey(data, "approval_id") || hasAnyKey(inner, "approval_id") {
+	if data["status"] == "need_confirmation" {
 		behavior = "ask_confirm"
 	}
 	return resultType, inner, Hints{PreferredBehavior: behavior}, actionsFrom(data)
@@ -342,7 +342,7 @@ func actionsFrom(data map[string]any) []Action {
 		}
 	}
 	if !ok {
-		return approvalAction(data)
+		return nil
 	}
 	tool, _ := next["tool"].(string)
 	args, _ := next["arguments"].(map[string]any)
@@ -355,30 +355,10 @@ func actionsFrom(data map[string]any) []Action {
 	actionType := "continue"
 	confirm := false
 	label := "Continue with " + tool
-	if strings.Contains(tool, "approval") {
-		actionType, confirm, label = "approval", true, "Review approval"
-	} else if strings.Contains(tool, "change") {
+	if strings.Contains(tool, "change") {
 		actionType, confirm, label = "mutation", true, "Continue with "+tool
-	} else if nextAction, _ := next["action"].(string); nextAction == "approve" || nextAction == "deny" {
-		actionType, confirm, label = "approval", true, "Review approval"
 	}
 	return []Action{{ID: tool, Type: actionType, Label: label, Confirm: confirm, Arguments: args}}
-}
-
-func approvalAction(data map[string]any) []Action {
-	approvalID, _ := data["approval_id"].(string)
-	if approvalID == "" {
-		if inner, ok := data["data"].(map[string]any); ok {
-			approvalID, _ = inner["approval_id"].(string)
-		}
-	}
-	if approvalID == "" {
-		return nil
-	}
-	return []Action{{
-		ID: "approval_manage", Type: "approval", Label: "Review approval", Confirm: true,
-		Arguments: map[string]any{"action": "approve", "approval_id": approvalID},
-	}}
 }
 
 func hasAnyKey(data map[string]any, keys ...string) bool {

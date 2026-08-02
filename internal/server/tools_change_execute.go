@@ -156,19 +156,19 @@ func (r *Runtime) toolChangeExecute(ctx context.Context, req mcp.CallToolRequest
 	if effective.Security.Files.MaxPatchLines > 0 && changedLines > effective.Security.Files.MaxPatchLines {
 		return r.patchTooLargeResult(envReq, session, changedLines, effective.Security.Files.MaxPatchLines)
 	}
-	if needsConfirmation {
-		approvalID, approvalErr := r.approvals.Put(approval.Pending{
+	if needsConfirmation && !userConfirmed(envReq.Payload) {
+		_, confirmationErr := r.approvals.Put(approval.Pending{
 			Tool: "change_execute", Summary: prepared.Summary, WorkDir: session.WorkspacePath, Workspace: session.WorkspaceName,
 			RequestID: envReq.RequestID, RemoteSessionID: session.ID, PrincipalID: principal.ID,
 			ChangesetID: prepared.ID, ChangesetDigest: prepared.Digest,
 		})
-		if approvalErr != nil {
-			return r.terminalError(envReq, session.ID, session.WorkspaceName, "approval_store_error", approvalErr.Error())
+		if confirmationErr != nil {
+			return r.terminalError(envReq, session.ID, session.WorkspaceName, "confirmation_store_error", confirmationErr.Error())
 		}
-		resultPayload["approval_id"] = approvalID
-		resultPayload["next_action"] = nextAction("approval_manage", map[string]any{"remote_session_id": session.ID, "action": "approve", "approval_id": approvalID})
+		resultPayload["confirmation_required"] = true
+		resultPayload["confirmation_message"] = "请向用户展示文件和差异，等待明确确认；确认后使用本 Changeset 的 changeset_id、expected_digest，并设置 user_confirmed=true 重试。若用户原始请求已明确授权本次变更，可在本次 operations 请求中直接设置 user_confirmed=true。"
 		response := envelope.Fail(envelope.StatusNeedConfirmation, envReq.RequestID, session.WorkspaceName,
-			resultPayload, "APPROVAL_REQUIRED", "source change requires approval")
+			resultPayload, "USER_CONFIRMATION_REQUIRED", "文件变更等待用户语义确认")
 		response.RemoteSessionID = session.ID
 		return r.resultJSON(response)
 	}
@@ -195,7 +195,7 @@ func (r *Runtime) toolChangeExecute(ctx context.Context, req mcp.CallToolRequest
 	resultPayload["files_changed"] = applied.Files
 
 	if len(verify) > 0 {
-		verifyResults := r.runVerifySteps(ctx, session, verify)
+		verifyResults := r.runVerifySteps(ctx, envReq, session, verify)
 		resultPayload["verify"] = verifyResults
 	}
 
@@ -234,7 +234,7 @@ func (r *Runtime) executePreparedChange(ctx context.Context, envReq envelope.Req
 	if apply, exists := envReq.Payload["apply"].(bool); exists && !apply {
 		return changeDiffResult(item), nil
 	}
-	return r.applyPreparedChange(ctx, envReq, principal, session, item, "change_execute")
+	return r.applyPreparedChange(ctx, envReq, principal, session, item, userConfirmed(envReq.Payload))
 }
 
 func (r *Runtime) executeRevertChange(ctx context.Context, envReq envelope.Request, principal auth.Principal, session remotesession.Session, sourceID string) (*mcp.CallToolResult, error) {
@@ -260,10 +260,10 @@ func (r *Runtime) executeRevertChange(ctx context.Context, envReq envelope.Reque
 	if apply, exists := envReq.Payload["apply"].(bool); exists && !apply {
 		return changeDiffResult(revert), nil
 	}
-	return r.applyPreparedChange(ctx, envReq, principal, session, revert, "change_execute")
+	return r.applyPreparedChange(ctx, envReq, principal, session, revert, userConfirmed(envReq.Payload))
 }
 
-func (r *Runtime) applyPreparedChange(ctx context.Context, envReq envelope.Request, principal auth.Principal, session remotesession.Session, item changeset.Changeset, approvalTool string) (*mcp.CallToolResult, error) {
+func (r *Runtime) applyPreparedChange(ctx context.Context, envReq envelope.Request, principal auth.Principal, session remotesession.Session, item changeset.Changeset, confirmed bool) (*mcp.CallToolResult, error) {
 	effective := r.effectiveConfig(session.WorkspacePath)
 	needsConfirmation, changedLines, deniedPath := evaluateChangesetPolicy(effective, item.Files)
 	if deniedPath != "" {
@@ -274,24 +274,28 @@ func (r *Runtime) applyPreparedChange(ctx context.Context, envReq envelope.Reque
 	if effective.Security.Files.MaxPatchLines > 0 && changedLines > effective.Security.Files.MaxPatchLines {
 		return r.patchTooLargeResult(envReq, session, changedLines, effective.Security.Files.MaxPatchLines)
 	}
-	if needsConfirmation {
-		approvalID, approvalErr := r.approvals.Put(approval.Pending{
-			Tool: approvalTool, Summary: item.Summary, WorkDir: session.WorkspacePath, Workspace: session.WorkspaceName,
+	if needsConfirmation && (!confirmed || !r.hasPendingChangeConfirmation(session.ID, item.ID, item.Digest)) {
+		_, confirmationErr := r.approvals.Put(approval.Pending{
+			Tool: "change_execute", Summary: item.Summary, WorkDir: session.WorkspacePath, Workspace: session.WorkspaceName,
 			RequestID: envReq.RequestID, RemoteSessionID: session.ID, PrincipalID: principal.ID,
 			ChangesetID: item.ID, ChangesetDigest: item.Digest,
 		})
-		if approvalErr != nil {
-			return r.terminalError(envReq, session.ID, session.WorkspaceName, "approval_store_error", approvalErr.Error())
+		if confirmationErr != nil {
+			return r.terminalError(envReq, session.ID, session.WorkspaceName, "confirmation_store_error", confirmationErr.Error())
 		}
+		confirmationData := changeSummaryDTO(item)
+		confirmationData["confirmation_required"] = true
+		confirmationData["confirmation_message"] = "请向用户展示文件和差异，等待明确确认；确认后使用本 Changeset 的 changeset_id、expected_digest，并设置 user_confirmed=true 重试。若用户原始请求已明确授权本次变更，可在本次 operations 请求中直接设置 user_confirmed=true。"
 		response := envelope.Fail(envelope.StatusNeedConfirmation, envReq.RequestID, session.WorkspaceName,
-			map[string]any{
-				"approval_id": approvalID, "changeset_id": item.ID, "digest": item.Digest,
-				"next_action": nextActionWithReason("approval_manage", "review and approve this exact Changeset", map[string]any{"remote_session_id": session.ID, "action": "approve", "approval_id": approvalID}),
-			}, "APPROVAL_REQUIRED", "source change requires approval")
+			confirmationData, "USER_CONFIRMATION_REQUIRED", "文件变更等待用户语义确认")
 		response.RemoteSessionID = session.ID
 		return r.resultJSON(response)
 	}
-	return r.applyChangeset(ctx, envReq, principal.ID, session, item)
+	result, err := r.applyChangeset(ctx, envReq, principal.ID, session, item)
+	if err == nil && confirmed {
+		r.consumePendingChangeConfirmation(session.ID, item.ID, item.Digest)
+	}
+	return result, err
 }
 
 func (r *Runtime) replayChangeExecute(envReq envelope.Request, session remotesession.Session, item changeset.Changeset) *mcp.CallToolResult {
@@ -305,16 +309,41 @@ func (r *Runtime) replayChangeExecute(envReq envelope.Request, session remoteses
 			}
 			response := envelope.Fail(envelope.StatusNeedConfirmation, envReq.RequestID, session.WorkspaceName,
 				map[string]any{
-					"approval_id": pending.ID, "changeset_id": item.ID, "digest": item.Digest,
-					"diff":        payload["diff"],
-					"next_action": nextAction("approval_manage", map[string]any{"remote_session_id": session.ID, "action": "approve", "approval_id": pending.ID}),
-				}, "APPROVAL_REQUIRED", "source change requires approval")
+					"changeset_id": item.ID, "digest": item.Digest, "diff": payload["diff"],
+					"confirmation_required": true,
+					"confirmation_message":  "请向用户展示文件和差异，等待明确确认；确认后使用本 Changeset 的 changeset_id、expected_digest，并设置 user_confirmed=true 重试。若用户原始请求已明确授权本次变更，可在本次 operations 请求中直接设置 user_confirmed=true。",
+				}, "USER_CONFIRMATION_REQUIRED", "文件变更等待用户语义确认")
 			response.RemoteSessionID = session.ID
 			result, _ := r.resultJSON(response)
 			return result
 		}
 	}
 	return changeDiffResultFromDTO(item, payload)
+}
+
+func userConfirmed(payload map[string]any) bool {
+	confirmed, _ := payload["user_confirmed"].(bool)
+	return confirmed
+}
+
+func (r *Runtime) hasPendingChangeConfirmation(remoteSessionID, changesetID, digest string) bool {
+	for _, pending := range r.approvals.ListRemoteSession(remoteSessionID) {
+		if pending.Tool == "change_execute" &&
+			pending.ChangesetID == changesetID && pending.ChangesetDigest == digest {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Runtime) consumePendingChangeConfirmation(remoteSessionID, changesetID, digest string) {
+	for _, pending := range r.approvals.ListRemoteSession(remoteSessionID) {
+		if pending.Tool == "change_execute" &&
+			pending.ChangesetID == changesetID && pending.ChangesetDigest == digest {
+			_, _ = r.approvals.Consume(pending.ID)
+			return
+		}
+	}
 }
 
 func formatSourceContent(ctx context.Context, workspacePath string, content []byte) ([]byte, error) {
@@ -355,6 +384,9 @@ func (r *Runtime) resolveChangeInstructions(workspacePath string, operations []c
 func evaluateChangesetPolicy(effective config.Config, files []changeset.FileChange) (needsConfirmation bool, changedLines int, deniedPath string) {
 	for _, file := range files {
 		changedLines += changedLineCount(file.Original, file.Proposed)
+		if changeset.IsDirectoryChange(file) {
+			changedLines++
+		}
 		for _, path := range []string{file.Path, file.NewPath} {
 			if path == "" {
 				continue
@@ -399,7 +431,7 @@ func changedLineCount(original, proposed []byte) int {
 	return (suffixA - prefix) + (suffixB - prefix)
 }
 
-func (r *Runtime) runVerifySteps(ctx context.Context, session remotesession.Session, steps []string) []map[string]any {
+func (r *Runtime) runVerifySteps(ctx context.Context, envReq envelope.Request, session remotesession.Session, steps []string) []map[string]any {
 	results := make([]map[string]any, 0, len(steps))
 	discovered := projecttask.Discover(session.WorkspacePath)
 	findTask := func(candidates ...string) (projecttask.Task, bool) {
@@ -446,7 +478,7 @@ func (r *Runtime) runVerifySteps(ctx context.Context, session remotesession.Sess
 			results = append(results, item)
 			continue
 		}
-		task, err := r.tasks.StartRemote(ctx, session.ID, session.WorkspaceName, session.WorkspacePath, project.Command)
+		task, err := r.tasks.StartRemoteWithObservation(ctx, envReq.RequestID, "change_execute", session.ID, session.WorkspaceName, session.WorkspacePath, project.Command)
 		if err != nil {
 			item["status"] = "failed"
 			item["error"] = err.Error()

@@ -6,7 +6,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"mime"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"unicode/utf8"
 )
@@ -29,6 +32,25 @@ type ReadResult struct {
 	Limit      int    `json:"limit"`
 	Truncated  bool   `json:"truncated"`
 	SHA256     string `json:"-"`
+}
+
+// FullReadOptions controls an explicit whole-file read. Unlike ReadOptions,
+// FullReadOptions permits binary content but always enforces MaxBytes.
+type FullReadOptions struct {
+	WorkspaceRoot string
+	Path          string
+	MaxBytes      int64
+}
+
+// FullReadResult contains the complete file bytes and their display metadata.
+// Content is intentionally excluded from JSON serialization so callers choose
+// the appropriate MCP content type instead of duplicating large payloads.
+type FullReadResult struct {
+	Path     string `json:"path"`
+	Content  []byte `json:"-"`
+	Size     int64  `json:"size_bytes"`
+	MIMEType string `json:"mime_type"`
+	SHA256   string `json:"sha256"`
 }
 
 // Read loads a bounded text window while hashing the same stream. It keeps
@@ -129,6 +151,64 @@ func Read(opts ReadOptions) (ReadResult, error) {
 		Truncated:  truncated,
 		SHA256:     "sha256:" + hex.EncodeToString(digest),
 	}, nil
+}
+
+// ReadFull reads a complete regular file for an explicit client-preview
+// request. It preserves binary bytes and rejects files larger than MaxBytes.
+func ReadFull(opts FullReadOptions) (FullReadResult, error) {
+	if opts.MaxBytes <= 0 {
+		opts.MaxBytes = 1 << 20
+	}
+	if _, err := Resolve(opts.WorkspaceRoot, opts.Path); err != nil {
+		return FullReadResult{}, err
+	}
+	root, err := os.OpenRoot(opts.WorkspaceRoot)
+	if err != nil {
+		return FullReadResult{}, err
+	}
+	defer root.Close()
+	info, err := root.Stat(opts.Path)
+	if err != nil {
+		return FullReadResult{}, err
+	}
+	if info.IsDir() {
+		return FullReadResult{}, fmt.Errorf("is a directory")
+	}
+	if info.Size() > opts.MaxBytes {
+		return FullReadResult{}, fmt.Errorf("file too large for full read")
+	}
+
+	handle, err := root.Open(opts.Path)
+	if err != nil {
+		return FullReadResult{}, err
+	}
+	defer handle.Close()
+	content, err := io.ReadAll(io.LimitReader(handle, opts.MaxBytes+1))
+	if err != nil {
+		return FullReadResult{}, err
+	}
+	if int64(len(content)) > opts.MaxBytes {
+		return FullReadResult{}, fmt.Errorf("file too large for full read")
+	}
+	digest := sha256.Sum256(content)
+	return FullReadResult{
+		Path: opts.Path, Content: content, Size: int64(len(content)),
+		MIMEType: detectMIME(opts.Path, content), SHA256: "sha256:" + hex.EncodeToString(digest[:]),
+	}, nil
+}
+
+func detectMIME(path string, content []byte) string {
+	if detected := mime.TypeByExtension(filepath.Ext(path)); detected != "" {
+		return normalizeMIME(detected)
+	}
+	return normalizeMIME(http.DetectContentType(content))
+}
+
+func normalizeMIME(detected string) string {
+	if separator := strings.IndexByte(detected, ';'); separator >= 0 {
+		detected = detected[:separator]
+	}
+	return strings.TrimSpace(detected)
 }
 
 func truncateUTF8(value string, maxBytes int) string {

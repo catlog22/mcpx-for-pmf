@@ -90,6 +90,30 @@ func TestApplyRollsBackWhenLaterFileFails(t *testing.T) {
 	}
 }
 
+func TestApplyRemovesCreatedParentDirectoriesOnRollback(t *testing.T) {
+	workspace, store, remoteID, principal := newChangesetFixture(t, nil)
+	service := NewService(store.DB())
+	service.beforeApply = func(item FileChange) error {
+		if item.Ordinal == 1 {
+			return errors.New("injected apply failure")
+		}
+		return nil
+	}
+	prepared, err := service.Prepare(context.Background(), remoteID, principal.ID, workspace, "rollback nested files", []Operation{
+		{Operation: "create", Path: "nested/first.txt", Content: "first\n"},
+		{Operation: "create", Path: "nested/second.txt", Content: "second\n"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Apply(context.Background(), prepared.ID, workspace); err == nil {
+		t.Fatal("injected apply failure unexpectedly succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "nested")); !os.IsNotExist(err) {
+		t.Fatalf("created parent directory was not removed: %v", err)
+	}
+}
+
 func TestApplyRollsBackDeleteAfterDirectorySyncFailure(t *testing.T) {
 	workspace, store, remoteID, principal := newChangesetFixture(t, map[string]string{"delete.txt": "restore me\n"})
 	service := NewService(store.DB())
@@ -158,6 +182,34 @@ func TestRecoverRollsBackInterruptedJournal(t *testing.T) {
 		t.Fatalf("recovered changeset status=%q, want failed", got.Status)
 	}
 	assertJournalStatus(t, store.DB(), "jrnl-recover", "rolled_back")
+}
+
+func TestRecoverRestoresInterruptedDirectoryDelete(t *testing.T) {
+	workspace, store, remoteID, principal := newChangesetFixture(t, nil)
+	directory := filepath.Join(workspace, "old-project")
+	if err := os.MkdirAll(filepath.Join(directory, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "nested", "value.txt"), []byte("value\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store.DB())
+	prepared, err := service.Prepare(context.Background(), remoteID, principal.ID, workspace, "delete directory", []Operation{{
+		Operation: "delete", Path: "old-project",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyOneForChangeset(workspace, prepared.ID, prepared.Files[0]); err != nil {
+		t.Fatal(err)
+	}
+	insertApplyingJournal(t, store.DB(), "jrnl-directory-recover", prepared, prepared.Files)
+
+	if err := service.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertFile(t, filepath.Join(directory, "nested", "value.txt"), "value\n")
+	assertJournalStatus(t, store.DB(), "jrnl-directory-recover", "rolled_back")
 }
 
 func TestRecoverRefusesExternalModification(t *testing.T) {

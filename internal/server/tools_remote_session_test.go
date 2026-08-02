@@ -158,7 +158,7 @@ func TestRemoteSessionMCPIsVendorAndTransportIndependent(t *testing.T) {
 	}
 }
 
-func TestChangesetMCPDiffAndApprovalSurviveTransportChange(t *testing.T) {
+func TestChangesetMCPDiffAndSemanticConfirmationSurviveTransportChange(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("MCPX_HOME", home)
 	workspacePath := filepath.Join(home, "project")
@@ -262,7 +262,7 @@ func TestChangesetMCPDiffAndApprovalSurviveTransportChange(t *testing.T) {
 		t.Fatalf("read Changeset resource: resources=%+v err=%v", diffResources, err)
 	}
 
-	pending := callEnvelope(t, runtime.toolChangeApply, contextFor("transport-apply"), map[string]any{
+	pending := callEnvelope(t, runtime.toolChangeExecute, contextFor("transport-apply"), map[string]any{
 		"remote_session_id": remoteSessionID,
 		"changeset_id":      changesetID,
 		"expected_digest":   digest,
@@ -271,30 +271,27 @@ func TestChangesetMCPDiffAndApprovalSurviveTransportChange(t *testing.T) {
 		t.Fatalf("expected confirmation: %+v", pending)
 	}
 	pendingData := pending["data"].(map[string]any)
-	approvalID := pendingData["approval_id"].(string)
 	pendingFiles, _ := pendingData["files"].([]any)
 	if len(pendingFiles) != 1 {
-		t.Fatalf("approval response must include changed files: %+v", pendingData)
+		t.Fatalf("confirmation response must include changed files: %+v", pendingData)
 	}
 	pendingFile, _ := pendingFiles[0].(map[string]any)
 	pendingDiff, _ := pendingFile["diff"].(string)
 	if !strings.Contains(pendingDiff, "-const Value = 1") || !strings.Contains(pendingDiff, "+const Value = 2") {
-		t.Fatalf("approval response must include concrete file diff: %+v", pendingFile)
+		t.Fatalf("confirmation response must include concrete file diff: %+v", pendingFile)
 	}
-	missingSession := callEnvelope(t, runtime.toolApprovalConfirm, contextFor("transport-confirm-missing"), map[string]any{
-		"approval_id": approvalID,
-		"approve":     true,
+	missingSession := callEnvelope(t, runtime.toolChangeExecute, contextFor("transport-confirm-missing"), map[string]any{
+		"changeset_id": pendingData["changeset_id"], "expected_digest": pendingData["digest"], "user_confirmed": true,
 	})
 	if missingSession["status"] != "error" || missingSession["error"].(map[string]any)["code"] != "REMOTE_SESSION_REQUIRED" {
-		t.Fatalf("approval must require explicit Remote Session: %+v", missingSession)
+		t.Fatalf("confirmation must require explicit Remote Session: %+v", missingSession)
 	}
-	confirmed := callEnvelope(t, runtime.toolApprovalConfirm, contextFor("transport-confirm-new"), map[string]any{
-		"remote_session_id": remoteSessionID,
-		"approval_id":       approvalID,
-		"approve":           true,
+	confirmed := callEnvelope(t, runtime.toolChangeExecute, contextFor("transport-confirm-new"), map[string]any{
+		"remote_session_id": remoteSessionID, "changeset_id": pendingData["changeset_id"],
+		"expected_digest": pendingData["digest"], "user_confirmed": true,
 	})
 	if confirmed["status"] != "ok" {
-		t.Fatalf("approval failed after transport change: %+v", confirmed)
+		t.Fatalf("confirmation failed after transport change: %+v", confirmed)
 	}
 	content, err := os.ReadFile(filepath.Join(workspacePath, "demo.go"))
 	if err != nil || !strings.Contains(string(content), "Value = 2") {

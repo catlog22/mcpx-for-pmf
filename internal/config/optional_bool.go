@@ -59,3 +59,48 @@ func (c *LoggingConfig) UnmarshalYAML(node *yaml.Node) error {
 	c.Enabled, c.EnabledSet, err = decodeEnabled(node)
 	return err
 }
+
+func (c *RetentionConfig) UnmarshalYAML(node *yaml.Node) error {
+	var raw struct {
+		Enabled             *bool   `yaml:"enabled"`
+		Interval            *string `yaml:"interval"`
+		ProcessEventTTL     *string `yaml:"process_event_ttl"`
+		ProcessEventMaxRows *int    `yaml:"process_event_max_rows"`
+		MemoryEventTTL      *string `yaml:"memory_event_ttl"`
+		MemoryEventMaxRows  *int    `yaml:"memory_event_max_rows"`
+		TerminalTaskTTL     *string `yaml:"terminal_task_ttl"`
+		SnapshotTTL         *string `yaml:"snapshot_ttl"`
+		VacuumThresholdRows *int    `yaml:"vacuum_threshold_rows"`
+	}
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	if raw.Enabled != nil {
+		c.Enabled, c.EnabledSet = *raw.Enabled, true
+	}
+	if raw.Interval != nil {
+		c.Interval, c.IntervalSet = *raw.Interval, true
+	}
+	if raw.ProcessEventTTL != nil {
+		c.ProcessEventTTL, c.ProcessEventTTLSet = *raw.ProcessEventTTL, true
+	}
+	if raw.ProcessEventMaxRows != nil {
+		c.ProcessEventMaxRows, c.ProcessEventMaxSet = *raw.ProcessEventMaxRows, true
+	}
+	if raw.MemoryEventTTL != nil {
+		c.MemoryEventTTL, c.MemoryEventTTLSet = *raw.MemoryEventTTL, true
+	}
+	if raw.MemoryEventMaxRows != nil {
+		c.MemoryEventMaxRows, c.MemoryEventMaxSet = *raw.MemoryEventMaxRows, true
+	}
+	if raw.TerminalTaskTTL != nil {
+		c.TerminalTaskTTL, c.TerminalTaskTTLSet = *raw.TerminalTaskTTL, true
+	}
+	if raw.SnapshotTTL != nil {
+		c.SnapshotTTL, c.SnapshotTTLSet = *raw.SnapshotTTL, true
+	}
+	if raw.VacuumThresholdRows != nil {
+		c.VacuumThresholdRows, c.VacuumThresholdSet = *raw.VacuumThresholdRows, true
+	}
+	return nil
+}

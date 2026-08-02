@@ -90,13 +90,40 @@ func TestWrapToolResultRendersSessionBootstrapAsMarkdown(t *testing.T) {
 	}, "Session rs_demo opened for workspace fyy.")
 	written := WrapToolResult("session_open", ResultContext{}, raw)
 	text := written.Content[0].(mcp.TextContent).Text
-	for _, want := range []string{"rs_demo", "`/workspaces/fyy`", "`file_read`", "Agent guidance", "Read before editing."} {
+	for _, want := range []string{"- Remote session: `rs_demo`", "`/workspaces/fyy`", "`file_read`", "Agent guidance", "Read before editing."} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("session bootstrap text missing %q: %q", want, text)
 		}
 	}
 	if strings.Contains(text, "\"remote_session\"") || strings.Contains(text, "structured_content") {
 		t.Fatalf("session bootstrap leaked machine JSON: %q", text)
+	}
+}
+
+func TestWrapToolResultRendersPlanIdentityAndProgress(t *testing.T) {
+	raw := mcp.NewToolResultText(`{"status":"ok","data":{"plan_id":"pl_demo","goal":"修复工具可见性","status":"ready","tasks":[{"task_id":"pt_1"},{"task_id":"pt_2"}],"progress":{"completed":1,"total":2}}}`)
+	written := WrapToolResult("plan_manage", ResultContext{}, raw)
+	text := written.Content[0].(mcp.TextContent).Text
+	for _, want := range []string{"Plan ID: `pl_demo`", "Status: `ready`", "Goal: 修复工具可见性", "Progress: 1/2 completed", "`pt_1`", "`pt_2`"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("plan text missing %q: %q", want, text)
+		}
+	}
+	if strings.Contains(text, `"plan_id"`) || text == "ok" {
+		t.Fatalf("plan must not degrade to JSON/ok: %q", text)
+	}
+}
+
+func TestWrapToolResultRendersExtensionInventory(t *testing.T) {
+	raw := mcp.NewToolResultStructured(map[string]any{
+		"skills": []map[string]any{{"name": "ui-ux-pro-max", "description": "UI design"}},
+	}, "Extension inventory returned.")
+	written := WrapToolResult("extension_manage", ResultContext{}, raw)
+	text := written.Content[0].(mcp.TextContent).Text
+	for _, want := range []string{"Extension inventory returned.", "Skills:", "`ui-ux-pro-max`"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("extension inventory missing %q: %q", want, text)
+		}
 	}
 }
 
@@ -166,10 +193,10 @@ func TestWrapToolResultUsesHumanContentAndHidesARCJSONFromHost(t *testing.T) {
 	}
 }
 
-func TestWrapToolResultMapsApprovalToErrorAction(t *testing.T) {
-	raw := mcp.NewToolResultText(`{"ok":false,"status":"need_confirmation","data":{"approval_id":"ap_123","next_action":{"tool":"approval_manage","arguments":{"action":"approve","approval_id":"ap_123"}}},"error":{"code":"APPROVAL_REQUIRED","message":"approval required"}}`)
+func TestWrapToolResultMapsSemanticConfirmationWithoutApprovalAction(t *testing.T) {
+	raw := mcp.NewToolResultText(`{"ok":false,"status":"need_confirmation","data":{"confirmation_required":true,"confirmation_message":"请确认后重试","command":"go test ./...","purpose":"运行测试"},"error":{"code":"USER_CONFIRMATION_REQUIRED","message":"命令执行等待用户语义确认"}}`)
 	wrapped := WrapToolResult("command_execute", ResultContext{
-		RequestID: "req_approval", TraceID: "tr_approval", SpanID: "sp_approval",
+		RequestID: "req_confirmation", TraceID: "tr_confirmation", SpanID: "sp_confirmation",
 		Timing: Timing{ServerElapsedMs: 4},
 	}, raw)
 	result := decodeEnvelope(t, wrapped)["mcpx"].(map[string]any)["result"].(map[string]any)
@@ -179,14 +206,13 @@ func TestWrapToolResultMapsApprovalToErrorAction(t *testing.T) {
 	if result["hints"].(map[string]any)["preferred_behavior"] != "ask_confirm" {
 		t.Fatalf("hints = %+v", result["hints"])
 	}
-	actions := result["actions"].([]any)
-	if len(actions) != 1 || actions[0].(map[string]any)["type"] != "approval" {
-		t.Fatalf("actions = %+v", actions)
+	if _, exists := result["actions"]; exists {
+		t.Fatalf("semantic confirmation must not create an approval action: %+v", result["actions"])
 	}
 }
 
-func TestWrapToolResultRendersApprovalCodeChangeDiff(t *testing.T) {
-	raw := mcp.NewToolResultText(`{"ok":false,"status":"need_confirmation","data":{"approval_id":"ap_123","changeset_id":"chg_approval","files":[{"path":"demo.go","operation":"update","diff":"--- a/demo.go\n+++ b/demo.go\n@@ -1 +1 @@\n-const Value = 1\n+const Value = 2\n"}],"diff":{"mode":"inline","resource_uri":"mcpx://remote-sessions/rs1/changesets/chg_approval/diff"},"next_action":{"tool":"approval_manage","arguments":{"action":"approve","approval_id":"ap_123"}}},"error":{"code":"APPROVAL_REQUIRED","message":"approval required"}}`)
+func TestWrapToolResultRendersSemanticConfirmationCodeChangeDiff(t *testing.T) {
+	raw := mcp.NewToolResultText(`{"ok":false,"status":"need_confirmation","data":{"confirmation_required":true,"changeset_id":"chg_confirmation","files":[{"path":"demo.go","operation":"update","diff":"--- a/demo.go\n+++ b/demo.go\n@@ -1 +1 @@\n-const Value = 1\n+const Value = 2\n"}],"diff":{"mode":"inline"}},"error":{"code":"USER_CONFIRMATION_REQUIRED","message":"文件变更等待用户语义确认"}}`)
 	written := WrapToolResult("change_execute", ResultContext{}, raw)
 	result := decodeEnvelope(t, written)["mcpx"].(map[string]any)["result"].(map[string]any)
 	if result["type"] != "code_change" || result["schema"] != SchemaCodeChange {
@@ -198,7 +224,7 @@ func TestWrapToolResultRendersApprovalCodeChangeDiff(t *testing.T) {
 	text := written.Content[0].(mcp.TextContent).Text
 	for _, want := range []string{"需要确认后才能应用", "```diff", "-const Value = 1", "+const Value = 2"} {
 		if !strings.Contains(text, want) {
-			t.Fatalf("approval diff missing %q: %s", want, text)
+			t.Fatalf("confirmation diff missing %q: %s", want, text)
 		}
 	}
 }

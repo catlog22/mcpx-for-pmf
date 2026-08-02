@@ -38,7 +38,6 @@ var toolCapabilityDefinitions = []toolCapabilityDefinition{
 	{Name: "workspace_state", Domain: "workspace", RequiresRemoteSession: true},
 	{Name: "extension_manage", Domain: "extension"},
 	{Name: "artifact_manage", Domain: "artifact", RequiresRemoteSession: true},
-	{Name: "approval_manage", Domain: "approval", RequiresRemoteSession: true},
 	{Name: "screenshot_capture", Domain: "screenshot", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "secrets_provide", Domain: "secrets", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 }
