@@ -29,6 +29,9 @@ func (s *Store) Append(ctx context.Context, event Event) (Event, error) {
 	if len(event.Intent) > MaxIntentBytes {
 		return Event{}, fmt.Errorf("observation intent exceeds %d bytes", MaxIntentBytes)
 	}
+	if len(event.ProgressSummary) > MaxIntentBytes {
+		return Event{}, fmt.Errorf("observation progress summary exceeds %d bytes", MaxIntentBytes)
+	}
 	if len(event.Input) > MaxEventBytes || len(event.Output) > MaxEventBytes {
 		return Event{}, fmt.Errorf("observation event payload exceeds %d bytes", MaxEventBytes)
 	}
@@ -51,11 +54,11 @@ func (s *Store) Append(ctx context.Context, event Event) (Event, error) {
 	}
 	result, err := s.db.ExecContext(ctx, `INSERT INTO observation_events
         (workspace_name, remote_session_id, request_id, operation_id, tool_name, event_type,
-         intent, input_json, output_json, summary, resource_uri, stream, stream_offset,
-         truncated, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 intent, progress_summary, input_json, output_json, summary, resource_uri, stream, stream_offset,
+		 truncated, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.Workspace, event.RemoteSessionID, event.RequestID, event.OperationID, event.Tool,
-		event.Type, event.Intent, string(event.Input), string(event.Output), event.Summary,
+		event.Type, event.Intent, event.ProgressSummary, string(event.Input), string(event.Output), event.Summary,
 		event.ResourceURI, event.Stream, event.Offset, boolInt(event.Truncated), event.CreatedAt.UnixMilli())
 	if err != nil {
 		return Event{}, err
@@ -81,7 +84,7 @@ func (s *Store) List(ctx context.Context, workspace string, afterSequence int64,
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT sequence, workspace_name,
         remote_session_id, request_id, operation_id, tool_name, event_type,
-        intent, input_json, output_json, summary, resource_uri, stream,
+        intent, progress_summary, input_json, output_json, summary, resource_uri, stream,
         stream_offset, truncated, created_at
         FROM observation_events
         WHERE workspace_name = ? AND sequence > ?
@@ -111,7 +114,7 @@ func (s *Store) History(ctx context.Context, workspace string, afterSequence int
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT sequence, workspace_name,
         remote_session_id, request_id, operation_id, tool_name, event_type,
-        intent, input_json, output_json, summary, resource_uri, stream,
+        intent, progress_summary, input_json, output_json, summary, resource_uri, stream,
         stream_offset, truncated, created_at
         FROM observation_events
         WHERE workspace_name = ?
@@ -139,7 +142,7 @@ func scanEvents(rows *sql.Rows, capacity int) ([]Event, error) {
 		var createdAt int64
 		if err := rows.Scan(&event.Sequence, &event.Workspace, &event.RemoteSessionID,
 			&event.RequestID, &event.OperationID, &event.Tool, &event.Type, &event.Intent,
-			&input, &output, &event.Summary, &event.ResourceURI, &event.Stream,
+			&event.ProgressSummary, &input, &output, &event.Summary, &event.ResourceURI, &event.Stream,
 			&event.Offset, &truncated, &createdAt); err != nil {
 			return nil, err
 		}

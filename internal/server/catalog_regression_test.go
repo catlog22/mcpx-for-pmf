@@ -36,6 +36,9 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 	if commandSchema.Properties["purpose"] == nil || commandSchema.Properties["scope"] == nil {
 		t.Fatalf("command_execute schema must expose purpose and scope: %+v", commandSchema.Properties)
 	}
+	if _, exists := tools["session_open"].Tool.InputSchema.Properties["include_skills"]; exists {
+		t.Fatal("session_open must not expose request-level include_skills; use server discovery.skills config")
+	}
 
 	var request mcp.CallToolRequest
 	request.Params.Arguments = map[string]any{"intent": "open the demo workspace", "workspace": "demo"}

@@ -51,8 +51,118 @@ func TestWrapToolResultProducesARCSearchEnvelope(t *testing.T) {
 	}
 
 	text := wrapped.Content[0].(mcp.TextContent).Text
-	if text != "Context query returned 1 file." {
-		t.Fatalf("non-code-change text should stay the summary, got: %q", text)
+	for _, want := range []string{"Context query returned 1 file.", "`internal/server/runtime.go`"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("context query text missing %q: %q", want, text)
+		}
+	}
+	if strings.Contains(text, "\"files\"") || strings.Contains(text, "structured_content") {
+		t.Fatalf("context query text leaked machine JSON: %q", text)
+	}
+}
+
+func TestWrapToolResultRendersWorkspaceListInsteadOfOK(t *testing.T) {
+	raw := mcp.NewToolResultText(`{"request_id":"req_workspace","status":"ok","data":{"workspaces":[{"name":"fyy","path":"/workspaces/fyy","description":"ERP frontend"}]}}`)
+	wrapped := WrapToolResult("workspace_list", ResultContext{}, raw)
+	text := wrapped.Content[0].(mcp.TextContent).Text
+	for _, want := range []string{"Available workspaces:", "`fyy`", "`/workspaces/fyy`", "ERP frontend"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("workspace list text missing %q: %q", want, text)
+		}
+	}
+	if text == "ok" || strings.Contains(text, "\"workspaces\"") {
+		t.Fatalf("workspace list must not degrade to JSON/ok: %q", text)
+	}
+	if wrapped.Meta == nil || wrapped.Meta.AdditionalFields[ResultMetadataKey] == nil {
+		t.Fatal("workspace list machine result must remain in metadata")
+	}
+}
+
+func TestWrapToolResultRendersSessionBootstrapAsMarkdown(t *testing.T) {
+	raw := mcp.NewToolResultStructured(map[string]any{
+		"remote_session": map[string]any{"id": "rs_demo", "role": "owner", "status": "active"},
+		"workspace":      map[string]any{"name": "fyy", "path": "/workspaces/fyy", "git_head": "abc123"},
+		"tools":          []map[string]any{{"name": "file_read"}, {"name": "change_execute"}},
+		"agent_guidance": map[string]any{
+			"summary": "Use dedicated tools.",
+			"rules":   []string{"Read before editing."},
+		},
+	}, "Session rs_demo opened for workspace fyy.")
+	written := WrapToolResult("session_open", ResultContext{}, raw)
+	text := written.Content[0].(mcp.TextContent).Text
+	for _, want := range []string{"rs_demo", "`/workspaces/fyy`", "`file_read`", "Agent guidance", "Read before editing."} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("session bootstrap text missing %q: %q", want, text)
+		}
+	}
+	if strings.Contains(text, "\"remote_session\"") || strings.Contains(text, "structured_content") {
+		t.Fatalf("session bootstrap leaked machine JSON: %q", text)
+	}
+}
+
+func TestWrapToolResultRendersSearchMatchesAndSourceSnippet(t *testing.T) {
+	raw := mcp.NewToolResultStructured(map[string]any{
+		"matches": []map[string]any{{"path": "src/pages/Sale.vue", "line": 42, "text": "const customer = await findCustomer()"}},
+		"files":   []map[string]any{{"path": "src/pages/Sale.vue", "content": "<template>\n  <CustomerSearch />\n</template>\n"}},
+	}, "Source search returned 1 match(es).")
+	written := WrapToolResult("context_query", ResultContext{}, raw)
+	text := written.Content[0].(mcp.TextContent).Text
+	for _, want := range []string{"`src/pages/Sale.vue:42`", "const customer = await findCustomer()", "```vue", "<CustomerSearch />"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("search text missing %q: %q", want, text)
+		}
+	}
+	if strings.Contains(text, "\"matches\"") || strings.Contains(text, "\"content\"") {
+		t.Fatalf("search text leaked machine JSON: %q", text)
+	}
+}
+
+func TestWrapToolResultRendersOverriddenStructuredContentWithoutJSON(t *testing.T) {
+	raw := mcp.NewToolResultText(`{"request_id":"req_project","status":"ok","data":{"stacks":["go"],"manifests":["go.mod"],"git_status":"## dev\n M internal/arc/arc.go"}}`)
+	raw.StructuredContent = map[string]any{
+		"stacks":     []string{"go"},
+		"manifests":  []string{"go.mod"},
+		"git_status": "## dev\n M internal/arc/arc.go",
+	}
+	written := WrapToolResult("runtime_inspect", ResultContext{}, raw)
+	text := written.Content[0].(mcp.TextContent).Text
+	for _, want := range []string{"Project summary:", "`go`", "`go.mod`", "internal/arc/arc.go"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("project summary missing %q: %q", want, text)
+		}
+	}
+	if strings.Contains(text, "\"git_status\"") || strings.Contains(text, "request_id") {
+		t.Fatalf("overridden structured content leaked JSON: %q", text)
+	}
+}
+
+func TestWrapToolResultUsesHumanContentAndHidesARCJSONFromHost(t *testing.T) {
+	raw := mcp.NewToolResultStructured(map[string]any{
+		"status": "ok",
+		"value":  "ready",
+	}, "已完成检查：环境正常。")
+	written := WrapToolResult("runtime_inspect", ResultContext{}, raw)
+
+	text, ok := written.Content[0].(mcp.TextContent)
+	if !ok || text.Text != "已完成检查：环境正常。" {
+		t.Fatalf("host-visible content = %#v", written.Content[0])
+	}
+	if written.StructuredContent != nil || len(written.RawStructuredContent) != 0 {
+		t.Fatalf("ARC must not be exposed through structuredContent: structured=%#v raw=%q", written.StructuredContent, written.RawStructuredContent)
+	}
+	if written.Meta == nil || written.Meta.AdditionalFields[ResultMetadataKey] == nil {
+		t.Fatalf("ARC metadata missing: %#v", written.Meta)
+	}
+
+	encoded, err := json.Marshal(written)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"structuredContent"`) {
+		t.Fatalf("serialized result still exposes structuredContent: %s", encoded)
+	}
+	if !strings.Contains(string(encoded), `"mcpx.result"`) {
+		t.Fatalf("serialized result does not preserve ARC metadata: %s", encoded)
 	}
 }
 
@@ -218,10 +328,14 @@ func TestWrapToolResultUsesStableToolSemantics(t *testing.T) {
 
 func decodeEnvelope(t *testing.T, result *mcp.CallToolResult) map[string]any {
 	t.Helper()
-	if result.StructuredContent == nil {
+	value := result.StructuredContent
+	if value == nil && result.Meta != nil {
+		value = result.Meta.AdditionalFields[ResultMetadataKey]
+	}
+	if value == nil {
 		t.Fatal("missing structured content")
 	}
-	encoded, err := json.Marshal(result.StructuredContent)
+	encoded, err := json.Marshal(value)
 	if err != nil {
 		t.Fatal(err)
 	}

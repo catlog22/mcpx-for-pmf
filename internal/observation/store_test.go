@@ -21,7 +21,7 @@ func openObservationTestDB(t *testing.T) *state.Store {
 func TestStoreListFiltersWorkspaceAndSequence(t *testing.T) {
 	db := openObservationTestDB(t)
 	store := NewStore(db.DB())
-	first, err := store.Append(context.Background(), Event{Workspace: "mcpx", Type: TypeToolStarted, Intent: "inspect"})
+	first, err := store.Append(context.Background(), Event{Workspace: "mcpx", Type: TypeToolStarted, Intent: "inspect", ProgressSummary: "已完成准备"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestStoreListFiltersWorkspaceAndSequence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].Sequence != first.Sequence || got[0].Intent != "inspect" {
+	if len(got) != 1 || got[0].Sequence != first.Sequence || got[0].Intent != "inspect" || got[0].ProgressSummary != "已完成准备" {
 		t.Fatalf("events=%+v", got)
 	}
 }

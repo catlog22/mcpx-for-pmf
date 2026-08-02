@@ -33,6 +33,7 @@ type Event struct {
 	Tool            string          `json:"tool,omitempty"`
 	Type            string          `json:"type"`
 	Intent          string          `json:"intent,omitempty"`
+	ProgressSummary string          `json:"progress_summary,omitempty"`
 	Input           json.RawMessage `json:"input,omitempty"`
 	Output          json.RawMessage `json:"output,omitempty"`
 	Summary         string          `json:"summary,omitempty"`

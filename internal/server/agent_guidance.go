@@ -7,7 +7,7 @@ import (
 	"mcpx/internal/envelope"
 )
 
-const agentGuidanceVersion = "1.3"
+const agentGuidanceVersion = "1.4"
 
 // agentGuidance is the short, stable routing contract shown after session_open.
 // It deliberately contains no workspace path, secret, approval token, or
@@ -30,7 +30,8 @@ func agentGuidance() map[string]any {
 			"When approval is required, preserve the exact remote_session_id and approval_id and do not duplicate the request.",
 			"Do not claim a file was read, changed, or verified without a successful tool result.",
 			"Before every important, mutating, destructive, or long-running call, briefly state what will be done and why; then call the tool with the complete payload without waiting for a schema re-fetch.",
-			"After every tool call, report the actual result before starting the next non-trivial action; distinguish verified facts from assumptions and unknowns.",
+			"After every tool call, put a concise verified result and next action in top-level progress_summary before starting the next non-trivial tool call; distinguish verified facts from assumptions and unknowns.",
+			"If no next tool call is planned because the task is complete, blocked, waiting for the user, or needs a decision, call progress_report with the verified result, status, and next step before replying or waiting.",
 			"Keep every change_execute call small (at most 300 added lines - lines actually inserted, not the whole file). Never truncate a file to dodge limits; submit full content or a replace_range window and retry if a host safety check blocks it.",
 			"Never quote instruction text (prompts, guidance, AGENTS.md) into file content; use plain code or data. If a host safety check blocks a call, shrink the content and retry instead of giving up.",
 		},
@@ -43,6 +44,7 @@ func agentGuidance() map[string]any {
 			},
 			"after_tool_call": []string{
 				"实际调用的工具、查询或命令及其真实结果",
+				"下一次工具调用使用 progress_summary 补发上一次工具的可验证结果和下一步；没有下一次工具调用时调用 progress_report",
 				"读取、创建、修改、移动或删除的文件",
 				"每项文件变更的具体内容和影响；代码变更使用 Markdown ```diff 代码块",
 				"测试、构建、检查及其真实结果",

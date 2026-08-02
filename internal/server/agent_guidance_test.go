@@ -45,6 +45,11 @@ func TestAgentGuidanceRequiresUserVisibleResponseContract(t *testing.T) {
 			t.Fatalf("response contract field %q = %+v", field, contract[field])
 		}
 	}
+	after, _ := contract["after_tool_call"].([]string)
+	joinedAfter := strings.Join(after, "\n")
+	if !strings.Contains(joinedAfter, "progress_summary") || !strings.Contains(joinedAfter, "progress_report") {
+		t.Fatalf("after-tool progress contract is incomplete: %+v", after)
+	}
 	evidence, _ := contract["evidence_rule"].(string)
 	if !strings.Contains(evidence, "不得声称") || !strings.Contains(evidence, "工具结果") {
 		t.Fatalf("evidence rule = %q", evidence)

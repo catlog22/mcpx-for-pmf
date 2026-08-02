@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"net/http/httptest"
 	"sort"
 	"testing"
@@ -137,17 +136,7 @@ func callReconnectTool(t *testing.T, ctx context.Context, client *mcpclient.Clie
 	if len(result.Content) == 0 {
 		t.Fatal("empty tool result")
 	}
-	if result.StructuredContent == nil {
-		t.Fatalf("tool structured content missing: %+v", result.Content[0])
-	}
-	raw, err := json.Marshal(result.StructuredContent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var envelope map[string]any
-	if err := json.Unmarshal(raw, &envelope); err != nil {
-		t.Fatal(err)
-	}
+	envelope := decodeARCEnvelope(t, result)
 	mcpx, _ := envelope["mcpx"].(map[string]any)
 	resultData, _ := mcpx["result"].(map[string]any)
 	data, _ := resultData["data"].(map[string]any)

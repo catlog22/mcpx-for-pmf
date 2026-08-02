@@ -32,8 +32,8 @@ func TestRenderWorkspaceFrameTextAndJSON(t *testing.T) {
 	if err := renderWorkspaceFrame(&text, observation.Frame{Type: "hello", Workspace: "demo", ObserverID: "obs_1"}, "text", false); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(text.String(), "workspace=demo") {
-		t.Fatalf("hello=%q", text.String())
+	if text.Len() != 0 {
+		t.Fatalf("hello status should be hidden: %q", text.String())
 	}
 	text.Reset()
 	if err := renderWorkspaceFrame(&text, observation.Frame{Type: "event", Event: &observation.Event{Sequence: 3, Type: observation.TypeObserverNotice}}, "json", false); err != nil {

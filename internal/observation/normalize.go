@@ -9,7 +9,8 @@ import (
 
 // NormalizeToolInput converts MCP arguments into bounded, redacted JSON.
 // Intent remains in the input for faithful request inspection; it is also
-// stored in Event.Intent so renderers can display it without decoding JSON.
+// stored in Event.Intent for JSON/diagnostic consumers. Text rendering uses
+// the concrete command, path, and result instead of exposing the intent label.
 func NormalizeToolInput(arguments map[string]any, maxBytes int) (json.RawMessage, bool) {
 	if arguments == nil {
 		arguments = map[string]any{}

@@ -299,9 +299,9 @@ func changeDiffResultFromDTO(item changeset.Changeset, dto map[string]any) *mcp.
 	diffMeta, _ := dto["diff"].(map[string]any)
 	mode, _ := diffMeta["mode"].(string)
 	fallback := fmt.Sprintf("Changeset %s digest=%s files=%d diff_mode=%s", item.ID, item.Digest, len(item.Files), mode)
-	// Keep the first text content useful even for hosts that do not consume
-	// ARC structuredContent. The public wrapper renders the same data again,
-	// while direct MCP clients still receive a Markdown diff in the session.
+	// Keep the first text content useful for hosts and models. The public
+	// wrapper preserves the full result in response metadata while rendering
+	// this Markdown diff directly in the session.
 	if markdown := changesetDiffMarkdown(dto); markdown != "" {
 		fallback += "\n\n" + markdown
 	}

@@ -123,7 +123,7 @@ const renderDiffMaxLines = 200
 // selected renderer. It returns the rendered content and whether a dedicated
 // view was produced; callers fall back to the plain summary when it returns
 // false. All hosts receive the same rendered content; the machine-readable
-// ARC envelope lives in structuredContent.
+// ARC envelope is carried in response metadata by WrapToolResult.
 func RenderContent(resultType, renderer, summary string, data any) (string, bool) {
 	if resultType != "code_change" || renderer != "diff" {
 		return summary, false

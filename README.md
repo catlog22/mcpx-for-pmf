@@ -148,25 +148,82 @@ http://127.0.0.1:9090/mcp
 
 观测命令只通过本机 Unix Socket 订阅事件，不启动第二个 HTTP 服务，也不会执行工具、命令或修改 Workspace。启动时先回放最近事件，随后由服务端事件推送实时展示；连接中断后按 sequence 自动补偿，不轮询 SQLite。按 `Ctrl-C` 正常退出。
 
-text 模式会展示模型意图、工具输入、实际结果、命令 stdout/stderr 和逐文件变更；文件变更保留 Markdown Diff 代码块：
+text 模式使用终端 Agent 风格时间线：工具开始事件不单独输出，每个完成动作使用过去式 `• Ran`、`• Searched`、`• Read`、`• Edited`、`• Created` 等动词；命令和文件路径保留，结果压缩为一两行 `↳` 摘要，文件变更只显示少量 Diff 片段，其余以 `...` 表示。不会输出 `TOOL STARTED`、`TOOL COMPLETED`、JSON 参数、卡片、表格或状态栏；需要机器处理时使用 `--format json`：
 
 ````text
-TOOL STARTED change_execute
-  INTENT: 修改登录流程并运行相关测试
-  INPUT:
-```json
-{"remote_session_id":"rs_…","summary":"更新登录流程"}
+• Ran go test ./internal/auth
+  ↳ 修改登录流程并运行相关测试
+  ↳ 12 tests passed
+• Edited internal/auth.go
+  ↳ internal/auth.go (update) +1 -1
+    -return legacyLogin()
+    +return secureLogin()
+    ...
+````
+
+搜索动作会显示可复现的等价命令和命中位置；`context_query` 本身由服务端源码索引执行，不会通过 Shell 再执行一次命令：
+
+````text
+• Listed workspaces
+  ↳ Available workspaces: fyy (/Users/you/workspaces/fyy)
+• Searched rg --glob "**/*.vue" "customer phone" fanyi-cloud-ui
+  ↳ Source search returned 2 matches: fanyi-cloud-ui/src/views/erp/index.vue:81, fanyi-cloud-ui/src/views/erp/order.vue:24
+• Read fanyi-cloud-ui/src/views/erp/order.vue
+  ↳ Read 1 source item(s); 8555 bytes returned.
+• Edited fanyi-cloud-ui/src/views/erp/order.vue
+  ↳ fanyi-cloud-ui/src/views/erp/order.vue (update) +12 -4
+````
+
+`workspace` 子命令参数如下：
+
+```bash
+mcpx-server workspace [flags] <workspace name>
+# -history int   回放最近事件数量，范围 1-200，默认 100
+# -format text   终端风格输出（默认）
+# -format json   一行一个事件，供脚本或日志系统消费
 ```
-FILE CHANGES 更新登录流程
-  update internal/auth.go
-```diff
---- a/internal/auth.go
-+++ b/internal/auth.go
-@@
--return legacyLogin()
-+return secureLogin()
+
+观测 text 输出中的 `rg` / `find` 是源码查询的等价展示，不代表服务端执行了 Shell 命令；文件路径是 Workspace 内的项目相对路径，Workspace 列表会同时显示注册根路径。
+
+MCP 工具响应同样以 Markdown 文本作为模型和宿主的默认展示内容，完整 ARC 机器结果保存在响应 `_meta["mcpx.result"]`，不再放入会被宿主直接渲染为 JSON 卡片的 `structuredContent`。
+
+常见结果的默认文本形式如下：
+
+````markdown
+Available workspaces:
+- `fyy` — `/Users/you/workspaces/fyy` — ERP frontend
+
+Source search returned 2 match(es).
+- `fanyi-cloud-ui/src/views/erp/index.vue:81` — customer lookup
+- `fanyi-cloud-ui/src/views/erp/order.vue:24` — selected customer
+
+### `fanyi-cloud-ui/src/views/erp/order.vue` (lines 520-779)
+
+```vue
+<el-form-item label="联系人">
+  <el-input v-model="dept.contactName" />
 ```
 ````
+
+服务端不能控制客户端是否保留自己的“已调用工具”卡片；MCPX 控制的是工具返回的默认文本内容，确保模型和支持 Markdown 的宿主不需要解码 JSON 才能看到工作区、路径、搜索命中和代码片段。
+
+模型在下一次工具调用的顶层 `progress_summary` 中补发上一次工具的可验证结果和下一步；如果任务完成、等待用户、被阻塞或暂时不再调用工具，应调用 `progress_report`，提交摘要、结果、状态和下一步。该字段记录的是可验证进度，不是隐藏思维链。
+
+`progress_summary` 和 `progress_report.summary` 均限制为 512 字节，内容应是可验证事实，不应记录隐藏思维链。没有下一次工具调用时，使用 `progress_report`：
+
+```json
+{
+  "intent": "汇报当前读取结果并等待用户决定下一步",
+  "remote_session_id": "rs_example",
+  "summary": "已读取 SupplierDetailForm.vue，确认截图中的证照字段均已有绑定",
+  "result_summary": "文件读取成功，返回 827 行",
+  "status": "waiting_for_user",
+  "next_step": "等待用户确认是否继续修改布局",
+  "related_tool": "file_read"
+}
+```
+
+`status` 可取 `in_progress`、`completed`、`waiting_for_user`、`blocked`。工具调用仍必须提供顶层 `intent`；观测 text 模式不会把它作为 `intent:` 单独打印。
 
 观测内容来自已持久化事件，包含脱敏和大小上限；超长 Diff、命令输出或二进制内容会明确标记截断，并保留 Resource URI。服务端未运行、Workspace 未注册或 Socket 不可访问时，命令会输出实际错误并返回非零状态码。
 
@@ -207,6 +264,15 @@ discovery:
   instructions:
     # 可选；支持绝对路径或 ~/，仅允许在全局 config.yaml 中配置
     global_agents_path: ~/.agents/AGENTS.md
+  skills:
+    enabled: true
+    dirs:
+      - ~/.agents/skills
+      - ~/.codex/skills
+      - .skills
+    # 可选附加目录；服务端统一从配置目录发现 Skill
+    extra_dirs:
+      - /Users/you/.local/share/mcpx/skills
 
 security:
   commands:
@@ -378,6 +444,7 @@ curl -sS -m 5 \
 ```json
 {
   "intent": "读取登录流程，修改校验逻辑并运行相关测试",
+  "progress_summary": "已选择登录模块，准备读取当前实现",
   "remote_session_id": "rs_…",
   "path": "internal/auth.go"
 }
@@ -391,9 +458,10 @@ curl -sS -m 5 \
 | 高频开发 | `context_query`       | 通过 `query` / `search` / `list` 动作获取受预算限制的源码上下文。                            |
 | 高频开发 | `change_execute`      | 一次完成普通修改的 Changeset、策略检查、原子 Apply 和可选验证。                              |
 | 高频开发 | `command_execute`     | 执行命令或项目任务；10 秒内返回结果，超时转统一 Task；stdout/stderr 内联返回（上限 256KB）。 |
+| 高频开发 | `progress_report`     | 工具后暂停、完成、等待用户或阻塞时，记录可验证进度、结果状态与下一步。                       |
 | 领域管理 | `session_manage`      | `list`、`get`、`events`、`update`、`handoff`、`attach`、`close`。                            |
 | 领域管理 | `change_manage`       | 仅用于 `prepare`、`diff`、`history`；Apply 和回滚统一通过 `change_execute`。                 |
-| 领域管理 | `plan_manage`         | 创建与推进持久化开发 Plan（`create` / `advance` / `list` / `get`…），只管理计划状态与证据。  |
+| 领域管理 | `plan_manage`         | 创建与推进持久化开发 Plan（`create` / `get` / `start_task` / `complete_task` / `block_task` / `replan` / `deliver`），只管理计划状态与证据。 |
 | 领域管理 | `task_manage`         | `attach`、`status`、`logs`、`list`、`stop`、`ports`、`diagnostics`、`stdin`。                |
 | 领域管理 | `runtime_inspect`     | `capabilities`、`project`、`instructions`。                                                  |
 | 领域管理 | `environment_inspect` | 查看环境并保存或比较快照。                                                                   |
@@ -404,12 +472,12 @@ curl -sS -m 5 \
 | 特殊能力 | `screenshot_capture`  | 截取显示器或区域。                                                                           |
 | 特殊能力 | `secrets_provide`     | 提供仅进程内可用的 Secret 引用。                                                             |
 
-`tools/list` 只暴露以上 **18** 个工具。低频操作必须通过其领域工具的 `action` 分支调用；文件读取和普通修改分别统一使用 `file_read`、`change_execute`。所有直接文件修改都必须经过 `change_execute`，不能通过 `command_execute` 或 `change_manage` 绕过。
+`tools/list` 只暴露以上 **19** 个工具。低频操作必须通过其领域工具的 `action` 分支调用；文件读取和普通修改分别统一使用 `file_read`、`change_execute`。所有直接文件修改都必须经过 `change_execute`，不能通过 `command_execute` 或 `change_manage` 绕过。
 
 ### 推荐开发流程
 
 1. Workspace 已知时直接调用 `session_open`；未知时先调用 `workspace_list`。
-2. `session_open` 返回根级 `AGENTS.md`、项目摘要、任务、Skills、上游 MCP、Changeset、Approval、Artifact、`agent_guidance` 与独立 revision。
+2. `session_open` 返回根级 `AGENTS.md` 元数据、项目摘要、任务、Skills、上游 MCP、Changeset、Approval、Artifact、`agent_guidance` 与独立 revision。需要正文时显式设置 `include_instructions_content: true`；需要项目任务时设置 `include_project_tasks: true`；需要上游工具 Schema 时设置 `include_upstream_tools: true`。Skills 是否发现及扫描哪些目录完全由服务端 `discovery.skills.enabled`、`discovery.skills.dirs` 和 `extra_dirs` 配置控制，不使用请求级 `include_skills` 参数。
 3. 用 `context_query(action="query" | "search" | "list")` 定位文件；已知文件用 `file_read(items=[])` 批量读取。
 4. 用 `change_execute` 进行所有文件修改；草稿、审阅和历史使用 `change_manage`，Apply 或回滚使用 `change_execute` 的 `changeset_id` / `revert_changeset_id`。
 5. 用 `command_execute` 运行测试或命令；超过 10 秒时按响应中的 `task_manage(action="attach")` 继续。
@@ -434,7 +502,7 @@ MCP 标准 `tools/list` 是工具名称、描述、参数 JSON Schema 和 Annota
 
 全局指令路径通过全局 `config.yaml` 的 `discovery.instructions.global_agents_path` 配置，支持绝对路径与 `~/`。初始化顺序为全局指令 → Workspace 根 `AGENTS.md` → 目标路径祖先目录中的嵌套 `AGENTS.md`。项目 `.mcpx.yaml` 不能覆盖全局指令路径。
 
-`session_open` 默认内联全局与根级指令正文；路径级解析使用 `runtime_inspect(action="instructions", anchor_path="...")`。每份文档均返回 scope、priority、SHA-256 与字节数，不暴露宿主机绝对路径。软链接、非常规文件和超过 `security.files.max_read_bytes` 的文档不会被暴露。
+`session_open` 默认返回全局与根级指令的元数据；设置 `include_instructions_content: true` 后才内联受预算限制的正文。路径级解析使用 `runtime_inspect(action="instructions", anchor_path="...")`。每份文档均返回 scope、priority、SHA-256 与字节数，不暴露宿主机绝对路径。软链接、非常规文件和超过 `security.files.max_read_bytes` 的文档不会被暴露。
 
 ### 补丁式源码修改
 
@@ -589,8 +657,6 @@ mcpx/
 MCPX 仅用于学习、研究和经授权的开发环境自动化。使用者应自行负责部署、配置、命令执行、文件修改、凭证保管以及由此产生的直接或间接后果。请勿在未经授权的系统、数据或网络上使用；用于生产环境前，请完成安全审计、数据备份、最小权限配置和人工审批验证。
 
 本文档和项目不构成安全、法律、医疗、财务或其他专业建议，也不保证适用于任何特定场景。涉及真实环境的操作请先确认授权范围，并在执行前审阅变更和命令。
-
-## Star History
 
 ## Star History
 

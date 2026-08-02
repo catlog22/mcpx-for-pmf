@@ -28,6 +28,7 @@ var toolCapabilityDefinitions = []toolCapabilityDefinition{
 	{Name: "context_query", Domain: "source", RequiresRemoteSession: true},
 	{Name: "change_execute", Domain: "change", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "command_execute", Domain: "command", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "terminal"},
+	{Name: "progress_report", Domain: "observability", RequiresRemoteSession: true},
 	{Name: "session_manage", Domain: "session"},
 	{Name: "change_manage", Domain: "change", RequiresRemoteSession: true},
 	{Name: "task_manage", Domain: "task", RequiresRemoteSession: true, Feature: "terminal"},

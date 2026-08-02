@@ -327,6 +327,7 @@ var migrations = []string{
 	);
 	CREATE INDEX IF NOT EXISTS idx_observation_events_workspace_sequence
 		ON observation_events(workspace_name, sequence);`,
+	`ALTER TABLE observation_events ADD COLUMN progress_summary TEXT NOT NULL DEFAULT '';`,
 }
 
 func applyMigrations(ctx context.Context, db *sql.DB) error {

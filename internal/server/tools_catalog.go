@@ -56,8 +56,8 @@ func (r *Runtime) currentToolSchemaRevision() string {
 	return hashRevision(items)
 }
 
-// compactToolResult keeps content as a model-facing summary and makes
-// structuredContent the single machine-readable copy of normal result data.
+// compactToolResult keeps the unstructured content concise. The public ARC
+// wrapper moves the complete machine-readable result to response metadata.
 func compactToolResult(data any, summary string) *mcp.CallToolResult {
 	return mcp.NewToolResultStructured(data, summary)
 }
@@ -218,7 +218,6 @@ func (r *Runtime) registerConsolidatedTools(s *mcpserver.MCPServer) {
 		mcp.WithBoolean("include_instructions_content", mcp.Description("include bounded AGENTS.md content")),
 		mcp.WithBoolean("include_upstream_tools", mcp.Description("discover upstream tool schemas")),
 		mcp.WithBoolean("include_project_tasks", mcp.Description("include discovered project tasks")),
-		mcp.WithBoolean("include_skills", mcp.Description("include skill metadata")),
 		mcp.WithObject("known_revisions", mcp.Description("previous revisions; unchanged capability payloads are omitted"), mcp.AdditionalProperties(map[string]any{"type": "string"})),
 	), sessionToolAnnotation), r.toolSessionOpen)
 	r.addTool(s, annotatedTool(mcp.NewTool("file_read",
@@ -276,6 +275,14 @@ func (r *Runtime) registerConsolidatedTools(s *mcpserver.MCPServer) {
 		mcp.WithString("scope", mcp.Enum("workspace"), mcp.Description("execution scope; defaults to workspace")),
 		mcp.WithNumber("yield_time_ms", mcp.Description("wait duration; defaults to 10000, maximum 60000")),
 	), commandExecutionToolAnnotation), r.toolCommandExecute)
+	r.addTool(s, annotatedTool(mcp.NewTool("progress_report",
+		mcp.WithDescription("Record a concise, user-visible progress update after a tool result when the agent will pause, finish, wait for the user, or otherwise not call another tool immediately. Include verified results and the next step; never put hidden chain-of-thought here."), remoteSession,
+		mcp.WithString("summary", mcp.Required(), mcp.Description("verified progress summary")),
+		mcp.WithString("result_summary", mcp.Description("concise result of the previous tool call")),
+		mcp.WithString("status", mcp.Enum("in_progress", "completed", "waiting_for_user", "blocked"), mcp.Description("current progress state")),
+		mcp.WithString("next_step", mcp.Description("next action or question for the user")),
+		mcp.WithString("related_tool", mcp.Description("previous tool associated with this update")),
+	), readOnlyToolAnnotation), r.toolProgressReport)
 
 	// Domain management tools. Each action has an explicit JSON Schema branch.
 	operationArraySchema := map[string]any{"type": "array", "items": changeOperationSchema(), "minItems": 1}

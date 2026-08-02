@@ -36,6 +36,7 @@ func (b *observationBridge) Record(ctx context.Context, event observation.Event)
 	event.Workspace = strings.TrimSpace(event.Workspace)
 	event.Intent = observation.SanitizeIntent(event.Intent)
 	event.Summary, _ = observation.SanitizeText(event.Summary, observationSummaryMaxBytes)
+	event.ProgressSummary, _ = observation.SanitizeText(event.ProgressSummary, observationSummaryMaxBytes)
 	if len(event.Input) > 0 {
 		var truncated bool
 		event.Input, truncated = observation.SanitizeJSON(event.Input, observation.MaxEventBytes)
@@ -84,14 +85,16 @@ func (b *observationBridge) RecordToolStarted(ctx context.Context, name string, 
 		Tool:            name,
 		Type:            observation.TypeToolStarted,
 		Intent:          req.Intent,
+		ProgressSummary: req.ProgressSummary,
 		Input:           input,
 		Truncated:       truncated,
 	})
 }
 
-func (b *observationBridge) RecordToolCompleted(ctx context.Context, name string, req envelope.Request, result *mcp.CallToolResult, callErr error, timing interactionTiming) error {
+func (b *observationBridge) RecordToolCompleted(ctx context.Context, name string, req envelope.Request, args map[string]any, result *mcp.CallToolResult, callErr error, timing interactionTiming) error {
 	workspace, remoteID := b.target(ctx, req)
 	resultJSON, truncated := observation.NormalizeToolOutput(result, observation.MaxEventBytes)
+	input, inputTruncated := observation.NormalizeToolInput(args, observation.MaxEventBytes)
 	var resultValue any
 	if err := json.Unmarshal(resultJSON, &resultValue); err != nil {
 		resultValue = map[string]any{"available": false}
@@ -126,9 +129,11 @@ func (b *observationBridge) RecordToolCompleted(ctx context.Context, name string
 		Tool:            name,
 		Type:            observation.TypeToolCompleted,
 		Intent:          req.Intent,
+		ProgressSummary: req.ProgressSummary,
+		Input:           input,
 		Output:          encoded,
 		Summary:         fmt.Sprintf("%s %s", name, status),
-		Truncated:       truncated,
+		Truncated:       truncated || inputTruncated,
 	})
 }
 

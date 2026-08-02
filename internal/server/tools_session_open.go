@@ -36,11 +36,6 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req mcp.CallToolRequest) 
 	if v, ok := envReq.Payload["include_project_tasks"].(bool); ok {
 		includeProjectTasks = v
 	}
-	includeSkills := false
-	if v, ok := envReq.Payload["include_skills"].(bool); ok {
-		includeSkills = v
-	}
-
 	var session remotesession.Session
 	remoteID, _ := envReq.Payload["remote_session_id"].(string)
 	remoteID = strings.TrimSpace(remoteID)
@@ -81,7 +76,7 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req mcp.CallToolRequest) 
 	}
 
 	skills := []map[string]any{}
-	if includeSkills && effective.Discovery.Skills.Enabled {
+	if effective.Discovery.Skills.Enabled {
 		skills = skillItems(skill.LoadAll(effective.Discovery.Skills.Dirs, wsPath))
 	}
 

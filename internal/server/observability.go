@@ -27,6 +27,10 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 		"type":        "string",
 		"description": "本次模型请求的目标和预期结果",
 	}
+	progressSummary := map[string]any{
+		"type":        "string",
+		"description": "上一工具调用后的可验证进度摘要、结果和下一步；没有下一次工具调用时请使用 progress_report",
+	}
 	if len(tool.RawInputSchema) > 0 {
 		var raw map[string]any
 		if err := json.Unmarshal(tool.RawInputSchema, &raw); err == nil {
@@ -35,6 +39,7 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 				properties = map[string]any{}
 			}
 			properties["intent"] = intent
+			properties["progress_summary"] = progressSummary
 			raw["type"] = "object"
 			raw["properties"] = properties
 			raw["required"] = appendRequired(raw["required"], "intent")
@@ -49,6 +54,7 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 		tool.InputSchema.Properties = map[string]any{}
 	}
 	tool.InputSchema.Properties["intent"] = intent
+	tool.InputSchema.Properties["progress_summary"] = progressSummary
 	tool.InputSchema.Required = appendRequiredStrings(tool.InputSchema.Required, "intent")
 	return tool
 }
@@ -105,7 +111,7 @@ func (r *Runtime) instrumentTool(name string, handler mcpserver.ToolHandlerFunc)
 			status = "error"
 		}
 		if observationParseErr == nil && r.observation != nil {
-			_ = r.observation.RecordToolCompleted(callCtx, name, observationRequest, result, err, timing)
+			_ = r.observation.RecordToolCompleted(callCtx, name, observationRequest, req.GetArguments(), result, err, timing)
 		}
 		if err != nil {
 			if result == nil {

@@ -15,6 +15,12 @@ import (
 
 const Version = "1.2"
 
+// ResultMetadataKey identifies the hidden response metadata that carries the
+// complete ARC envelope. Keeping the envelope in _meta prevents MCP hosts
+// from rendering it as a large JSON result card while preserving a machine-
+// readable copy for clients that explicitly need it.
+const ResultMetadataKey = "mcpx.result"
+
 const (
 	SchemaText              = "mcpx.text.v1"
 	SchemaMarkdown          = "mcpx.markdown.v1"
@@ -92,11 +98,13 @@ type Envelope struct {
 	} `json:"mcpx"`
 }
 
-// WrapToolResult converts an internal handler result to the sole public MCPX
-// result format. The first text content is the host-visible rendered display
-// (markdown diff for code changes, plain summary otherwise); the ARC JSON
-// envelope is the single machine-readable copy in structuredContent. Non-text
-// protocol content such as images and resource links is preserved.
+// WrapToolResult converts an internal handler result to the public MCPX result
+// format. The first text content is the host-visible rendered display (source
+// blocks, Markdown diffs, or a concise summary). The complete ARC envelope is
+// kept in _meta[ResultMetadataKey] instead of structuredContent: many MCP
+// hosts render structuredContent as a raw JSON card, which hides the useful
+// Markdown result from both the model and the user. Non-text protocol content
+// such as images and resource links is preserved.
 func WrapToolResult(tool string, runtime ResultContext, raw *mcp.CallToolResult) *mcp.CallToolResult {
 	if raw == nil {
 		raw = mcp.NewToolResultError("tool returned no result")
@@ -110,7 +118,7 @@ func WrapToolResult(tool string, runtime ResultContext, raw *mcp.CallToolResult)
 	if resultType == "code_change" {
 		renderer = "diff"
 	}
-	display, _ := RenderContent(resultType, renderer, summary, resultData)
+	display, _ := RenderToolContent(tool, resultType, renderer, summary, resultData)
 
 	var envelope Envelope
 	envelope.MCPX.Version = Version
@@ -126,9 +134,12 @@ func WrapToolResult(tool string, runtime ResultContext, raw *mcp.CallToolResult)
 		}
 	}
 	raw.Content = content
-	raw.StructuredContent = envelope
+	// The human-readable content is the default presentation. Preserve the
+	// machine-readable ARC envelope in response metadata without triggering
+	// host UIs that display structuredContent verbatim as JSON.
+	raw.StructuredContent = nil
 	raw.RawStructuredContent = nil
-	setMetadata(raw, envelope.MCPX.Trace, resultType)
+	setMetadata(raw, envelope, resultType)
 	return raw
 }
 
@@ -150,7 +161,8 @@ func buildTrace(tool string, runtime ResultContext, timing Timing) Trace {
 	return trace
 }
 
-func setMetadata(result *mcp.CallToolResult, trace Trace, resultType string) {
+func setMetadata(result *mcp.CallToolResult, envelope Envelope, resultType string) {
+	trace := envelope.MCPX.Trace
 	if result.Meta == nil {
 		result.Meta = &mcp.Meta{AdditionalFields: map[string]any{}}
 	}
@@ -164,6 +176,7 @@ func setMetadata(result *mcp.CallToolResult, trace Trace, resultType string) {
 	result.Meta.AdditionalFields["mcpx.result_type"] = resultType
 	result.Meta.AdditionalFields["mcpx.processing_ms"] = trace.Duration.ServerMs - trace.NetworkLatencyMs
 	result.Meta.AdditionalFields["mcpx.server_elapsed_ms"] = trace.Duration.ServerMs
+	result.Meta.AdditionalFields[ResultMetadataKey] = envelope
 }
 
 func extractResult(raw *mcp.CallToolResult) (map[string]any, string) {
@@ -394,9 +407,11 @@ func resultSummary(data map[string]any, fallback string) string {
 		return strings.ReplaceAll(status, "_", " ")
 	}
 	if strings.TrimSpace(fallback) != "" {
-		if _, isEnvelope := data["request_id"]; isEnvelope {
-			// An envelope.Response JSON payload must never leak into the
-			// host-visible text as raw JSON.
+		var encoded any
+		if json.Unmarshal([]byte(fallback), &encoded) == nil {
+			// Envelope.Response and legacy structured payloads must never leak
+			// into host-visible text as raw JSON. RenderToolContent receives the
+			// decoded data and will provide the useful Markdown representation.
 			if status != "" && status != "ok" {
 				return strings.ReplaceAll(status, "_", " ")
 			}

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -94,7 +95,8 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req mcp.CallToolReque
 				"remote_session_id": session.ID, "items": items, "max_total_bytes": budget,
 			})
 		}
-		return compactToolResult(data, fmt.Sprintf("Read %d source item(s); %d bytes returned.", len(results), batch.TotalBytes)), nil
+		summary := fmt.Sprintf("Read %d source item(s); %d bytes returned.", len(results), batch.TotalBytes)
+		return mcp.NewToolResultStructured(data, sourceReadDisplay(data, summary)), nil
 	}
 
 	path, _ := envReq.Payload["path"].(string)
@@ -116,7 +118,115 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req mcp.CallToolReque
 	if read.Truncated {
 		data["next_action"] = nextAction("file_read", map[string]any{"remote_session_id": session.ID, "path": path, "offset": read.Offset + read.Limit, "limit": read.Limit})
 	}
-	return compactToolResult(data, fmt.Sprintf("Read %s (%d lines).", path, read.TotalLines)), nil
+	summary := fmt.Sprintf("Read %s (%d lines).", path, read.TotalLines)
+	return mcp.NewToolResultStructured(data, sourceReadDisplay(data, summary)), nil
+}
+
+// sourceReadDisplay is the host/model-facing representation of file_read.
+// The public ARC wrapper keeps the complete machine data in response metadata;
+// the first text content remains useful to a terminal agent without requiring
+// it to decode a protocol envelope before it can inspect source code.
+func sourceReadDisplay(data map[string]any, summary string) string {
+	var builder strings.Builder
+	if summary != "" {
+		builder.WriteString(summary)
+	}
+	for _, item := range sourceReadItems(data) {
+		path, _ := item["path"].(string)
+		content, _ := item["content"].(string)
+		if path == "" || content == "" {
+			if errValue, ok := item["error"].(map[string]any); ok {
+				if message, _ := errValue["message"].(string); message != "" {
+					fmt.Fprintf(&builder, "\n\n`%s`: %s", path, message)
+				}
+			}
+			continue
+		}
+
+		start := sourceReadNumber(item["offset"]) + 1
+		shownLines := strings.Count(content, "\n")
+		if shownLines == 0 {
+			shownLines = 1
+		}
+		end := start + shownLines - 1
+		lineLabel := fmt.Sprintf("lines %d-%d", start, end)
+		if total := sourceReadNumber(item["total_lines"]); total > 0 {
+			lineLabel += fmt.Sprintf(" of %d", total)
+		}
+
+		fmt.Fprintf(&builder, "\n\n### `%s` (%s)\n\n```%s\n", path, lineLabel, sourceReadLanguage(path))
+		builder.WriteString(content)
+		if !strings.HasSuffix(content, "\n") {
+			builder.WriteByte('\n')
+		}
+		builder.WriteString("```")
+		if truncated, _ := item["truncated"].(bool); truncated {
+			builder.WriteString("\n\n> 内容已截断；请继续调用 `file_read` 读取后续内容。")
+		}
+	}
+	return builder.String()
+}
+
+func sourceReadItems(data map[string]any) []map[string]any {
+	if raw, ok := data["results"]; ok {
+		switch items := raw.(type) {
+		case []map[string]any:
+			return items
+		case []any:
+			result := make([]map[string]any, 0, len(items))
+			for _, rawItem := range items {
+				if item, ok := rawItem.(map[string]any); ok {
+					result = append(result, item)
+				}
+			}
+			return result
+		}
+	}
+	return []map[string]any{data}
+}
+
+func sourceReadNumber(value any) int {
+	switch number := value.(type) {
+	case int:
+		return number
+	case int64:
+		return int(number)
+	case float64:
+		return int(number)
+	default:
+		return 0
+	}
+}
+
+func sourceReadLanguage(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".go":
+		return "go"
+	case ".js", ".jsx":
+		return "javascript"
+	case ".ts", ".tsx":
+		return "typescript"
+	case ".vue":
+		return "vue"
+	case ".java":
+		return "java"
+	case ".py":
+		return "python"
+	case ".rs":
+		return "rust"
+	case ".json":
+		return "json"
+	case ".yaml", ".yml":
+		return "yaml"
+	case ".md":
+		return "markdown"
+	case ".css", ".scss":
+		return "css"
+	case ".html", ".htm":
+		return "html"
+	default:
+		return "text"
+	}
 }
 
 func (r *Runtime) toolContextQueryUnified(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

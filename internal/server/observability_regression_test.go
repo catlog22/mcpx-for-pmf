@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -74,17 +73,7 @@ func TestToolLogRecordsDuration(t *testing.T) {
 	if text.Text != "ok" {
 		t.Fatalf("non-code-change text should stay the summary, got: %q", text.Text)
 	}
-	if result.StructuredContent == nil {
-		t.Fatal("ARC structured content missing")
-	}
-	raw, err := json.Marshal(result.StructuredContent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		t.Fatal(err)
-	}
+	payload := decodeARCEnvelope(t, result)
 	if payload["mcpx"] == nil || payload["ok"] != nil {
 		t.Fatalf("tool result is not ARC-only: %+v", payload)
 	}

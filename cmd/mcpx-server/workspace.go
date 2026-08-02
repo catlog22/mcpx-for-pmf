@@ -88,22 +88,27 @@ func renderWorkspaceFrame(w io.Writer, frame observation.Frame, format string, c
 	}
 	switch frame.Type {
 	case "hello":
-		_, err := fmt.Fprintf(w, "OBSERVER CONNECTED workspace=%s observer=%s\n", frame.Workspace, frame.ObserverID)
-		return err
+		return nil
 	case "gap":
 		if frame.Gap == nil {
-			_, err := fmt.Fprintln(w, "OBSERVER GAP reconnecting")
+			_, err := fmt.Fprintln(w, "• Reconnected")
 			return err
 		}
-		_, err := fmt.Fprintf(w, "OBSERVER GAP sequences=%d-%d; reconnecting\n", frame.Gap.FromSequence, frame.Gap.ToSequence)
+		if _, err := fmt.Fprintln(w, "• Reconnected"); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintf(w, "  ↳ recovered events %d-%d\n", frame.Gap.FromSequence, frame.Gap.ToSequence)
 		return err
 	case "heartbeat":
 		return nil
 	case "error":
-		_, err := fmt.Fprintf(w, "OBSERVER ERROR %s: %s\n", frame.Code, frame.Message)
+		if _, err := fmt.Fprintf(w, "• Failed to observe %s\n", frame.Code); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintf(w, "  ↳ %s\n", frame.Message)
 		return err
 	default:
-		_, err := fmt.Fprintf(w, "OBSERVER %s\n", frame.Type)
+		_, err := fmt.Fprintf(w, "• Observed %s\n", frame.Type)
 		return err
 	}
 }
