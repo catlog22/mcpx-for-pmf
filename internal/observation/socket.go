@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -61,7 +60,7 @@ func NewSocketServer(path string, store *Store, broker *Broker, validate Workspa
 }
 
 func SocketPath(home string) string {
-	return filepath.Join(home, "run", "workspace-observer.sock")
+	return observerSocketPath(home)
 }
 
 func (s *SocketServer) Start() error {

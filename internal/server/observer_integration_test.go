@@ -373,7 +373,7 @@ func TestObservationRecordsChangeVerificationRequestIdentity(t *testing.T) {
 
 func TestObservationSocketEndToEndDeliversToolEvents(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	socketPath := fmt.Sprintf("/tmp/mcpx-server-observer-%d.sock", time.Now().UnixNano())
+	socketPath := testObservationSocketPath(t)
 	rt.observerSocket = observation.NewSocketServer(socketPath, rt.observation.store, rt.observation.broker, func(name string) bool {
 		_, ok := rt.reg.Get(name)
 		return ok
