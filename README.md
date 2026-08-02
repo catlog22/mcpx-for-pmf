@@ -136,6 +136,40 @@ http://127.0.0.1:9090/mcp
 ./mcpx-server -version   # 查看版本
 ```
 
+### 本机只读 Workspace 观测
+
+服务端运行期间可在另一个终端打开指定 Workspace 的事件流：
+
+```bash
+./mcpx-server workspace demo
+# 机器处理：
+./mcpx-server workspace --format json --history 200 demo
+```
+
+观测命令只通过本机 Unix Socket 订阅事件，不启动第二个 HTTP 服务，也不会执行工具、命令或修改 Workspace。启动时先回放最近事件，随后由服务端事件推送实时展示；连接中断后按 sequence 自动补偿，不轮询 SQLite。按 `Ctrl-C` 正常退出。
+
+text 模式会展示模型意图、工具输入、实际结果、命令 stdout/stderr 和逐文件变更；文件变更保留 Markdown Diff 代码块：
+
+````text
+TOOL STARTED change_execute
+  INTENT: 修改登录流程并运行相关测试
+  INPUT:
+```json
+{"remote_session_id":"rs_…","summary":"更新登录流程"}
+```
+FILE CHANGES 更新登录流程
+  update internal/auth.go
+```diff
+--- a/internal/auth.go
++++ b/internal/auth.go
+@@
+-return legacyLogin()
++return secureLogin()
+```
+````
+
+观测内容来自已持久化事件，包含脱敏和大小上限；超长 Diff、命令输出或二进制内容会明确标记截断，并保留 Resource URI。服务端未运行、Workspace 未注册或 Socket 不可访问时，命令会输出实际错误并返回非零状态码。
+
 ---
 
 ## 配置速览
@@ -338,6 +372,16 @@ curl -sS -m 5 \
 ## 工具一览
 
 客户端里名称形如 **`mcpx__workspace_list`**（服务器名 + 双下划线 + 工具名）。
+
+每个 MCP 工具调用都必须携带顶层 `intent`，用于说明本次请求的目标和预期结果；缺失或超过 512 字节会在业务 handler 执行前拒绝：
+
+```json
+{
+  "intent": "读取登录流程，修改校验逻辑并运行相关测试",
+  "remote_session_id": "rs_…",
+  "path": "internal/auth.go"
+}
+```
 
 | 类别     | 工具                  | 用途                                                                                         |
 | -------- | --------------------- | -------------------------------------------------------------------------------------------- |

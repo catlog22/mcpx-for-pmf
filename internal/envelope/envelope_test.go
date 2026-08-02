@@ -62,7 +62,7 @@ func TestParseRequest(t *testing.T) {
 }
 
 func TestParseRequestMergesFlatArgumentsIntoPayload(t *testing.T) {
-	req, err := ParseRequest(json.RawMessage(`{"workspace":"demo","command":"pwd","payload":{"command":"echo legacy"},"task_id":"t1"}`))
+	req, err := ParseRequest(json.RawMessage(`{"intent":"inspect workspace","workspace":"demo","command":"pwd","payload":{"command":"echo legacy"},"task_id":"t1"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,5 +71,11 @@ func TestParseRequestMergesFlatArgumentsIntoPayload(t *testing.T) {
 	}
 	if req.Payload["task_id"] != "t1" {
 		t.Fatalf("flat argument missing: %+v", req.Payload)
+	}
+	if req.Intent != "inspect workspace" {
+		t.Fatalf("intent missing: %q", req.Intent)
+	}
+	if _, exists := req.Payload["intent"]; exists {
+		t.Fatalf("intent leaked into payload: %+v", req.Payload)
 	}
 }

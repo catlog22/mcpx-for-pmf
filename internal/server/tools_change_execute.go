@@ -177,6 +177,11 @@ func (r *Runtime) toolChangeExecute(ctx context.Context, req mcp.CallToolRequest
 	if err != nil {
 		return r.changeError(envReq, session.ID, session.WorkspaceName, err)
 	}
+	appliedItem := prepared
+	if current, getErr := r.changesets.Get(ctx, prepared.ID); getErr == nil {
+		appliedItem = current
+	}
+	r.observeAppliedChangeset(ctx, envReq, session, appliedItem)
 	_ = r.remote.AddEvent(ctx, principal, remotesession.Event{
 		RemoteSessionID: session.ID, Type: "changeset.applied", OperationID: prepared.ID, Summary: prepared.Summary,
 	})

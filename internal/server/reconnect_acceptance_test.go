@@ -119,6 +119,14 @@ func reconnectInitializeRequest() mcp.InitializeRequest {
 
 func callReconnectTool(t *testing.T, ctx context.Context, client *mcpclient.Client, name string, arguments map[string]any) map[string]any {
 	t.Helper()
+	if _, exists := arguments["intent"]; !exists {
+		withIntent := make(map[string]any, len(arguments)+1)
+		for key, value := range arguments {
+			withIntent[key] = value
+		}
+		withIntent["intent"] = "reconnect acceptance operation"
+		arguments = withIntent
+	}
 	request := mcp.CallToolRequest{}
 	request.Params.Name = name
 	request.Params.Arguments = arguments

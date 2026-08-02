@@ -30,6 +30,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 
 	missingPurpose := mcp.CallToolRequest{}
 	missingPurpose.Params.Arguments = map[string]any{
+		"intent":            "validate command context",
 		"remote_session_id": created.Session.ID, "command": "printf context",
 	}
 	missingResult, err := rt.toolCommandExecute(context.Background(), missingPurpose)
@@ -43,6 +44,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 
 	invalidScope := mcp.CallToolRequest{}
 	invalidScope.Params.Arguments = map[string]any{
+		"intent":            "validate command scope",
 		"remote_session_id": created.Session.ID, "command": "printf context",
 		"purpose": "verify context binding", "scope": "host",
 	}
@@ -58,6 +60,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 	// Confirm rules create a pending action carrying the exact command context.
 	approvalRequest := mcp.CallToolRequest{}
 	approvalRequest.Params.Arguments = map[string]any{
+		"intent":            "request approval for a command",
 		"remote_session_id": created.Session.ID, "command": "echo approval",
 		"purpose": "verify approval context", "scope": "workspace",
 	}
@@ -76,6 +79,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 	approvalID, _ := approvalData["approval_id"].(string)
 	confirmRequest := mcp.CallToolRequest{}
 	confirmRequest.Params.Arguments = map[string]any{
+		"intent":            "confirm the approved command",
 		"remote_session_id": created.Session.ID, "approval_id": approvalID, "approve": true,
 	}
 	confirmed, err := rt.toolApprovalConfirm(context.Background(), confirmRequest)
@@ -89,6 +93,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 
 	valid := mcp.CallToolRequest{}
 	valid.Params.Arguments = map[string]any{
+		"intent":            "execute the scoped command",
 		"remote_session_id": created.Session.ID, "command": "printf context",
 		"purpose": "verify context binding", "scope": "workspace",
 	}

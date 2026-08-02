@@ -1,0 +1,302 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/mark3labs/mcp-go/mcp"
+
+	"mcpx/internal/changeset"
+	"mcpx/internal/envelope"
+	"mcpx/internal/observation"
+	"mcpx/internal/remotesession"
+)
+
+func TestObservationRecordsToolLifecycleAndRedacts(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	request := mcp.CallToolRequest{}
+	request.Params.Arguments = map[string]any{
+		"intent":    "inspect the project configuration",
+		"workspace": "demo",
+		"token":     "do-not-store-this-token",
+		"path":      "config.yaml",
+	}
+	wrapper := rt.instrumentTool("observer_test", func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return mcp.NewToolResultText(`{"message":"visible output","password":"do-not-store-this-password"}`), nil
+	})
+	if _, err := wrapper(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := rt.observation.store.History(context.Background(), "demo", 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var started, completed *observationEventView
+	for _, event := range events {
+		if event.Tool != "observer_test" {
+			continue
+		}
+		view := observationEventView{Type: event.Type, Sequence: event.Sequence, Intent: event.Intent, Input: string(event.Input), Output: string(event.Output)}
+		switch event.Type {
+		case "tool.started":
+			started = &view
+		case "tool.completed":
+			completed = &view
+		}
+	}
+	if started == nil || completed == nil || started.Sequence >= completed.Sequence {
+		t.Fatalf("tool lifecycle order invalid: started=%+v completed=%+v", started, completed)
+	}
+	if started.Intent != "inspect the project configuration" {
+		t.Fatalf("intent=%q", started.Intent)
+	}
+	if strings.Contains(started.Input, "do-not-store-this-token") || strings.Contains(completed.Output, "do-not-store-this-password") {
+		t.Fatalf("sensitive tool data leaked: input=%s output=%s", started.Input, completed.Output)
+	}
+	var output map[string]any
+	if err := json.Unmarshal([]byte(completed.Output), &output); err != nil {
+		t.Fatal(err)
+	}
+	if output["status"] != "ok" {
+		t.Fatalf("completed status=%+v", output)
+	}
+
+	errorRequest := mcp.CallToolRequest{}
+	errorRequest.Params.Arguments = map[string]any{"intent": "run the failing observer operation", "workspace": "demo"}
+	errorWrapper := rt.instrumentTool("observer_error_test", func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return nil, errors.New("observer operation failed")
+	})
+	if _, err := errorWrapper(context.Background(), errorRequest); err == nil {
+		t.Fatal("expected handler error")
+	}
+	events, err = rt.observation.store.History(context.Background(), "demo", 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var errorOutput string
+	for _, event := range events {
+		if event.Tool == "observer_error_test" && event.Type == "tool.completed" {
+			errorOutput = string(event.Output)
+		}
+	}
+	var errorView map[string]any
+	if err := json.Unmarshal([]byte(errorOutput), &errorView); err != nil {
+		t.Fatal(err)
+	}
+	if errorView["status"] != "error" || !strings.Contains(errorOutput, "observer operation failed") {
+		t.Fatalf("error completion was not observable: %s", errorOutput)
+	}
+}
+
+func TestObservationAggregatesRemoteSessionLifecycleByWorkspace(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("workspace was not registered")
+	}
+	for i := 0; i < 2; i++ {
+		created, createErr := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+			WorkspaceName: "demo", WorkspacePath: registered.Path,
+		})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		if created.Session.ID == "" {
+			t.Fatal("remote session id missing")
+		}
+	}
+	events, err := rt.observation.store.History(context.Background(), "demo", 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, event := range events {
+		if event.Type == "session.lifecycle" && strings.Contains(string(event.Output), `"source_type":"remote_session.created"`) {
+			seen[event.RemoteSessionID] = true
+		}
+	}
+	if len(seen) != 2 {
+		t.Fatalf("workspace history did not aggregate both sessions: %+v", events)
+	}
+}
+
+func TestObservationRecordsAppliedChangesetWithFileDiff(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("workspace was not registered")
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := rt.changesets.Prepare(context.Background(), created.Session.ID, principal.ID, registered.Path, "create observed file", []changeset.Operation{{
+		Operation: "create", Path: "observed.txt", Content: "visible change\n",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envReq := envelope.Request{
+		RequestID:       "req_observed_change",
+		Intent:          "apply the observed file change",
+		RemoteSessionID: created.Session.ID,
+		Workspace:       "demo",
+		Payload:         map[string]any{},
+	}
+	if _, err := rt.applyChangeset(context.Background(), envReq, principal.ID, created.Session, item); err != nil {
+		t.Fatal(err)
+	}
+	events, err := rt.observation.store.History(context.Background(), "demo", 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var changed *observationEventView
+	for _, event := range events {
+		if event.Type == "file.changed" && event.OperationID == item.ID {
+			view := observationEventView{Intent: event.Intent, Output: string(event.Output)}
+			changed = &view
+		}
+	}
+	if changed == nil || changed.Intent != envReq.Intent {
+		t.Fatalf("file change event missing: %+v", changed)
+	}
+	if !strings.Contains(changed.Output, "observed.txt") || !strings.Contains(changed.Output, "visible change") {
+		t.Fatalf("file change event lacks concrete content: %s", changed.Output)
+	}
+}
+
+func TestObservationRecordsRuntimeTaskOutput(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("workspace was not registered")
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := rt.tasks.StartRemote(context.Background(), created.Session.ID, "demo", registered.Path, "printf 'runtime-out'; printf 'runtime-err' >&2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if !task.Wait(waitCtx) {
+		t.Fatal("runtime task did not exit")
+	}
+	events, err := rt.observation.store.History(context.Background(), "demo", 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streams := map[string]string{}
+	for _, event := range events {
+		if event.Type != "command.output" || event.OperationID != task.ID {
+			continue
+		}
+		var output map[string]any
+		if err := json.Unmarshal(event.Output, &output); err != nil {
+			t.Fatal(err)
+		}
+		streams[event.Stream] += output["text"].(string)
+	}
+	if streams["stdout"] != "runtime-out" || streams["stderr"] != "runtime-err" {
+		t.Fatalf("runtime output events=%+v", streams)
+	}
+}
+
+func TestObservationSocketEndToEndDeliversToolEvents(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	socketPath := fmt.Sprintf("/tmp/mcpx-server-observer-%d.sock", time.Now().UnixNano())
+	rt.observerSocket = observation.NewSocketServer(socketPath, rt.observation.store, rt.observation.broker, func(name string) bool {
+		_, ok := rt.reg.Get(name)
+		return ok
+	})
+	if err := rt.observerSocket.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer rt.observerSocket.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	frames := make(chan observation.Frame, 8)
+	client := observation.NewClient(socketPath)
+	clientErr := make(chan error, 1)
+	go func() {
+		clientErr <- client.Run(ctx, observation.SubscribeRequest{Workspace: "demo", HistoryLimit: 20}, func(frame observation.Frame) error {
+			frames <- frame
+			if frame.Type == "event" && frame.Event != nil && frame.Event.Tool == "observer_e2e" && frame.Event.Type == observation.TypeToolCompleted {
+				cancel()
+			}
+			return nil
+		})
+	}()
+	select {
+	case frame := <-frames:
+		if frame.Type != "hello" {
+			t.Fatalf("first observer frame=%+v", frame)
+		}
+	case <-ctx.Done():
+		t.Fatal("observer did not connect")
+	}
+	wrapper := rt.instrumentTool("observer_e2e", func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return mcp.NewToolResultText("e2e output"), nil
+	})
+	request := mcp.CallToolRequest{}
+	request.Params.Arguments = map[string]any{"intent": "verify observer delivery", "workspace": "demo"}
+	if _, err := wrapper(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	events := map[string]bool{}
+	deadline := time.After(2 * time.Second)
+	for len(events) < 2 {
+		select {
+		case frame := <-frames:
+			if frame.Type == "event" && frame.Event != nil && frame.Event.Tool == "observer_e2e" {
+				events[frame.Event.Type] = true
+			}
+		case <-deadline:
+			t.Fatalf("observer events=%+v", events)
+		}
+	}
+	if !events[observation.TypeToolStarted] || !events[observation.TypeToolCompleted] {
+		t.Fatalf("missing tool lifecycle events=%+v", events)
+	}
+	cancel()
+	select {
+	case err := <-clientErr:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("observer client did not stop after cancellation")
+	}
+}
+
+type observationEventView struct {
+	Type     string
+	Sequence int64
+	Intent   string
+	Input    string
+	Output   string
+}

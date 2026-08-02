@@ -48,6 +48,14 @@ func TestRemoteSessionMCPIsVendorAndTransportIndependent(t *testing.T) {
 	}
 	call := func(t *testing.T, handler mcpserver.ToolHandlerFunc, ctx context.Context, arguments map[string]any) map[string]any {
 		t.Helper()
+		if _, exists := arguments["intent"]; !exists {
+			withIntent := make(map[string]any, len(arguments)+1)
+			for key, value := range arguments {
+				withIntent[key] = value
+			}
+			withIntent["intent"] = "transport acceptance operation"
+			arguments = withIntent
+		}
 		var request mcp.CallToolRequest
 		request.Params.Arguments = arguments
 		result, err := handler(ctx, request)
@@ -186,6 +194,7 @@ func TestChangesetMCPDiffAndApprovalSurviveTransportChange(t *testing.T) {
 	runtime.screenshot = fakeScreenCapturer{}
 	var screenshotRequest mcp.CallToolRequest
 	screenshotRequest.Params.Arguments = map[string]any{
+		"intent":            "capture a screenshot",
 		"remote_session_id": remoteSessionID,
 		"mode":              "region",
 		"x":                 10,
@@ -211,6 +220,7 @@ func TestChangesetMCPDiffAndApprovalSurviveTransportChange(t *testing.T) {
 	sum := sha256.Sum256(original)
 	var prepareRequest mcp.CallToolRequest
 	prepareRequest.Params.Arguments = map[string]any{
+		"intent":            "prepare a file change",
 		"remote_session_id": remoteSessionID,
 		"summary":           "update demo value",
 		"operations": []any{map[string]any{
@@ -308,6 +318,14 @@ func (fakeScreenCapturer) Capture(_ context.Context, request screenshot.Request)
 
 func callEnvelope(t *testing.T, handler mcpserver.ToolHandlerFunc, ctx context.Context, arguments map[string]any) map[string]any {
 	t.Helper()
+	if _, exists := arguments["intent"]; !exists {
+		withIntent := make(map[string]any, len(arguments)+1)
+		for key, value := range arguments {
+			withIntent[key] = value
+		}
+		withIntent["intent"] = "test operation"
+		arguments = withIntent
+	}
 	var request mcp.CallToolRequest
 	request.Params.Arguments = arguments
 	result, err := handler(ctx, request)

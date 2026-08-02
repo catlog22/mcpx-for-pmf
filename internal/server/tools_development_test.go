@@ -79,7 +79,7 @@ func TestProjectTaskAndArtifactRemoteSessionFlow(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	var logsRequest mcp.CallToolRequest
-	logsRequest.Params.Arguments = map[string]any{"remote_session_id": remoteSessionID, "action": "logs", "task_id": taskID, "stdout_offset": 0, "stderr_offset": 0}
+	logsRequest.Params.Arguments = map[string]any{"intent": "read task logs", "remote_session_id": remoteSessionID, "action": "logs", "task_id": taskID, "stdout_offset": 0, "stderr_offset": 0}
 	logsResult, err := runtime.toolTaskManage(ctx, logsRequest)
 	if err != nil || len(logsResult.Content) < 1 {
 		t.Fatalf("terminal logs result=%+v err=%v", logsResult, err)
@@ -98,6 +98,7 @@ func TestProjectTaskAndArtifactRemoteSessionFlow(t *testing.T) {
 
 	var registerRequest mcp.CallToolRequest
 	registerRequest.Params.Arguments = map[string]any{
+		"intent":            "register the test report artifact",
 		"remote_session_id": remoteSessionID, "path": "report.txt", "kind": "test_report", "name": "Go test report",
 	}
 	registeredResult, err := runtime.toolArtifactRegister(ctx, registerRequest)
@@ -140,6 +141,7 @@ func TestCommandExecuteInlinesSmallOutputWithoutLogLink(t *testing.T) {
 
 	var req mcp.CallToolRequest
 	req.Params.Arguments = map[string]any{
+		"intent":            "run a small command",
 		"remote_session_id": created.Session.ID,
 		"command":           "printf hello-stdout",
 		"purpose":           "verify inline stdout rendering",
@@ -184,6 +186,7 @@ func TestCommandExecuteTruncatedOutputStaysInline(t *testing.T) {
 
 	var req mcp.CallToolRequest
 	req.Params.Arguments = map[string]any{
+		"intent":            "run a command with bounded output",
 		"remote_session_id": created.Session.ID,
 		"command":           "printf abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz",
 		"purpose":           "verify truncated output stays inline",

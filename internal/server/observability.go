@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -15,9 +16,61 @@ import (
 )
 
 func (r *Runtime) addTool(s *mcpserver.MCPServer, tool mcp.Tool, handler mcpserver.ToolHandlerFunc) {
+	tool = requireIntentSchema(tool)
 	tool.OutputSchema = mcp.ToolOutputSchema{}
 	tool.RawOutputSchema = arc.OutputSchema()
 	s.AddTool(tool, r.instrumentTool(tool.Name, handler))
+}
+
+func requireIntentSchema(tool mcp.Tool) mcp.Tool {
+	intent := map[string]any{
+		"type":        "string",
+		"description": "本次模型请求的目标和预期结果",
+	}
+	if len(tool.RawInputSchema) > 0 {
+		var raw map[string]any
+		if err := json.Unmarshal(tool.RawInputSchema, &raw); err == nil {
+			properties, _ := raw["properties"].(map[string]any)
+			if properties == nil {
+				properties = map[string]any{}
+			}
+			properties["intent"] = intent
+			raw["type"] = "object"
+			raw["properties"] = properties
+			raw["required"] = appendRequired(raw["required"], "intent")
+			if encoded, marshalErr := json.Marshal(raw); marshalErr == nil {
+				tool.RawInputSchema = encoded
+			}
+		}
+		return tool
+	}
+	tool.InputSchema.Type = "object"
+	if tool.InputSchema.Properties == nil {
+		tool.InputSchema.Properties = map[string]any{}
+	}
+	tool.InputSchema.Properties["intent"] = intent
+	tool.InputSchema.Required = appendRequiredStrings(tool.InputSchema.Required, "intent")
+	return tool
+}
+
+func appendRequired(value any, required string) []string {
+	items, _ := value.([]any)
+	result := make([]string, 0, len(items)+1)
+	for _, item := range items {
+		if text, ok := item.(string); ok {
+			result = append(result, text)
+		}
+	}
+	return appendRequiredStrings(result, required)
+}
+
+func appendRequiredStrings(required []string, wanted string) []string {
+	for _, item := range required {
+		if item == wanted {
+			return required
+		}
+	}
+	return append(required, wanted)
 }
 
 type interactionTiming struct {
@@ -38,6 +91,10 @@ func (r *Runtime) instrumentTool(name string, handler mcpserver.ToolHandlerFunc)
 			runtime = runtimeContextWithClient(runtime, clientName, clientVersion)
 		}
 		callCtx = withRuntimeContext(callCtx, runtime)
+		observationRequest, observationParseErr := r.parseEnv(callCtx, req)
+		if observationParseErr == nil && r.observation != nil {
+			_ = r.observation.RecordToolStarted(callCtx, name, observationRequest, req.GetArguments())
+		}
 
 		result, err := handler(callCtx, req)
 		completed := time.Now()
@@ -46,6 +103,9 @@ func (r *Runtime) instrumentTool(name string, handler mcpserver.ToolHandlerFunc)
 		status := "ok"
 		if err != nil || result == nil || result.IsError {
 			status = "error"
+		}
+		if observationParseErr == nil && r.observation != nil {
+			_ = r.observation.RecordToolCompleted(callCtx, name, observationRequest, result, err, timing)
 		}
 		if err != nil {
 			if result == nil {

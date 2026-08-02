@@ -183,6 +183,11 @@ func (r *Runtime) applyChangeset(ctx context.Context, envReq envelope.Request, p
 	if err != nil {
 		return r.changeError(envReq, session.ID, session.WorkspaceName, err)
 	}
+	appliedItem := item
+	if current, getErr := r.changesets.Get(ctx, item.ID); getErr == nil {
+		appliedItem = current
+	}
+	r.observeAppliedChangeset(ctx, envReq, session, appliedItem)
 	principal, err := r.principalFromContext(ctx)
 	if err == nil && principal.ID == principalID {
 		_ = r.remote.AddEvent(ctx, principal, remotesession.Event{RemoteSessionID: session.ID, Type: "changeset.applied", OperationID: item.ID, Summary: item.Summary})

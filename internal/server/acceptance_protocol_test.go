@@ -181,10 +181,13 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		t.Fatalf("command_execute schema missing scope: %s", commandSchema)
 	}
 	contextSchema, _ := json.Marshal(byName["context_query"].InputSchema)
-	for _, removed := range []string{"intent", "pattern", "max_files"} {
+	for _, removed := range []string{"pattern", "max_files"} {
 		if strings.Contains(string(contextSchema), removed) {
 			t.Fatalf("context_query exposes removed compatibility field %q: %s", removed, contextSchema)
 		}
+	}
+	if !strings.Contains(string(contextSchema), `"intent"`) {
+		t.Fatalf("context_query schema must require intent: %s", contextSchema)
 	}
 	extensionSchema, _ := json.Marshal(byName["extension_manage"].InputSchema)
 	if !strings.Contains(string(extensionSchema), "action") || !strings.Contains(string(extensionSchema), "include_tools") || !strings.Contains(string(extensionSchema), "server") {
@@ -205,6 +208,14 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 
 	call := func(name string, args map[string]any) map[string]any {
 		t.Helper()
+		if _, exists := args["intent"]; !exists {
+			withIntent := make(map[string]any, len(args)+1)
+			for key, value := range args {
+				withIntent[key] = value
+			}
+			withIntent["intent"] = "acceptance operation"
+			args = withIntent
+		}
 		var req mcp.CallToolRequest
 		req.Params.Name = name
 		req.Params.Arguments = args

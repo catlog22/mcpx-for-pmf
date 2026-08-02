@@ -117,7 +117,7 @@ func TestCapabilityListIncludesInstructionsSkillsAndRoleState(t *testing.T) {
 	}
 
 	var readRequest mcp.CallToolRequest
-	readRequest.Params.Arguments = map[string]any{"remote_session_id": remoteID, "id": "project"}
+	readRequest.Params.Arguments = map[string]any{"intent": "read project instructions", "remote_session_id": remoteID, "id": "project"}
 	readResult, err := runtime.toolAgentInstructionRead(ctx, readRequest)
 	if err != nil {
 		t.Fatal(err)

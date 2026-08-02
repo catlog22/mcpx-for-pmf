@@ -7,7 +7,7 @@ import (
 	"mcpx/internal/envelope"
 )
 
-const agentGuidanceVersion = "1.2"
+const agentGuidanceVersion = "1.3"
 
 // agentGuidance is the short, stable routing contract shown after session_open.
 // It deliberately contains no workspace path, secret, approval token, or
@@ -20,6 +20,7 @@ func agentGuidance() map[string]any {
 		"priority": "high",
 		"summary":  "Use dedicated MCPX tools for inspection and edits; reserve command_execute for explicit commands.",
 		"rules": []string{
+			"Every MCPX tool call must include a concise non-empty top-level intent describing the current goal and expected result; calls without intent are rejected before execution.",
 			"Use file_read or context_query to inspect files and source context.",
 			"Use workspace_state for Git status, diff, snapshots, and workspace changes.",
 			"Use change_execute for every file modification; provide the current file revision before editing.",
