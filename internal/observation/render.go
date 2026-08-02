@@ -9,17 +9,15 @@ import (
 	"strings"
 )
 
-const (
-	ansiReset = "\033[0m"
-	ansiGreen = "\033[32m"
-	ansiBlue  = "\033[36m"
-)
-
 // RenderText writes a terminal-style timeline item. Tool-start events are
 // intentionally silent: the corresponding completion event renders one
 // past-tense action with a compact result, so replayed history does not show
 // TOOL STARTED/COMPLETED protocol labels or duplicate actions.
 func RenderText(w io.Writer, event Event, color bool) error {
+	return renderText(w, event, color, false)
+}
+
+func renderText(w io.Writer, event Event, color, suppressCommandOutput bool) error {
 	if w == nil {
 		return fmt.Errorf("render writer is required")
 	}
@@ -27,17 +25,17 @@ func RenderText(w io.Writer, event Event, color bool) error {
 	case TypeToolStarted:
 		return nil
 	case TypeToolCompleted:
-		return renderToolCompleted(w, event, color)
+		return renderToolCompleted(w, event, color, suppressCommandOutput)
 	case TypeCommandOutput:
 		return renderCommandOutput(w, event, color)
 	case TypeFileChanged:
 		return renderFileChanged(w, event, color)
 	case TypeSessionLifecycle:
-		return renderSummaryEvent(w, lifecycleVerb(event.Summary), event.Summary, event.Output, color)
+		return renderSummaryEvent(w, event, lifecycleVerb(event.Summary), event.Summary, event.Output, color)
 	case TypeObserverNotice:
-		return renderSummaryEvent(w, "Observed", event.Summary, event.Output, color)
+		return renderSummaryEvent(w, event, "Observed", event.Summary, event.Output, color)
 	default:
-		return renderSummaryEvent(w, "Observed", event.Type, event.Output, color)
+		return renderSummaryEvent(w, event, "Observed", event.Type, event.Output, color)
 	}
 }
 
@@ -50,7 +48,7 @@ func RenderJSON(w io.Writer, event Event) error {
 	return json.NewEncoder(w).Encode(event)
 }
 
-func renderToolCompleted(w io.Writer, event Event, color bool) error {
+func renderToolCompleted(w io.Writer, event Event, color, suppressCommandOutput bool) error {
 	var payload map[string]any
 	_ = json.Unmarshal(event.Output, &payload)
 	verb, label := toolAction(event.Tool, event.Input)
@@ -61,12 +59,12 @@ func renderToolCompleted(w io.Writer, event Event, color bool) error {
 			}
 		}
 	}
-	if err := writeAction(w, verb, label, ansiBlue, color); err != nil {
+	status, _ := payload["status"].(string)
+	if err := writeAction(w, verb, label, actionColor(event.Tool, status == "error"), color); err != nil {
 		return err
 	}
 
 	details := make([]string, 0, 2)
-	status, _ := payload["status"].(string)
 	if status == "error" {
 		if message := errorSummary(payload); message != "" {
 			details = append(details, "failed: "+compactLine(message))
@@ -77,15 +75,15 @@ func renderToolCompleted(w io.Writer, event Event, color bool) error {
 		}
 		if result, ok := payload["result"].(map[string]any); ok && len(details) < 2 {
 			if output := humanToolOutput(event.Tool, result); output != "" {
+				if suppressCommandOutput && event.Tool == "command_execute" {
+					output = commandCompletionSummary(output)
+				}
 				details = append(details, output)
 			}
 		}
 	}
 	if len(details) == 0 && status != "" && status != "ok" {
 		details = append(details, strings.ReplaceAll(status, "_", " "))
-	}
-	if event.Truncated && len(details) < 2 {
-		details = append(details, "output truncated; see the linked resource or task history")
 	}
 	if len(details) > 2 {
 		details = details[:2]
@@ -104,13 +102,10 @@ func renderCommandOutput(w io.Writer, event Event, color bool) error {
 	if stream == "" {
 		stream = "output"
 	}
-	if err := writeAction(w, "Read", stream, ansiBlue, color); err != nil {
+	if err := writeAction(w, "Read", stream, actionColor(event.Tool, false), color); err != nil {
 		return err
 	}
 	lines := summaryLines(text, 2)
-	if event.Truncated && len(lines) < 2 {
-		lines = append(lines, "output truncated; see task logs")
-	}
 	return writeChildren(w, lines, color)
 }
 
@@ -123,9 +118,6 @@ func renderFileChanged(w io.Writer, event Event, color bool) error {
 			Diff          string `json:"diff"`
 			DiffTruncated bool   `json:"diff_truncated"`
 		} `json:"files"`
-		Diff struct {
-			ResourceURI string `json:"resource_uri"`
-		} `json:"diff"`
 	}
 	if err := json.Unmarshal(event.Output, &payload); err != nil || len(payload.Files) == 0 {
 		label := compactLine(event.Summary)
@@ -141,7 +133,7 @@ func renderFileChanged(w io.Writer, event Event, color bool) error {
 	if len(payload.Files) == 1 {
 		label = payload.Files[0].Path
 	}
-	if err := writeAction(w, "Edited", label, ansiGreen, color); err != nil {
+	if err := writeAction(w, "Edited", label, actionColor(event.toolOrType(), false), color); err != nil {
 		return err
 	}
 	for index, file := range payload.Files {
@@ -179,23 +171,9 @@ func renderFileChanged(w io.Writer, event Event, color bool) error {
 				}
 			}
 		}
-		if file.DiffTruncated {
-			if err := writeChild(w, "full diff is available from the linked resource", color); err != nil {
-				return err
-			}
-		}
 	}
 	if len(payload.Files) > maxChangedFiles {
 		if err := writeChild(w, fmt.Sprintf("... and %d more files", len(payload.Files)-maxChangedFiles), color); err != nil {
-			return err
-		}
-	}
-	if event.ResourceURI != "" {
-		if err := writeChild(w, "full diff: "+event.ResourceURI, color); err != nil {
-			return err
-		}
-	} else if payload.Diff.ResourceURI != "" {
-		if err := writeChild(w, "full diff: "+payload.Diff.ResourceURI, color); err != nil {
 			return err
 		}
 	}
@@ -238,11 +216,11 @@ func writeCodeChild(w io.Writer, value string) error {
 	return err
 }
 
-func renderSummaryEvent(w io.Writer, verb, summary string, raw []byte, color bool) error {
+func renderSummaryEvent(w io.Writer, event Event, verb, summary string, raw []byte, color bool) error {
 	if strings.TrimSpace(summary) == "" {
 		summary = "event"
 	}
-	if err := writeAction(w, verb, summary, ansiBlue, color); err != nil {
+	if err := writeAction(w, verb, summary, actionColor(event.toolOrType(), false), color); err != nil {
 		return err
 	}
 	var value map[string]any
@@ -579,6 +557,16 @@ func compactCommand(command string) string {
 	}
 	return command
 }
+
+func commandCompletionSummary(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return compactLine(line)
+		}
+	}
+	return ""
+}
+
 func humanToolOutput(tool string, result map[string]any) string {
 	if tool == "context_query" {
 		if summary := contextQueryOutputSummary(result); summary != "" {

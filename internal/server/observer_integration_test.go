@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -223,6 +226,119 @@ func TestObservationRecordsRuntimeTaskOutput(t *testing.T) {
 	}
 	if streams["stdout"] != "runtime-out" || streams["stderr"] != "runtime-err" {
 		t.Fatalf("runtime output events=%+v", streams)
+	}
+}
+
+func TestObservationRecordsCommandTaskRequestIdentity(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("workspace was not registered")
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envReq := envelope.Request{
+		RequestID:       "req_command_observed",
+		Intent:          "observe command output",
+		RemoteSessionID: created.Session.ID,
+		Workspace:       "demo",
+		Payload:         map[string]any{},
+	}
+	if _, err := rt.executeCommandTask(context.Background(), envReq, principal, created.Session, "printf 'command-out'", time.Second, "test", "workspace", "sha256:test"); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := rt.observation.store.History(context.Background(), "demo", 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Type != observation.TypeCommandOutput {
+			continue
+		}
+		var output map[string]any
+		if err := json.Unmarshal(event.Output, &output); err != nil {
+			t.Fatal(err)
+		}
+		if output["text"] != "command-out" {
+			continue
+		}
+		found = true
+		if event.RequestID != envReq.RequestID || event.Tool != "command_execute" {
+			t.Fatalf("command output identity=%+v, want request=%q tool=%q", event, envReq.RequestID, "command_execute")
+		}
+	}
+	if !found {
+		t.Fatal("command output event missing")
+	}
+}
+
+func TestObservationRecordsChangeVerificationRequestIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("make-based verification fixture is not portable to windows")
+	}
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("workspace was not registered")
+	}
+	if err := os.WriteFile(filepath.Join(registered.Path, "Makefile"), []byte("verify:\n\tprintf 'verify-out'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envReq := envelope.Request{
+		RequestID:       "req_change_verify",
+		Intent:          "verify observed change",
+		RemoteSessionID: created.Session.ID,
+		Workspace:       "demo",
+		Payload:         map[string]any{},
+	}
+	results := rt.runVerifySteps(context.Background(), envReq, created.Session, []string{"verify"})
+	if len(results) != 1 || fmt.Sprint(results[0]["status"]) != "exited" {
+		t.Fatalf("verification did not run: %+v", results)
+	}
+
+	events, err := rt.observation.store.History(context.Background(), "demo", 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Type != observation.TypeCommandOutput {
+			continue
+		}
+		var output map[string]any
+		if err := json.Unmarshal(event.Output, &output); err != nil {
+			t.Fatal(err)
+		}
+		if output["text"] != "verify-out" {
+			continue
+		}
+		found = true
+		if event.RequestID != envReq.RequestID || event.Tool != "change_execute" {
+			t.Fatalf("verification output identity=%+v, want request=%q tool=%q", event, envReq.RequestID, "change_execute")
+		}
+	}
+	if !found {
+		t.Fatal("verification output event missing")
 	}
 }
 

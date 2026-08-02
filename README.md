@@ -148,17 +148,22 @@ http://127.0.0.1:9090/mcp
 
 观测命令只通过本机 Unix Socket 订阅事件，不启动第二个 HTTP 服务，也不会执行工具、命令或修改 Workspace。启动时先回放最近事件，随后由服务端事件推送实时展示；连接中断后按 sequence 自动补偿，不轮询 SQLite。按 `Ctrl-C` 正常退出。
 
-text 模式使用终端 Agent 风格时间线：工具开始事件不单独输出，每个完成动作使用过去式 `• Ran`、`• Searched`、`• Read`、`• Edited`、`• Created` 等动词；命令和文件路径保留，结果压缩为一两行 `↳` 摘要，文件变更只显示少量 Diff 片段，其余以 `...` 表示。不会输出 `TOOL STARTED`、`TOOL COMPLETED`、JSON 参数、卡片、表格或状态栏；需要机器处理时使用 `--format json`：
+text 模式按一次 MCP 工具调用聚合为一个交互块：工具开始事件不单独输出，每个完成动作使用过去式 `• Ran`、`• Searched`、`• Read`、`• Edited`、`• Created` 等动词；命令和文件路径保留，结果压缩为 `↳` 摘要，文件变更只显示少量 Diff 片段。每个区块最多 10 个逻辑行（含边界），超出内容以 `...` 表示；text 不显示截断说明或 Resource URI。需要机器处理时使用 `--format json`：
 
 ````text
-• Ran go test ./internal/auth
-  ↳ 修改登录流程并运行相关测试
-  ↳ 12 tests passed
-• Edited internal/auth.go
-  ↳ internal/auth.go (update) +1 -1
-    -return legacyLogin()
-    +return secureLogin()
-    ...
+╭─ #42 · command_execute
+│ • Ran go test ./internal/auth
+│   ↳ 修改登录流程并运行相关测试
+│ • Read stdout
+│   ↳ 12 tests passed
+╰────────────────────────
+╭─ #43 · change_execute
+│ • Edited internal/auth.go
+│   ↳ internal/auth.go (update) +1 -1
+│     -return legacyLogin()
+│     +return secureLogin()
+│     ...
+╰────────────────────────
 ````
 
 搜索动作会显示可复现的等价命令和命中位置；`context_query` 本身由服务端源码索引执行，不会通过 Shell 再执行一次命令：
@@ -183,7 +188,7 @@ mcpx-server workspace [flags] <workspace name>
 # -format json   一行一个事件，供脚本或日志系统消费
 ```
 
-观测 text 输出中的 `rg` / `find` 是源码查询的等价展示，不代表服务端执行了 Shell 命令；文件路径是 Workspace 内的项目相对路径，Workspace 列表会同时显示注册根路径。
+观测 text 输出中的 `rg` / `find` 是源码查询的等价展示，不代表服务端执行了 Shell 命令；文件路径是 Workspace 内的项目相对路径，Workspace 列表会同时显示注册根路径。交互块颜色仅在 TTY 中启用，可设置 `NO_COLOR=1` 关闭；命令、查询、读取、变更、会话和错误分别使用稳定的语义颜色。
 
 MCP 工具响应同样以 Markdown 文本作为模型和宿主的默认展示内容，完整 ARC 机器结果保存在响应 `_meta["mcpx.result"]`，不再放入会被宿主直接渲染为 JSON 卡片的 `structuredContent`。
 
@@ -225,7 +230,7 @@ Source search returned 2 match(es).
 
 `status` 可取 `in_progress`、`completed`、`waiting_for_user`、`blocked`。工具调用仍必须提供顶层 `intent`；观测 text 模式不会把它作为 `intent:` 单独打印。
 
-观测内容来自已持久化事件，包含脱敏和大小上限；超长 Diff、命令输出或二进制内容会明确标记截断，并保留 Resource URI。服务端未运行、Workspace 未注册或 Socket 不可访问时，命令会输出实际错误并返回非零状态码。
+观测内容来自已持久化事件，包含脱敏和大小上限；超长 Diff、命令输出或二进制内容在 text 中只显示 `...`，JSON 事件仍保留 `truncated` 和 Resource URI 等机器字段。服务端未运行、Workspace 未注册或 Socket 不可访问时，命令会输出实际错误并返回非零状态码。
 
 ---
 

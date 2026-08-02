@@ -61,10 +61,14 @@ func runWorkspaceObserver(args []string) int {
 	defer stop()
 	client := observation.NewClient(observation.SocketPath(home))
 	color := options.Format == "text" && stdoutIsTTY() && os.Getenv("NO_COLOR") == ""
+	var textRenderer *observation.TextRenderer
+	if options.Format == "text" {
+		textRenderer = observation.NewTextRenderer(color)
+	}
 	err = client.Run(ctx, observation.SubscribeRequest{
 		Type: "subscribe", Workspace: options.Workspace, HistoryLimit: options.History, Format: options.Format,
 	}, func(frame observation.Frame) error {
-		return renderWorkspaceFrame(os.Stdout, frame, options.Format, color)
+		return renderWorkspaceFrameWithRenderer(os.Stdout, frame, options.Format, color, textRenderer)
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "workspace observer: %v\n", err)
@@ -74,11 +78,22 @@ func runWorkspaceObserver(args []string) int {
 }
 
 func renderWorkspaceFrame(w io.Writer, frame observation.Frame, format string, color bool) error {
+	var renderer *observation.TextRenderer
+	if format == "text" {
+		renderer = observation.NewTextRenderer(color)
+	}
+	return renderWorkspaceFrameWithRenderer(w, frame, format, color, renderer)
+}
+
+func renderWorkspaceFrameWithRenderer(w io.Writer, frame observation.Frame, format string, color bool, renderer *observation.TextRenderer) error {
 	if frame.Type == "event" && frame.Event != nil {
 		if format == "json" {
 			return observation.RenderJSON(w, *frame.Event)
 		}
-		return observation.RenderText(w, *frame.Event, color)
+		if renderer == nil {
+			renderer = observation.NewTextRenderer(color)
+		}
+		return renderer.RenderEvent(w, *frame.Event)
 	}
 	if format == "json" {
 		if frame.Type == "gap" || frame.Type == "error" {
@@ -91,14 +106,24 @@ func renderWorkspaceFrame(w io.Writer, frame observation.Frame, format string, c
 		return nil
 	case "gap":
 		if frame.Gap == nil {
-			_, err := fmt.Fprintln(w, "• Reconnected")
-			return err
+			if _, err := fmt.Fprintln(w, "• Reconnected"); err != nil {
+				return err
+			}
+			if renderer != nil {
+				renderer.ResetAfterGap()
+			}
+			return nil
 		}
 		if _, err := fmt.Fprintln(w, "• Reconnected"); err != nil {
 			return err
 		}
-		_, err := fmt.Fprintf(w, "  ↳ recovered events %d-%d\n", frame.Gap.FromSequence, frame.Gap.ToSequence)
-		return err
+		if _, err := fmt.Fprintf(w, "  ↳ recovered events %d-%d\n", frame.Gap.FromSequence, frame.Gap.ToSequence); err != nil {
+			return err
+		}
+		if renderer != nil {
+			renderer.ResetAfterGap()
+		}
+		return nil
 	case "heartbeat":
 		return nil
 	case "error":

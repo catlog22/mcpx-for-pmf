@@ -88,7 +88,7 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req mcp.CallToolReques
 }
 
 func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Request, principal auth.Principal, remote remotesession.Session, command string, yield time.Duration, purpose, scope, commandDigest string) (*mcp.CallToolResult, error) {
-	task, err := r.tasks.StartRemote(ctx, remote.ID, remote.WorkspaceName, remote.WorkspacePath, command)
+	task, err := r.tasks.StartRemoteWithObservation(ctx, envReq.RequestID, "command_execute", remote.ID, remote.WorkspaceName, remote.WorkspacePath, command)
 	if err != nil {
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "start_error", err.Error())
 	}

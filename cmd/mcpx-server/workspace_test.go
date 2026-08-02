@@ -43,3 +43,29 @@ func TestRenderWorkspaceFrameTextAndJSON(t *testing.T) {
 		t.Fatalf("event=%q", text.String())
 	}
 }
+
+func TestRenderWorkspaceFrameReusesTextRendererAcrossEvents(t *testing.T) {
+	var output bytes.Buffer
+	renderer := observation.NewTextRenderer(false)
+	for _, frame := range []observation.Frame{
+		{Type: "event", Event: &observation.Event{Sequence: 1, RequestID: "req_workspace", Tool: "file_read", Type: observation.TypeToolStarted}},
+		{Type: "event", Event: &observation.Event{Sequence: 2, RequestID: "req_workspace", Tool: "file_read", Type: observation.TypeToolCompleted, Input: []byte(`{"path":"main.go"}`), Output: []byte(`{"status":"ok"}`)}},
+	} {
+		if err := renderWorkspaceFrameWithRenderer(&output, frame, "text", false, renderer); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if strings.Count(output.String(), "╭─") != 1 || strings.Count(output.String(), "╰") != 1 {
+		t.Fatalf("frames did not share one interaction block: %q", output.String())
+	}
+
+	if err := renderWorkspaceFrameWithRenderer(&output, observation.Frame{Type: "gap"}, "text", false, renderer); err != nil {
+		t.Fatal(err)
+	}
+	if err := renderWorkspaceFrameWithRenderer(&output, observation.Frame{Type: "event", Event: &observation.Event{Sequence: 3, RequestID: "req_workspace", Tool: "file_read", Type: observation.TypeToolCompleted, Output: []byte(`{"status":"ok"}`)}}, "text", false, renderer); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(output.String(), "╭─") != 2 {
+		t.Fatalf("gap did not reset interaction state: %q", output.String())
+	}
+}

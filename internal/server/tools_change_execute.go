@@ -195,7 +195,7 @@ func (r *Runtime) toolChangeExecute(ctx context.Context, req mcp.CallToolRequest
 	resultPayload["files_changed"] = applied.Files
 
 	if len(verify) > 0 {
-		verifyResults := r.runVerifySteps(ctx, session, verify)
+		verifyResults := r.runVerifySteps(ctx, envReq, session, verify)
 		resultPayload["verify"] = verifyResults
 	}
 
@@ -399,7 +399,7 @@ func changedLineCount(original, proposed []byte) int {
 	return (suffixA - prefix) + (suffixB - prefix)
 }
 
-func (r *Runtime) runVerifySteps(ctx context.Context, session remotesession.Session, steps []string) []map[string]any {
+func (r *Runtime) runVerifySteps(ctx context.Context, envReq envelope.Request, session remotesession.Session, steps []string) []map[string]any {
 	results := make([]map[string]any, 0, len(steps))
 	discovered := projecttask.Discover(session.WorkspacePath)
 	findTask := func(candidates ...string) (projecttask.Task, bool) {
@@ -446,7 +446,7 @@ func (r *Runtime) runVerifySteps(ctx context.Context, session remotesession.Sess
 			results = append(results, item)
 			continue
 		}
-		task, err := r.tasks.StartRemote(ctx, session.ID, session.WorkspaceName, session.WorkspacePath, project.Command)
+		task, err := r.tasks.StartRemoteWithObservation(ctx, envReq.RequestID, "change_execute", session.ID, session.WorkspaceName, session.WorkspacePath, project.Command)
 		if err != nil {
 			item["status"] = "failed"
 			item["error"] = err.Error()

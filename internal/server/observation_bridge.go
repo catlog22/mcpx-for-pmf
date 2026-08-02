@@ -227,7 +227,9 @@ func (r *Runtime) observeTaskOutput(chunk terminal.OutputChunk) {
 	_ = r.observation.Record(context.Background(), observation.Event{
 		Workspace:       chunk.WorkspaceName,
 		RemoteSessionID: chunk.RemoteSessionID,
+		RequestID:       chunk.RequestID,
 		OperationID:     chunk.TaskID,
+		Tool:            chunk.Tool,
 		Type:            observation.TypeCommandOutput,
 		Output:          encoded,
 		Summary:         fmt.Sprintf("task %s %s output", chunk.TaskID, chunk.Stream),

@@ -6,6 +6,21 @@ import (
 	"testing"
 )
 
+func TestActionColorUsesToolAndErrorOverride(t *testing.T) {
+	if got := actionColor("command_execute", false); got != ansiAmber {
+		t.Fatalf("command color=%q", got)
+	}
+	if got := actionColor("file_read", true); got != ansiRed {
+		t.Fatalf("error color=%q", got)
+	}
+}
+
+func TestInteractionLineBudget(t *testing.T) {
+	if maxInteractionLines != 10 || maxInteractionBodyLines != 7 {
+		t.Fatalf("line budget=%d/%d", maxInteractionLines, maxInteractionBodyLines)
+	}
+}
+
 func TestRenderTextHidesToolStartAndShowsHumanReadAction(t *testing.T) {
 	var output bytes.Buffer
 	err := RenderText(&output, Event{
@@ -177,12 +192,12 @@ func TestRenderTextShowsMarkdownFileDiff(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"• Edited auth.go", "↳ auth.go (update) +1 -1", "-old", "+new", "full diff: mcpx://changeset"} {
+	for _, want := range []string{"• Edited auth.go", "↳ auth.go (update) +1 -1", "-old", "+new"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("file diff rendering missing %q: %q", want, text)
 		}
 	}
-	if strings.Contains(text, "```diff") || strings.Contains(text, "status=") {
+	if strings.Contains(text, "mcpx://changeset") || strings.Contains(text, "```diff") || strings.Contains(text, "status=") {
 		t.Fatalf("file diff rendering=%q", text)
 	}
 }

@@ -58,3 +58,36 @@ func TestTaskOutputSinkReportsIndependentStreamOffsets(t *testing.T) {
 		t.Fatalf("output chunks=%+v", seen)
 	}
 }
+
+func TestTaskOutputSinkReportsObservationIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell assertion is Unix-specific")
+	}
+	chunks := make(chan OutputChunk, 1)
+	manager := NewTaskManager()
+	manager.SetOutputSink(func(chunk OutputChunk) {
+		chunks <- chunk
+	})
+	task, err := manager.StartRemoteWithObservation(
+		context.Background(), "req_1", "command_execute",
+		"rs_observer", "demo", t.TempDir(), "printf 'out'",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if !task.Wait(waitCtx) {
+		t.Fatal("task did not exit")
+	}
+
+	select {
+	case chunk := <-chunks:
+		if chunk.RequestID != "req_1" || chunk.Tool != "command_execute" {
+			t.Fatalf("observation identity=%+v", chunk)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for observed output")
+	}
+}

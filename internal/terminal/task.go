@@ -34,6 +34,8 @@ const (
 // this chunk within its stream.
 type OutputChunk struct {
 	TaskID          string
+	RequestID       string
+	Tool            string
 	RemoteSessionID string
 	WorkspaceName   string
 	Command         string
@@ -49,16 +51,18 @@ type OutputSink func(OutputChunk)
 
 // Task is a background command.
 type Task struct {
-	ID              string
-	RemoteSessionID string
-	WorkspaceName   string
-	Command         string
-	WorkDir         string
-	Status          TaskStatus
-	PID             int
-	ExitCode        *int
-	StartedAt       time.Time
-	FinishedAt      *time.Time
+	ID                   string
+	ObservationRequestID string
+	ObservationTool      string
+	RemoteSessionID      string
+	WorkspaceName        string
+	Command              string
+	WorkDir              string
+	Status               TaskStatus
+	PID                  int
+	ExitCode             *int
+	StartedAt            time.Time
+	FinishedAt           *time.Time
 
 	mu            sync.Mutex
 	logBuf        bytes.Buffer
@@ -147,10 +151,16 @@ func NewPersistentTaskManager(db *sql.DB, logDir string) (*TaskManager, error) {
 
 // StartRemote launches a durable task owned by a Remote Session.
 func (m *TaskManager) StartRemote(ctx context.Context, remoteSessionID, workspaceName, workDir, command string) (*Task, error) {
-	return m.start(ctx, remoteSessionID, workspaceName, workDir, command)
+	return m.start(ctx, "", "", remoteSessionID, workspaceName, workDir, command)
 }
 
-func (m *TaskManager) start(_ context.Context, remoteSessionID, workspaceName, workDir, command string) (*Task, error) {
+// StartRemoteWithObservation launches a task and carries its originating MCP
+// request through output callbacks without changing ordinary task callers.
+func (m *TaskManager) StartRemoteWithObservation(ctx context.Context, requestID, tool, remoteSessionID, workspaceName, workDir, command string) (*Task, error) {
+	return m.start(ctx, requestID, tool, remoteSessionID, workspaceName, workDir, command)
+}
+
+func (m *TaskManager) start(_ context.Context, requestID, tool, remoteSessionID, workspaceName, workDir, command string) (*Task, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
@@ -175,7 +185,8 @@ func (m *TaskManager) start(_ context.Context, remoteSessionID, workspaceName, w
 	m.mu.Unlock()
 
 	t := &Task{
-		ID: id, RemoteSessionID: remoteSessionID, WorkspaceName: workspaceName, Command: command,
+		ID: id, ObservationRequestID: requestID, ObservationTool: tool,
+		RemoteSessionID: remoteSessionID, WorkspaceName: workspaceName, Command: command,
 		WorkDir: workDir, Status: TaskRunning, StartedAt: time.Now().UTC(), db: m.db,
 		cmd: cmd, cancel: cancel, done: make(chan struct{}), outputSink: m.emitOutput,
 	}
@@ -312,7 +323,8 @@ func (w *lockedWriter) Write(p []byte) (int, error) {
 	}
 	sink := w.t.outputSink
 	chunk := OutputChunk{
-		TaskID: w.t.ID, RemoteSessionID: w.t.RemoteSessionID, WorkspaceName: w.t.WorkspaceName,
+		TaskID: w.t.ID, RequestID: w.t.ObservationRequestID, Tool: w.t.ObservationTool,
+		RemoteSessionID: w.t.RemoteSessionID, WorkspaceName: w.t.WorkspaceName,
 		Command: w.t.Command, Stream: w.stream, Offset: offset, Data: append([]byte(nil), p...),
 	}
 	w.t.mu.Unlock()
