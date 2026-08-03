@@ -308,6 +308,24 @@ func toolAction(tool string, raw []byte) (string, string) {
 	action = strings.ToLower(strings.TrimSpace(action))
 	verb := actionVerb(tool, action)
 	label := ""
+
+	// Special case: skill/MCP calls via extension_manage (or skill_execute) should display
+	// the skill/MCP name in terminal observation instead of "extension_manage".
+	if (tool == "extension_manage" || tool == "skill_execute") && action == "call" {
+		if kind, ok := input["kind"].(string); ok {
+			kind = strings.ToLower(strings.TrimSpace(kind))
+			if kind == "skill" {
+				if name, ok := input["name"].(string); ok && strings.TrimSpace(name) != "" {
+					label = name
+				}
+			} else if kind == "mcp" {
+				if name, ok := input["server"].(string); ok && strings.TrimSpace(name) != "" {
+					label = name
+				}
+			}
+		}
+	}
+
 	switch tool {
 	case "command_execute":
 		label, _ = input["command"].(string)
