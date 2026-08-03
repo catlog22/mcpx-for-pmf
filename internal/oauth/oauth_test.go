@@ -41,6 +41,37 @@ func TestPKCEAndTokenRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRefreshTokenRoundTrip(t *testing.T) {
+	secret := make([]byte, 32)
+	for i := range secret {
+		secret[i] = byte(i + 1)
+	}
+	s := NewServer("op-pass", "https://mcp.example.com", secret, 3600)
+	if err := s.Registry.AddPreregistered("cli", []string{"http://127.0.0.1/cb"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	refresh := s.IssueRefreshToken("cli", "https://mcp.example.com/mcp", "mcp")
+	if refresh == "" {
+		t.Fatal("no refresh token")
+	}
+	tok, ttl, next, err := s.ExchangeRefreshToken(refresh, "cli", "")
+	if err != nil || ttl <= 0 || tok == "" || next == "" {
+		t.Fatalf("refresh: %v ttl=%d", err, ttl)
+	}
+	if !s.ValidateAccessToken(tok, "https://mcp.example.com", "https://mcp.example.com/mcp") {
+		t.Fatal("validate refreshed token")
+	}
+	// rotated: old refresh token must be single-use
+	if _, _, _, err := s.ExchangeRefreshToken(refresh, "cli", ""); err == nil {
+		t.Fatal("expected old refresh token replay to fail")
+	}
+	// client binding
+	other := s.IssueRefreshToken("cli", "https://mcp.example.com/mcp", "mcp")
+	if _, _, _, err := s.ExchangeRefreshToken(other, "not-cli", ""); err == nil {
+		t.Fatal("expected client mismatch to fail")
+	}
+}
+
 func TestRedirectRejectsPublicHTTP(t *testing.T) {
 	_, err := ValidateRedirectURIs([]string{"http://evil.example/cb"})
 	if err == nil {
