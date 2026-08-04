@@ -338,6 +338,19 @@ var migrations = []string{
 		ON environment_snapshots(created_at, remote_session_id);`,
 	`ALTER TABLE changeset_files ADD COLUMN deleted_files INTEGER NOT NULL DEFAULT 0;
 	ALTER TABLE changeset_files ADD COLUMN deleted_directories INTEGER NOT NULL DEFAULT 0;`,
+	`ALTER TABLE observation_events ADD COLUMN status TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN purpose TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN parent_operation_id TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN command TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN working_directory TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN exit_code INTEGER;
+	ALTER TABLE observation_events ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0;
+	ALTER TABLE observation_events ADD COLUMN skill_name TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN mcp_server TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN mcp_tool TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN path TEXT NOT NULL DEFAULT '';
+	CREATE INDEX IF NOT EXISTS idx_observation_events_history_filters
+		ON observation_events(workspace_name, remote_session_id, created_at, sequence);`,
 }
 
 func applyMigrations(ctx context.Context, db *sql.DB) error {

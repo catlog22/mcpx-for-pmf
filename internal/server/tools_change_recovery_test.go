@@ -86,7 +86,7 @@ func TestChangeExecuteDeletesNonGitFileAfterSemanticConfirmation(t *testing.T) {
 		t.Fatal(err)
 	}
 	pending := decodeToolResult(t, deleteResult)
-	if pending["status"] != "need_confirmation" {
+	if pending["status"] != "waiting_confirmation" {
 		t.Fatalf("delete should wait for semantic confirmation: %+v", pending)
 	}
 	pendingData, _ := pending["data"].(map[string]any)
@@ -98,7 +98,7 @@ func TestChangeExecuteDeletesNonGitFileAfterSemanticConfirmation(t *testing.T) {
 	confirmRequest.Params.Arguments = map[string]any{
 		"intent":            "用户已确认删除该文件",
 		"remote_session_id": created.Session.ID, "changeset_id": pendingData["changeset_id"],
-		"expected_digest": pendingData["digest"], "user_confirmed": true,
+		"expected_digest": pendingData["digest"], "confirmation_token": pendingData["confirmation_token"],
 	}
 	confirmedResult, err := rt.toolChangeExecute(context.Background(), confirmRequest)
 	if err != nil {
@@ -145,7 +145,6 @@ func TestChangeExecuteDeletesDirectoryWithInitialSemanticConfirmation(t *testing
 		"intent":            "清空旧项目目录",
 		"remote_session_id": created.Session.ID,
 		"summary":           "删除旧项目目录",
-		"user_confirmed":    true,
 		"operations":        []map[string]any{{"operation": "delete", "path": "old-project"}},
 	}
 	result, err := rt.toolChangeExecute(context.Background(), request)
@@ -153,8 +152,23 @@ func TestChangeExecuteDeletesDirectoryWithInitialSemanticConfirmation(t *testing
 		t.Fatal(err)
 	}
 	response := decodeToolResult(t, result)
+	if response["status"] != "waiting_confirmation" {
+		t.Fatalf("directory delete must wait for semantic confirmation: %+v", response)
+	}
+	pendingData, _ := response["data"].(map[string]any)
+	confirm := mcp.CallToolRequest{}
+	confirm.Params.Arguments = map[string]any{
+		"intent": "用户已确认删除旧项目目录", "remote_session_id": created.Session.ID,
+		"changeset_id": pendingData["changeset_id"], "expected_digest": pendingData["digest"],
+		"confirmation_token": pendingData["confirmation_token"],
+	}
+	confirmedResult, err := rt.toolChangeExecute(context.Background(), confirm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = decodeToolResult(t, confirmedResult)
 	if response["status"] != "ok" {
-		t.Fatalf("initial semantic confirmation did not apply directory delete: %+v", response)
+		t.Fatalf("confirmed directory delete did not apply: %+v", response)
 	}
 	if _, err := os.Stat(directory); !os.IsNotExist(err) {
 		t.Fatalf("directory was not removed: %v", err)
@@ -252,7 +266,7 @@ func TestChangeExecutePatchTooLargeHasRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	response := decodeToolResult(t, result)
-	if response["status"] != "denied" {
+	if response["status"] != "failed" {
 		t.Fatalf("oversized patch was not denied: %+v", response)
 	}
 	errorBody, _ := response["error"].(map[string]any)
@@ -306,11 +320,11 @@ func TestChangeExecuteMissingRevisionHasRecovery(t *testing.T) {
 	}
 	details, _ := errorBody["details"].(map[string]any)
 	nextAction, _ := details["next_action"].(map[string]any)
-	if nextAction["tool"] != "file_read" {
-		t.Fatalf("REVISION_REQUIRED must carry a file_read recovery action: %+v", details)
+	if nextAction["tool"] != "source_read" {
+		t.Fatalf("REVISION_REQUIRED must carry a source_read recovery action: %+v", details)
 	}
 	arguments, _ := nextAction["arguments"].(map[string]any)
-	if arguments["remote_session_id"] != created.Session.ID {
+	if arguments["session_id"] != created.Session.ID {
 		t.Fatalf("recovery action must preserve the session: %+v", arguments)
 	}
 }
@@ -352,7 +366,7 @@ func TestUpdateMissingRevisionSuggestsTargetFileRead(t *testing.T) {
 	details, _ := errorBody["details"].(map[string]any)
 	nextAction, _ := details["next_action"].(map[string]any)
 	arguments, _ := nextAction["arguments"].(map[string]any)
-	if nextAction["tool"] != "file_read" || arguments["path"] != "update-me.txt" {
+	if nextAction["tool"] != "source_read" || arguments["path"] != "update-me.txt" {
 		t.Fatalf("update recovery must target the missing revision file: %+v", details)
 	}
 }
@@ -396,8 +410,8 @@ func TestChangePrepareDuplicatePathHasRecovery(t *testing.T) {
 	}
 	details, _ := errorBody["details"].(map[string]any)
 	action, _ := details["next_action"].(map[string]any)
-	if action["tool"] != "change_manage" {
-		t.Fatalf("duplicate path must suggest change_manage: %+v", details)
+	if action["tool"] != "change_prepare" {
+		t.Fatalf("duplicate path must suggest change_prepare: %+v", details)
 	}
 }
 

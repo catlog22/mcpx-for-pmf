@@ -44,6 +44,7 @@ func (b *observationBridge) Record(ctx context.Context, event observation.Event)
 	}
 	event.Workspace = strings.TrimSpace(event.Workspace)
 	event.Intent = observation.SanitizeIntent(event.Intent)
+	event.Purpose = observation.SanitizeIntent(event.Purpose)
 	event.Summary, _ = observation.SanitizeText(event.Summary, observationSummaryMaxBytes)
 	event.ProgressSummary, _ = observation.SanitizeText(event.ProgressSummary, observationSummaryMaxBytes)
 	if len(event.Input) > 0 {
@@ -91,8 +92,11 @@ func (b *observationBridge) RecordToolStarted(ctx context.Context, name string, 
 		Workspace:       workspace,
 		RemoteSessionID: remoteID,
 		RequestID:       req.RequestID,
+		OperationID:     req.OperationID,
 		Tool:            name,
 		Type:            observation.TypeToolStarted,
+		Status:          "started",
+		Purpose:         req.Intent,
 		Intent:          req.Intent,
 		ProgressSummary: req.ProgressSummary,
 		Input:           input,
@@ -108,9 +112,11 @@ func (b *observationBridge) RecordToolCompleted(ctx context.Context, name string
 	if err := json.Unmarshal(resultJSON, &resultValue); err != nil {
 		resultValue = map[string]any{"available": false}
 	}
-	status := "ok"
+	status := "succeeded"
 	if callErr != nil || result == nil || result.IsError {
-		status = "error"
+		status = "failed"
+	} else if responseStatus := publicResultStatus(result); responseStatus != "" {
+		status = responseStatus
 	}
 	outputValue := map[string]any{
 		"status": status,
@@ -126,24 +132,135 @@ func (b *observationBridge) RecordToolCompleted(ctx context.Context, name string
 	if callErr != nil {
 		outputValue["error"] = observation.RedactText(callErr.Error())
 	}
+	facts := toolObservationFacts(name, args, resultJSON, timing)
 	encoded, encodeErr := json.Marshal(outputValue)
 	if encodeErr != nil {
 		encoded = []byte(`{"status":"error","result":{"available":false}}`)
 		truncated = true
 	}
 	return b.Record(ctx, observation.Event{
-		Workspace:       workspace,
-		RemoteSessionID: remoteID,
-		RequestID:       req.RequestID,
-		Tool:            name,
-		Type:            observation.TypeToolCompleted,
-		Intent:          req.Intent,
-		ProgressSummary: req.ProgressSummary,
-		Input:           input,
-		Output:          encoded,
-		Summary:         fmt.Sprintf("%s %s", name, status),
-		Truncated:       truncated || inputTruncated,
+		Workspace:        workspace,
+		RemoteSessionID:  remoteID,
+		RequestID:        req.RequestID,
+		OperationID:      req.OperationID,
+		Tool:             name,
+		Type:             observation.TypeToolCompleted,
+		Status:           status,
+		Purpose:          req.Intent,
+		Intent:           req.Intent,
+		ProgressSummary:  req.ProgressSummary,
+		Input:            input,
+		Output:           encoded,
+		Summary:          fmt.Sprintf("%s %s", name, status),
+		Command:          facts.Command,
+		WorkingDirectory: facts.WorkingDirectory,
+		ExitCode:         facts.ExitCode,
+		DurationMs:       facts.DurationMs,
+		SkillName:        facts.SkillName,
+		MCPServer:        facts.MCPServer,
+		MCPTool:          facts.MCPTool,
+		Path:             facts.Path,
+		Truncated:        truncated || inputTruncated,
 	})
+}
+
+func publicResultStatus(result *mcp.CallToolResult) string {
+	if result == nil {
+		return ""
+	}
+	for _, content := range result.Content {
+		textContent, ok := content.(mcp.TextContent)
+		if !ok {
+			continue
+		}
+		var payload struct {
+			Status string `json:"status"`
+		}
+		if json.Unmarshal([]byte(textContent.Text), &payload) != nil {
+			continue
+		}
+		switch payload.Status {
+		case string(envelope.StatusOK), string(envelope.StatusAccepted), string(envelope.StatusNeedConfirmation), string(envelope.StatusInterrupted):
+			return payload.Status
+		case string(envelope.StatusError):
+			return "failed"
+		}
+	}
+	return ""
+}
+
+func toolObservationFacts(name string, args map[string]any, normalized json.RawMessage, timing interactionTiming) observation.Event {
+	facts := observation.Event{DurationMs: timing.ServerElapsedMs}
+	if command, ok := args["command"].(string); ok {
+		facts.Command = strings.TrimSpace(command)
+	}
+	if task, ok := args["task"].(string); ok && facts.Command == "" {
+		facts.Command = strings.TrimSpace(task)
+	}
+	if path, ok := args["path"].(string); ok {
+		facts.Path = strings.TrimSpace(path)
+	}
+	if name == "skill_call" {
+		facts.SkillName, _ = args["name"].(string)
+	}
+	if name == "mcp_call" {
+		facts.MCPServer, _ = args["server"].(string)
+		facts.MCPTool, _ = args["tool"].(string)
+	}
+	var payload struct {
+		StructuredContent map[string]any `json:"structured_content"`
+		Content           []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if json.Unmarshal(normalized, &payload) != nil {
+		return facts
+	}
+	apply := func(value map[string]any) {
+		if workingDirectory, ok := value["working_directory"].(string); ok {
+			facts.WorkingDirectory = workingDirectory
+		}
+		if command, ok := value["command"].(string); ok && facts.Command == "" {
+			facts.Command = command
+		}
+		if duration, ok := numberValue(value["duration_ms"]); ok && duration >= 0 {
+			facts.DurationMs = int64(duration)
+		}
+		if exitCode, ok := numberValue(value["exit_code"]); ok {
+			code := int(exitCode)
+			facts.ExitCode = &code
+		}
+	}
+	apply(payload.StructuredContent)
+	if len(payload.StructuredContent) == 0 {
+		for _, content := range payload.Content {
+			if content.Type != "text" {
+				continue
+			}
+			var response struct {
+				Data map[string]any `json:"data"`
+			}
+			if json.Unmarshal([]byte(content.Text), &response) == nil {
+				apply(response.Data)
+				break
+			}
+		}
+	}
+	return facts
+}
+
+func numberValue(value any) (float64, bool) {
+	switch number := value.(type) {
+	case float64:
+		return number, true
+	case int:
+		return float64(number), true
+	case int64:
+		return float64(number), true
+	default:
+		return 0, false
+	}
 }
 
 func (r *Runtime) observationTarget(ctx context.Context, req envelope.Request) (string, string) {
@@ -188,6 +305,7 @@ func (r *Runtime) observeRemoteEvent(session remotesession.Session, event remote
 		RemoteSessionID: session.ID,
 		OperationID:     event.OperationID,
 		Type:            eventType,
+		Status:          "succeeded",
 		Output:          encoded,
 		Summary:         summary,
 		ResourceURI:     event.ResourceURI,
@@ -212,6 +330,7 @@ func (r *Runtime) observeAppliedChangeset(ctx context.Context, req envelope.Requ
 		RequestID:       req.RequestID,
 		OperationID:     item.ID,
 		Type:            observation.TypeFileChanged,
+		Status:          "succeeded",
 		Intent:          req.Intent,
 		Output:          bounded,
 		Summary:         item.Summary,
@@ -237,18 +356,21 @@ func (r *Runtime) observeTaskOutput(chunk terminal.OutputChunk) {
 		truncated = true
 	}
 	_ = r.observation.Record(context.Background(), observation.Event{
-		Workspace:       chunk.WorkspaceName,
-		RemoteSessionID: chunk.RemoteSessionID,
-		RequestID:       chunk.RequestID,
-		OperationID:     chunk.TaskID,
-		Tool:            chunk.Tool,
-		Type:            observation.TypeCommandOutput,
-		Output:          encoded,
-		Summary:         fmt.Sprintf("task %s %s output", chunk.TaskID, chunk.Stream),
-		ResourceURI:     fmt.Sprintf("mcpx://remote-sessions/%s/tasks/%s/logs", chunk.RemoteSessionID, chunk.TaskID),
-		Stream:          chunk.Stream,
-		Offset:          chunk.Offset,
-		Truncated:       truncated,
+		Workspace:        chunk.WorkspaceName,
+		RemoteSessionID:  chunk.RemoteSessionID,
+		RequestID:        chunk.RequestID,
+		OperationID:      chunk.TaskID,
+		Tool:             chunk.Tool,
+		Type:             observation.TypeCommandOutput,
+		Status:           "running",
+		Command:          chunk.Command,
+		WorkingDirectory: chunk.WorkDir,
+		Output:           encoded,
+		Summary:          fmt.Sprintf("task %s %s output", chunk.TaskID, chunk.Stream),
+		ResourceURI:      fmt.Sprintf("mcpx://remote-sessions/%s/tasks/%s/logs", chunk.RemoteSessionID, chunk.TaskID),
+		Stream:           chunk.Stream,
+		Offset:           chunk.Offset,
+		Truncated:        truncated,
 	})
 }
 

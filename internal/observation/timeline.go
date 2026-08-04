@@ -21,6 +21,7 @@ type TextRenderer struct {
 	activeKey               string
 	fallbackSeq             uint64
 	lastProgressFingerprint string
+	detail                  bool
 }
 
 type interactionBlock struct {
@@ -82,6 +83,14 @@ func (r *TextRenderer) SetWidth(terminalWidth int) {
 	r.width = terminalWidth
 }
 
+// SetDetail enables explicit semantic-purpose and operation metadata in the
+// terminal stream. It never exposes hidden model chain-of-thought.
+func (r *TextRenderer) SetDetail(detail bool) {
+	if r != nil {
+		r.detail = detail
+	}
+}
+
 // RenderEvent writes one event, keeping the block open until the interaction
 // completes or another interaction needs the active terminal span.
 func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
@@ -136,7 +145,7 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 	}
 
 	var rendered bytes.Buffer
-	if err := renderTextWithOptions(&rendered, event, renderOptions{colorMode: r.colorMode, terminalWidth: r.width}, block.commandOutput && event.Type == TypeToolCompleted); err != nil {
+	if err := renderTextWithOptions(&rendered, event, renderOptions{colorMode: r.colorMode, terminalWidth: r.width, detail: r.detail}, block.commandOutput && event.Type == TypeToolCompleted); err != nil {
 		return err
 	}
 	lines := splitRenderedLines(rendered.String())

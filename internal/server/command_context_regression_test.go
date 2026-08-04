@@ -30,7 +30,6 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 
 	missingPurpose := mcp.CallToolRequest{}
 	missingPurpose.Params.Arguments = map[string]any{
-		"intent":            "validate command context",
 		"remote_session_id": created.Session.ID, "command": "printf context",
 	}
 	missingResult, err := rt.toolCommandExecute(context.Background(), missingPurpose)
@@ -38,7 +37,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	missing := decodeToolResult(t, missingResult)
-	if missing["status"] != "error" {
+	if missing["status"] != "failed" {
 		t.Fatalf("missing purpose was accepted: %+v", missing)
 	}
 
@@ -53,7 +52,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	invalid := decodeToolResult(t, invalidResult)
-	if invalid["status"] != "error" {
+	if invalid["status"] != "failed" {
 		t.Fatalf("invalid scope was accepted: %+v", invalid)
 	}
 
@@ -70,7 +69,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 	}
 	confirmationResponse := decodeToolResult(t, confirmationResult)
 	confirmationData, _ := confirmationResponse["data"].(map[string]any)
-	if confirmationResponse["status"] != "need_confirmation" || confirmationData["purpose"] != "verify confirmation context" || confirmationData["scope"] != "workspace" {
+	if confirmationResponse["status"] != "waiting_confirmation" || confirmationData["purpose"] != "verify confirmation context" || confirmationData["scope"] != "workspace" {
 		t.Fatalf("confirm rule must create semantic confirmation: %+v", confirmationResponse)
 	}
 	if digest, _ := confirmationData["command_digest"].(string); !strings.HasPrefix(digest, "sha256:") {
@@ -80,7 +79,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 	confirmRequest.Params.Arguments = map[string]any{
 		"intent":            "用户已确认执行该命令",
 		"remote_session_id": created.Session.ID, "command": "echo confirmation",
-		"purpose": "verify confirmation context", "scope": "workspace", "user_confirmed": true,
+		"purpose": "verify confirmation context", "scope": "workspace", "confirmation_token": confirmationData["confirmation_token"],
 	}
 	confirmed, err := rt.toolCommandExecute(context.Background(), confirmRequest)
 	if err != nil {

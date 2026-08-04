@@ -120,10 +120,10 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		byName[tool.Name] = tool
 	}
 	expectedTools := []string{
-		"workspace_list", "session_open", "file_read", "context_query", "change_execute", "command_execute",
-		"progress_report",
-		"session_manage", "change_manage", "task_manage", "plan_manage", "runtime_inspect", "environment_inspect", "workspace_state",
-		"extension_manage", "artifact_manage", "screenshot_capture", "secrets_provide",
+		"workspace_list", "workspace_observe", "workspace_history_read", "session_open", "session_read", "session_transition",
+		"source_read", "change_prepare", "change_read", "change_apply", "change_revert", "command_run", "task_read", "task_control",
+		"progress_report", "plan_create", "plan_read", "plan_transition", "runtime_read", "environment_read", "environment_snapshot_create",
+		"extension_discover", "skill_call", "mcp_call", "artifact_read", "artifact_register", "screenshot_capture", "secret_provide",
 	}
 	if len(byName) != len(expectedTools) {
 		t.Fatalf("tools/list count=%d, want %d: %v", len(byName), len(expectedTools), byName)
@@ -157,7 +157,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 			}
 		}
 	}
-	prepareTool := byName["change_execute"]
+	prepareTool := byName["change_prepare"]
 	schemaJSON, err := json.Marshal(prepareTool.InputSchema)
 	if err != nil {
 		t.Fatal(err)
@@ -165,39 +165,39 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	schemaText := string(schemaJSON)
 	for _, needle := range []string{"base_sha256", "patch", "content", "operations"} {
 		if !strings.Contains(schemaText, needle) {
-			t.Fatalf("change_execute schema missing %q: %s", needle, schemaText)
+			t.Fatalf("change_prepare schema missing %q: %s", needle, schemaText)
 		}
 	}
 	// operations enum should advertise create/update/rename/delete (and exact ops).
 	if !strings.Contains(schemaText, "update") || !strings.Contains(schemaText, "create") {
-		t.Fatalf("change_execute operations enum incomplete: %s", schemaText)
+		t.Fatalf("change_prepare operations enum incomplete: %s", schemaText)
 	}
-	if strings.Contains(schemaText, "expected_sha256") {
-		t.Fatalf("change_execute exposes removed compatibility field expected_sha256: %s", schemaText)
+	if strings.Contains(schemaText, "user_confirmed") {
+		t.Fatalf("change_prepare exposes removed compatibility field user_confirmed: %s", schemaText)
 	}
-	commandSchema, _ := json.Marshal(byName["command_execute"].InputSchema)
-	for _, required := range []string{"remote_session_id", "purpose"} {
+	commandSchema, _ := json.Marshal(byName["command_run"].InputSchema)
+	for _, required := range []string{"session_id", "purpose"} {
 		if !strings.Contains(string(commandSchema), `"`+required+`"`) {
-			t.Fatalf("command_execute schema missing %q: %s", required, commandSchema)
+			t.Fatalf("command_run schema missing %q: %s", required, commandSchema)
 		}
 	}
 	if !strings.Contains(string(commandSchema), "scope") {
-		t.Fatalf("command_execute schema missing scope: %s", commandSchema)
+		t.Fatalf("command_run schema missing scope: %s", commandSchema)
 	}
-	contextSchema, _ := json.Marshal(byName["context_query"].InputSchema)
+	contextSchema, _ := json.Marshal(byName["source_read"].InputSchema)
 	for _, removed := range []string{"pattern", "max_files"} {
 		if strings.Contains(string(contextSchema), removed) {
-			t.Fatalf("context_query exposes removed compatibility field %q: %s", removed, contextSchema)
+			t.Fatalf("source_read exposes removed compatibility field %q: %s", removed, contextSchema)
 		}
 	}
-	if !strings.Contains(string(contextSchema), `"intent"`) {
-		t.Fatalf("context_query schema must require intent: %s", contextSchema)
+	if !strings.Contains(string(contextSchema), `"purpose"`) {
+		t.Fatalf("source_read schema must expose purpose: %s", contextSchema)
 	}
-	extensionSchema, _ := json.Marshal(byName["extension_manage"].InputSchema)
-	if !strings.Contains(string(extensionSchema), "action") || !strings.Contains(string(extensionSchema), "include_tools") || !strings.Contains(string(extensionSchema), "server") {
-		t.Fatalf("extension_manage schema incomplete: %s", extensionSchema)
+	extensionSchema, _ := json.Marshal(byName["extension_discover"].InputSchema)
+	if !strings.Contains(string(extensionSchema), "view") || !strings.Contains(string(extensionSchema), "include_tools") || !strings.Contains(string(extensionSchema), "server") {
+		t.Fatalf("extension_discover schema incomplete: %s", extensionSchema)
 	}
-	planSchema, _ := json.Marshal(byName["plan_manage"].InputSchema)
+	planSchema, _ := json.Marshal(byName["plan_create"].InputSchema)
 	for _, forbidden := range []string{"presentation", "renderer", "show_source", "density"} {
 		if strings.Contains(string(planSchema), forbidden) {
 			t.Fatalf("plan_manage exposes host presentation field %q: %s", forbidden, planSchema)
@@ -210,15 +210,15 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		t.Fatalf("catalog count %d != tools/list %d", len(declared), len(listed.Tools))
 	}
 
-	call := func(name string, args map[string]any) map[string]any {
+	rawCall := func(name string, args map[string]any) map[string]any {
 		t.Helper()
-		if _, exists := args["intent"]; !exists {
-			withIntent := make(map[string]any, len(args)+1)
+		if _, exists := args["purpose"]; !exists {
+			withPurpose := make(map[string]any, len(args)+1)
 			for key, value := range args {
-				withIntent[key] = value
+				withPurpose[key] = value
 			}
-			withIntent["intent"] = "acceptance operation"
-			args = withIntent
+			withPurpose["purpose"] = "acceptance operation"
+			args = withPurpose
 		}
 		var req mcp.CallToolRequest
 		req.Params.Name = name
@@ -240,7 +240,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 				if json.Unmarshal(raw, &asMap) == nil {
 					// Normalize to envelope-like shape for callers that expect status.
 					if _, hasOK := asMap["ok"]; !hasOK {
-						return map[string]any{"ok": true, "status": "ok", "data": asMap, "_raw_structured": true, "_result": res}
+						return map[string]any{"ok": true, "status": "succeeded", "data": asMap, "_raw_structured": true, "_result": res}
 					}
 					return asMap
 				}
@@ -261,16 +261,25 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 				t.Fatalf("%s returned legacy top-level Envelope alongside ARC: %s", name, text.Text)
 			}
 			result, _ := mcpx["result"].(map[string]any)
-			status := "ok"
-			okValue := true
+			publicStatus, _ := result["status"].(string)
+			if publicStatus == "" {
+				publicStatus = "succeeded"
+			}
+			status := publicStatus
+			if status == "succeeded" {
+				status = "ok"
+			} else if status == "waiting_confirmation" {
+				status = "need_confirmation"
+			}
+			okValue := publicStatus == "succeeded"
 			hints, _ := result["hints"].(map[string]any)
 			if result["type"] == "error" {
-				status, okValue = "error", false
+				okValue = false
 			}
-			if hints["preferred_behavior"] == "ask_confirm" {
-				status, okValue = "need_confirmation", false
+			if hints["preferred_behavior"] == "ask_confirm" && status == "succeeded" {
+				status, okValue = "waiting_confirmation", false
 			}
-			normalized := map[string]any{"ok": okValue, "status": status, "data": result["data"], "_arc": envelope, "_result": res, "_text": text.Text}
+			normalized := map[string]any{"ok": okValue, "status": status, "public_status": publicStatus, "data": result["data"], "_arc": envelope, "_result": res, "_text": text.Text}
 			if resultData, ok := result["data"].(map[string]any); ok {
 				if errData, exists := resultData["error"]; exists {
 					normalized["error"] = errData
@@ -284,6 +293,110 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		envelope["_result"] = res
 		envelope["_text"] = text.Text
 		return envelope
+	}
+
+	copyArgs := func(input map[string]any) map[string]any {
+		output := make(map[string]any, len(input)+3)
+		for key, value := range input {
+			output[key] = value
+		}
+		return output
+	}
+	normalizeCall := func(name string, input map[string]any) (string, map[string]any) {
+		args := copyArgs(input)
+		if _, exists := args["session_id"]; !exists {
+			if value, exists := args["remote_session_id"]; exists {
+				args["session_id"] = value
+			}
+		}
+		delete(args, "remote_session_id")
+		if _, exists := args["purpose"]; !exists {
+			if value, exists := args["intent"]; exists {
+				args["purpose"] = value
+			}
+		}
+		if _, exists := args["purpose"]; !exists {
+			args["purpose"] = "acceptance operation"
+		}
+		delete(args, "intent")
+		switch name {
+		case "file_read":
+			name, args["view"] = "source_read", "file"
+		case "context_query":
+			action, _ := args["action"].(string)
+			view := map[string]string{"list": "list", "query": "context", "search": "search"}[action]
+			if view == "" {
+				view = "search"
+			}
+			name, args["view"] = "source_read", view
+			delete(args, "action")
+		case "command_execute":
+			name = "command_run"
+		case "task_manage":
+			action, _ := args["action"].(string)
+			if action == "attach" || action == "stop" || action == "stdin" {
+				name, args["operation"] = "task_control", action
+			} else {
+				name, args["view"] = "task_read", action
+			}
+			delete(args, "action")
+		case "plan_manage":
+			action, _ := args["action"].(string)
+			switch action {
+			case "create":
+				name = "plan_create"
+			case "get":
+				name = "plan_read"
+			default:
+				name, args["transition"] = "plan_transition", action
+			}
+			delete(args, "action")
+		case "runtime_inspect":
+			name, args["view"] = "runtime_read", args["action"]
+			delete(args, "action")
+		case "change_execute":
+			if revertID, exists := args["revert_changeset_id"]; exists {
+				name, args["changeset_id"] = "change_revert", revertID
+				delete(args, "revert_changeset_id")
+				delete(args, "apply")
+			} else if _, exists := args["changeset_id"]; exists {
+				name = "change_apply"
+				delete(args, "apply")
+				delete(args, "user_confirmed")
+			} else {
+				name = "change_prepare"
+				delete(args, "apply")
+			}
+		}
+		return name, args
+	}
+	call := func(name string, input map[string]any) map[string]any {
+		publicName, args := normalizeCall(name, input)
+		if name == "change_execute" {
+			if _, hasOperations := args["operations"]; hasOperations {
+				apply, _ := input["apply"].(bool)
+				prepared := rawCall("change_prepare", args)
+				if !apply || prepared["ok"] != true {
+					return prepared
+				}
+				preparedData, _ := prepared["data"].(map[string]any)
+				if preparedData["idempotent_replay"] == true {
+					return prepared
+				}
+				applyArgs := map[string]any{
+					"session_id": args["session_id"], "changeset_id": preparedData["changeset_id"],
+					"expected_digest": preparedData["digest"], "purpose": args["purpose"],
+				}
+				if value, exists := args["format"]; exists {
+					applyArgs["format"] = value
+				}
+				if value, exists := args["verify"]; exists {
+					applyArgs["verify"] = value
+				}
+				return rawCall("change_apply", applyArgs)
+			}
+		}
+		return rawCall(publicName, args)
 	}
 
 	// --- A03: session_open single call ---
@@ -304,7 +417,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	guidance, _ := openData["agent_guidance"].(map[string]any)
 	routing, _ := guidance["tool_routing"].(map[string]any)
 	responseContract, _ := guidance["response_contract"].(map[string]any)
-	if guidance["version"] != agentGuidanceVersion || !containsAnyString(routing["modify_files"], "change_execute") || responseContract["required"] != true {
+	if guidance["version"] != agentGuidanceVersion || !containsAnyString(routing["modify_files"], "change_prepare") || responseContract["required"] != true {
 		t.Fatalf("session_open guidance missing or incomplete: %+v", guidance)
 	}
 	remoteSession, _ := openData["remote_session"].(map[string]any)
@@ -312,8 +425,8 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	if remoteID == "" {
 		t.Fatalf("session_open missing remote_session.id: %+v", openData)
 	}
-	if openData["remote_session_id"] != remoteID {
-		t.Fatalf("session_open missing top-level remote_session_id: %+v", openData)
+	if openData["session_id"] != remoteID {
+		t.Fatalf("session_open missing top-level session_id: %+v", openData)
 	}
 	revs, _ := openData["revisions"].(map[string]any)
 	for _, key := range []string{
@@ -627,7 +740,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	pendingData, _ := pendingDelete["data"].(map[string]any)
 	approvedDelete := call("change_execute", map[string]any{
 		"remote_session_id": remoteID, "changeset_id": pendingData["changeset_id"],
-		"expected_digest": pendingData["digest"], "user_confirmed": true,
+		"expected_digest": pendingData["digest"], "confirmation_token": pendingData["confirmation_token"],
 	})
 	if approvedDelete["status"] != "ok" {
 		t.Fatalf("semantic confirmation did not resume the original Changeset: %+v", approvedDelete)

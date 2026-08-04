@@ -51,7 +51,7 @@ func TestWorkspaceStateMemoryReturnsBoundedFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	envelope := decodeToolResult(t, result)
-	if envelope["status"] != "ok" {
+	if envelope["status"] != "succeeded" {
 		t.Fatalf("memory response=%+v", envelope)
 	}
 	data, ok := envelope["data"].(map[string]any)
@@ -95,7 +95,7 @@ func TestWorkspaceStateMemoryRejectsInvalidLatest(t *testing.T) {
 		t.Fatal(err)
 	}
 	envelope := decodeToolResult(t, result)
-	if envelope["status"] != "error" {
+	if envelope["status"] != "failed" {
 		t.Fatalf("invalid latest response=%+v", envelope)
 	}
 	errorObject, _ := envelope["error"].(map[string]any)

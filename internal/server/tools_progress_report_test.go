@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"mcpx/internal/envelope"
 	"mcpx/internal/remotesession"
 )
 
@@ -72,5 +74,52 @@ func TestProgressReportRecordsPauseSummaryAndPreviousResult(t *testing.T) {
 	}
 	if !started || !completed {
 		t.Fatalf("progress report was not fully recorded: started=%v completed=%v", started, completed)
+	}
+}
+
+func TestProgressReportAllowsResultSummaryUpToConfiguredLimit(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("workspace was not registered")
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wrapped := rt.instrumentTool("progress_report", rt.toolProgressReport)
+	request := mcp.CallToolRequest{}
+	arguments := map[string]any{
+		"intent":            "验证结果摘要长度限制",
+		"progress_summary":  "正在验证",
+		"remote_session_id": created.Session.ID,
+		"summary":           "已完成长度限制验证",
+		"result_summary":    strings.Repeat("x", envelope.MaxResultSummaryBytes),
+		"status":            "completed",
+	}
+	request.Params.Arguments = arguments
+	result, err := wrapped(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("result summary at limit was rejected: %+v", result)
+	}
+
+	arguments["result_summary"] = strings.Repeat("x", envelope.MaxResultSummaryBytes+1)
+	result, err = wrapped(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, ok := result.Content[0].(mcp.TextContent)
+	if !ok || !strings.Contains(text.Text, fmt.Sprintf("result summary exceeds %d bytes", envelope.MaxResultSummaryBytes)) {
+		t.Fatalf("unexpected over-limit error: text=%q result=%+v", text.Text, result)
 	}
 }

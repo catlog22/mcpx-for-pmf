@@ -93,7 +93,7 @@ func TestRemoteSessionMCPIsVendorAndTransportIndependent(t *testing.T) {
 		"save_snapshot":     false,
 	})
 	inspectionData, _ := inspected["data"].(map[string]any)
-	if inspected["status"] != "ok" || inspectionData["os"] == nil || inspectionData["architecture"] == nil {
+	if inspected["status"] != "succeeded" || inspectionData["os"] == nil || inspectionData["architecture"] == nil {
 		t.Fatalf("environment inspection failed: %+v", inspected)
 	}
 	if inspectionData["runtime"] != nil || inspectionData["toolchains"] != nil || inspectionData["comparison"] == nil {
@@ -114,7 +114,7 @@ func TestRemoteSessionMCPIsVendorAndTransportIndependent(t *testing.T) {
 	runtime.cfg.Auth.Token = "token-a"
 	ctxA2 := contextFor("token-a", "transport-a-2", "vendor-a-next")
 	continued := call(t, runtime.toolRemoteSessionGet, ctxA2, map[string]any{"remote_session_id": remoteSessionID})
-	if continued["status"] != "ok" {
+	if continued["status"] != "succeeded" {
 		t.Fatalf("transport session change lost durable state: %+v", continued)
 	}
 	viewerHandoff := call(t, runtime.toolRemoteSessionHandoff, ctxA2, map[string]any{
@@ -123,7 +123,7 @@ func TestRemoteSessionMCPIsVendorAndTransportIndependent(t *testing.T) {
 	viewerToken := viewerHandoff["data"].(map[string]any)["handoff_token"].(string)
 	runtime.cfg.Auth.Token = "token-c"
 	ctxC := contextFor("token-c", "transport-c-1", "vendor-c")
-	if response := call(t, runtime.toolRemoteSessionAttach, ctxC, map[string]any{"handoff_token": viewerToken}); response["status"] != "ok" {
+	if response := call(t, runtime.toolRemoteSessionAttach, ctxC, map[string]any{"handoff_token": viewerToken}); response["status"] != "succeeded" {
 		t.Fatalf("viewer attach failed: %+v", response)
 	}
 	runtime.screenshot = fakeScreenCapturer{}
@@ -145,11 +145,12 @@ func TestRemoteSessionMCPIsVendorAndTransportIndependent(t *testing.T) {
 
 	runtime.cfg.Auth.Token = "token-b"
 	attached := call(t, runtime.toolRemoteSessionAttach, ctxB, map[string]any{"handoff_token": handoffToken})
-	if attached["status"] != "ok" || attached["remote_session_id"] != remoteSessionID {
+	meta, _ := attached["meta"].(map[string]any)
+	if attached["status"] != "succeeded" || meta["session_id"] != remoteSessionID {
 		t.Fatalf("cross-vendor attach failed: %+v", attached)
 	}
 	visible := call(t, runtime.toolRemoteSessionGet, ctxB, map[string]any{"remote_session_id": remoteSessionID})
-	if visible["status"] != "ok" {
+	if visible["status"] != "succeeded" {
 		t.Fatalf("attached principal cannot query session: %+v", visible)
 	}
 	reused := call(t, runtime.toolRemoteSessionAttach, contextFor("token-b", "transport-b-2", "vendor-c"), map[string]any{"handoff_token": handoffToken})
@@ -267,7 +268,7 @@ func TestChangesetMCPDiffAndSemanticConfirmationSurviveTransportChange(t *testin
 		"changeset_id":      changesetID,
 		"expected_digest":   digest,
 	})
-	if pending["status"] != "need_confirmation" {
+	if pending["status"] != "waiting_confirmation" {
 		t.Fatalf("expected confirmation: %+v", pending)
 	}
 	pendingData := pending["data"].(map[string]any)
@@ -281,14 +282,14 @@ func TestChangesetMCPDiffAndSemanticConfirmationSurviveTransportChange(t *testin
 		t.Fatalf("confirmation response must include concrete file diff: %+v", pendingFile)
 	}
 	missingSession := callEnvelope(t, runtime.toolChangeExecute, contextFor("transport-confirm-missing"), map[string]any{
-		"changeset_id": pendingData["changeset_id"], "expected_digest": pendingData["digest"], "user_confirmed": true,
+		"changeset_id": pendingData["changeset_id"], "expected_digest": pendingData["digest"], "confirmation_token": pendingData["confirmation_token"],
 	})
-	if missingSession["status"] != "error" || missingSession["error"].(map[string]any)["code"] != "REMOTE_SESSION_REQUIRED" {
+	if missingSession["status"] != "failed" || missingSession["error"].(map[string]any)["code"] != "REMOTE_SESSION_REQUIRED" {
 		t.Fatalf("confirmation must require explicit Remote Session: %+v", missingSession)
 	}
 	confirmed := callEnvelope(t, runtime.toolChangeExecute, contextFor("transport-confirm-new"), map[string]any{
 		"remote_session_id": remoteSessionID, "changeset_id": pendingData["changeset_id"],
-		"expected_digest": pendingData["digest"], "user_confirmed": true,
+		"expected_digest": pendingData["digest"], "confirmation_token": pendingData["confirmation_token"],
 	})
 	if confirmed["status"] != "ok" {
 		t.Fatalf("confirmation failed after transport change: %+v", confirmed)

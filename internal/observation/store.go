@@ -29,6 +29,9 @@ func (s *Store) Append(ctx context.Context, event Event) (Event, error) {
 	if len(event.Intent) > MaxIntentBytes {
 		return Event{}, fmt.Errorf("observation intent exceeds %d bytes", MaxIntentBytes)
 	}
+	if len(event.Purpose) > MaxIntentBytes {
+		return Event{}, fmt.Errorf("observation purpose exceeds %d bytes", MaxIntentBytes)
+	}
 	if len(event.ProgressSummary) > MaxIntentBytes {
 		return Event{}, fmt.Errorf("observation progress summary exceeds %d bytes", MaxIntentBytes)
 	}
@@ -52,13 +55,20 @@ func (s *Store) Append(ctx context.Context, event Event) (Event, error) {
 	if event.Output == nil {
 		event.Output = json.RawMessage(`{}`)
 	}
+	var exitCode any
+	if event.ExitCode != nil {
+		exitCode = *event.ExitCode
+	}
 	result, err := s.db.ExecContext(ctx, `INSERT INTO observation_events
         (workspace_name, remote_session_id, request_id, operation_id, tool_name, event_type,
-		 intent, progress_summary, input_json, output_json, summary, resource_uri, stream, stream_offset,
-		 truncated, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 intent, progress_summary, input_json, output_json, summary, status, purpose, parent_operation_id,
+		 command, working_directory, exit_code, duration_ms, skill_name, mcp_server, mcp_tool, path,
+		 resource_uri, stream, stream_offset, truncated, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.Workspace, event.RemoteSessionID, event.RequestID, event.OperationID, event.Tool,
 		event.Type, event.Intent, event.ProgressSummary, string(event.Input), string(event.Output), event.Summary,
+		event.Status, event.Purpose, event.ParentOperationID, event.Command, event.WorkingDirectory, exitCode,
+		event.DurationMs, event.SkillName, event.MCPServer, event.MCPTool, event.Path,
 		event.ResourceURI, event.Stream, event.Offset, boolInt(event.Truncated), event.CreatedAt.UnixMilli())
 	if err != nil {
 		return Event{}, err
@@ -68,6 +78,7 @@ func (s *Store) Append(ctx context.Context, event Event) (Event, error) {
 		return Event{}, err
 	}
 	event.Sequence = sequence
+	event.setEventID()
 	return event, nil
 }
 
@@ -84,8 +95,9 @@ func (s *Store) List(ctx context.Context, workspace string, afterSequence int64,
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT sequence, workspace_name,
         remote_session_id, request_id, operation_id, tool_name, event_type,
-        intent, progress_summary, input_json, output_json, summary, resource_uri, stream,
-        stream_offset, truncated, created_at
+        intent, progress_summary, input_json, output_json, summary, status, purpose, parent_operation_id,
+        command, working_directory, exit_code, duration_ms, skill_name, mcp_server, mcp_tool, path,
+        resource_uri, stream, stream_offset, truncated, created_at
         FROM observation_events
         WHERE workspace_name = ? AND sequence > ?
         ORDER BY sequence ASC LIMIT ?`, workspace, afterSequence, limit)
@@ -114,8 +126,9 @@ func (s *Store) History(ctx context.Context, workspace string, afterSequence int
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT sequence, workspace_name,
         remote_session_id, request_id, operation_id, tool_name, event_type,
-        intent, progress_summary, input_json, output_json, summary, resource_uri, stream,
-        stream_offset, truncated, created_at
+        intent, progress_summary, input_json, output_json, summary, status, purpose, parent_operation_id,
+        command, working_directory, exit_code, duration_ms, skill_name, mcp_server, mcp_tool, path,
+        resource_uri, stream, stream_offset, truncated, created_at
         FROM observation_events
         WHERE workspace_name = ?
         ORDER BY sequence DESC LIMIT ?`, workspace, limit)
@@ -139,17 +152,24 @@ func scanEvents(rows *sql.Rows, capacity int) ([]Event, error) {
 		var event Event
 		var input, output string
 		var truncated int
+		var exitCode sql.NullInt64
 		var createdAt int64
 		if err := rows.Scan(&event.Sequence, &event.Workspace, &event.RemoteSessionID,
 			&event.RequestID, &event.OperationID, &event.Tool, &event.Type, &event.Intent,
-			&event.ProgressSummary, &input, &output, &event.Summary, &event.ResourceURI, &event.Stream,
-			&event.Offset, &truncated, &createdAt); err != nil {
+			&event.ProgressSummary, &input, &output, &event.Summary, &event.Status, &event.Purpose, &event.ParentOperationID,
+			&event.Command, &event.WorkingDirectory, &exitCode, &event.DurationMs, &event.SkillName, &event.MCPServer, &event.MCPTool, &event.Path,
+			&event.ResourceURI, &event.Stream, &event.Offset, &truncated, &createdAt); err != nil {
 			return nil, err
 		}
 		event.Input = json.RawMessage(input)
 		event.Output = json.RawMessage(output)
 		event.Truncated = truncated != 0
+		if exitCode.Valid {
+			value := int(exitCode.Int64)
+			event.ExitCode = &value
+		}
 		event.CreatedAt = time.UnixMilli(createdAt).UTC()
+		event.setEventID()
 		events = append(events, event)
 	}
 	if err := rows.Err(); err != nil {

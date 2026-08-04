@@ -60,7 +60,7 @@ func TestProjectTaskAndArtifactRemoteSessionFlow(t *testing.T) {
 	started := callEnvelope(t, runtime.toolCommandExecute, ctx, map[string]any{"remote_session_id": remoteSessionID, "task": "test", "purpose": "run the project test task", "scope": "workspace", "yield_time_ms": 1})
 	data, _ := started["data"].(map[string]any)
 	taskID, _ := data["task_id"].(string)
-	if started["status"] != "ok" || taskID == "" {
+	if started["status"] != "accepted" || taskID == "" {
 		t.Fatalf("task start=%+v", started)
 	}
 	deadline := time.Now().Add(10 * time.Second)
@@ -206,7 +206,7 @@ func TestCommandExecuteTruncatedOutputStaysInline(t *testing.T) {
 	if !strings.Contains(content.Text, "Output truncated") {
 		t.Fatalf("truncation must be stated in the text: %q", content.Text)
 	}
-	if !strings.Contains(content.Text, "task_manage") {
-		t.Fatalf("truncation notice must point to task_manage: %q", content.Text)
+	if !strings.Contains(content.Text, "task_control") && !strings.Contains(content.Text, "task_read") {
+		t.Fatalf("truncation notice must point to task_control or task_read: %q", content.Text)
 	}
 }

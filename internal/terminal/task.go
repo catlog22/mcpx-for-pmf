@@ -39,6 +39,7 @@ type OutputChunk struct {
 	RemoteSessionID string
 	WorkspaceName   string
 	Command         string
+	WorkDir         string
 	Stream          string
 	Offset          int64
 	Final           bool
@@ -330,7 +331,7 @@ func (w *lockedWriter) Write(p []byte) (int, error) {
 	chunk := OutputChunk{
 		TaskID: w.t.ID, RequestID: w.t.RequestID, Tool: w.t.Tool,
 		RemoteSessionID: w.t.RemoteSessionID, WorkspaceName: w.t.WorkspaceName,
-		Command: w.t.Command, Stream: w.stream, Offset: offset, Data: append([]byte(nil), p...),
+		Command: w.t.Command, WorkDir: w.t.WorkDir, Stream: w.stream, Offset: offset, Data: append([]byte(nil), p...),
 	}
 	w.t.mu.Unlock()
 	if sink != nil {
@@ -343,8 +344,8 @@ func (t *Task) emitOutputFinal() {
 	t.mu.Lock()
 	sink := t.outputSink
 	chunks := []OutputChunk{
-		{TaskID: t.ID, RequestID: t.RequestID, Tool: t.Tool, RemoteSessionID: t.RemoteSessionID, WorkspaceName: t.WorkspaceName, Command: t.Command, Stream: "stdout", Offset: t.stdoutOffset, Final: true},
-		{TaskID: t.ID, RequestID: t.RequestID, Tool: t.Tool, RemoteSessionID: t.RemoteSessionID, WorkspaceName: t.WorkspaceName, Command: t.Command, Stream: "stderr", Offset: t.stderrOffset, Final: true},
+		{TaskID: t.ID, RequestID: t.RequestID, Tool: t.Tool, RemoteSessionID: t.RemoteSessionID, WorkspaceName: t.WorkspaceName, Command: t.Command, WorkDir: t.WorkDir, Stream: "stdout", Offset: t.stdoutOffset, Final: true},
+		{TaskID: t.ID, RequestID: t.RequestID, Tool: t.Tool, RemoteSessionID: t.RemoteSessionID, WorkspaceName: t.WorkspaceName, Command: t.Command, WorkDir: t.WorkDir, Stream: "stderr", Offset: t.stderrOffset, Final: true},
 	}
 	t.mu.Unlock()
 	if sink == nil {

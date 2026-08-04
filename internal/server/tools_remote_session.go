@@ -61,28 +61,23 @@ func (r *Runtime) remoteRequest(ctx context.Context, req mcp.CallToolRequest) (e
 		out, _ := r.resultJSON(resp)
 		return envReq, auth.Principal{}, out
 	}
-	if err := validateIntent(envReq.Intent); err != nil {
-		code := "INTENT_REQUIRED"
-		if strings.TrimSpace(envReq.Intent) != "" {
-			code = "INTENT_TOO_LONG"
-		}
-		resp := envelope.Fail(envelope.StatusError, envReq.RequestID, envReq.Workspace, nil, code, err.Error())
-		out, _ := r.resultJSON(resp)
-		return envReq, principal, out
-	}
 	return envReq, principal, nil
 }
 
-func validateIntent(intent string) error {
-	intent = strings.TrimSpace(intent)
-	if intent == "" {
-		return fmt.Errorf("intent is required")
+func validatePurpose(purpose string) error {
+	purpose = strings.TrimSpace(purpose)
+	if purpose == "" {
+		return fmt.Errorf("purpose is required")
 	}
-	if len(intent) > envelope.MaxIntentBytes {
-		return fmt.Errorf("intent exceeds %d bytes", envelope.MaxIntentBytes)
+	if len(purpose) > envelope.MaxIntentBytes {
+		return fmt.Errorf("purpose exceeds %d bytes", envelope.MaxIntentBytes)
 	}
 	return nil
 }
+
+// validateIntent is kept for internal callers that still use the observation
+// field name; public schemas expose purpose.
+func validateIntent(intent string) error { return validatePurpose(intent) }
 
 func (r *Runtime) remoteResult(envReq envelope.Request, remoteSessionID, workspace string, data any) (*mcp.CallToolResult, error) {
 	resp := envelope.OK(envReq.RequestID, workspace, data)
@@ -287,7 +282,7 @@ func (r *Runtime) toolRemoteSessionAttach(ctx context.Context, req mcp.CallToolR
 	}
 	return r.remoteResult(envReq, session.ID, session.WorkspaceName, map[string]any{
 		"session":                session,
-		"recommended_next_calls": []string{"session_open", "session_manage", "workspace_state", "task_manage"},
+		"recommended_next_calls": []string{"session_open", "session_read", "workspace_observe", "task_read"},
 	})
 }
 

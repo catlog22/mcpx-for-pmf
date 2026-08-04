@@ -23,9 +23,9 @@ func (r *Runtime) addTool(s *mcpserver.MCPServer, tool mcp.Tool, handler mcpserv
 }
 
 func requireIntentSchema(tool mcp.Tool) mcp.Tool {
-	intent := map[string]any{
+	purpose := map[string]any{
 		"type":        "string",
-		"description": "本次模型请求的目标和预期结果",
+		"description": "本次调用的用户目标或语义用途；高风险工具会要求填写",
 	}
 	progressSummary := map[string]any{
 		"type":        "string",
@@ -38,11 +38,10 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 			if properties == nil {
 				properties = map[string]any{}
 			}
-			properties["intent"] = intent
+			properties["purpose"] = purpose
 			properties["progress_summary"] = progressSummary
 			raw["type"] = "object"
 			raw["properties"] = properties
-			raw["required"] = appendRequired(raw["required"], "intent")
 			if encoded, marshalErr := json.Marshal(raw); marshalErr == nil {
 				tool.RawInputSchema = encoded
 			}
@@ -53,9 +52,8 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 	if tool.InputSchema.Properties == nil {
 		tool.InputSchema.Properties = map[string]any{}
 	}
-	tool.InputSchema.Properties["intent"] = intent
+	tool.InputSchema.Properties["purpose"] = purpose
 	tool.InputSchema.Properties["progress_summary"] = progressSummary
-	tool.InputSchema.Required = appendRequiredStrings(tool.InputSchema.Required, "intent")
 	return tool
 }
 
@@ -97,6 +95,7 @@ func (r *Runtime) instrumentTool(name string, handler mcpserver.ToolHandlerFunc)
 			runtime = runtimeContextWithClient(runtime, clientName, clientVersion)
 		}
 		callCtx = withRuntimeContext(callCtx, runtime)
+		callCtx = withToolInvocationName(callCtx, name)
 		observationRequest, observationParseErr := r.parseEnv(callCtx, req)
 		if observationParseErr == nil && r.observation != nil {
 			_ = r.observation.RecordToolStarted(callCtx, name, observationRequest, req.GetArguments())

@@ -21,6 +21,7 @@ type workspaceObserverOptions struct {
 	Workspace string
 	History   int
 	Format    string
+	Detail    bool
 }
 
 func parseWorkspaceObserverArgs(args []string) (workspaceObserverOptions, error) {
@@ -28,6 +29,7 @@ func parseWorkspaceObserverArgs(args []string) (workspaceObserverOptions, error)
 	fs.SetOutput(io.Discard)
 	history := fs.Int("history", observation.DefaultHistory, "number of recent events to replay")
 	format := fs.String("format", "text", "text|json")
+	detail := fs.Bool("detail", false, "show semantic purpose, operation IDs, and execution facts")
 	if err := fs.Parse(args); err != nil {
 		return workspaceObserverOptions{}, err
 	}
@@ -44,7 +46,7 @@ func parseWorkspaceObserverArgs(args []string) (workspaceObserverOptions, error)
 	if *format != "text" && *format != "json" {
 		return workspaceObserverOptions{}, fmt.Errorf("format must be text or json")
 	}
-	return workspaceObserverOptions{Workspace: strings.TrimSpace(fs.Arg(0)), History: *history, Format: *format}, nil
+	return workspaceObserverOptions{Workspace: strings.TrimSpace(fs.Arg(0)), History: *history, Format: *format, Detail: *detail}, nil
 }
 
 func runWorkspaceObserver(args []string) int {
@@ -70,6 +72,7 @@ func runWorkspaceObserver(args []string) int {
 	var textRenderer *observation.TextRenderer
 	if options.Format == "text" {
 		textRenderer = observation.NewTextRendererWithMode(colorMode, terminalColumns())
+		textRenderer.SetDetail(options.Detail)
 	}
 	err = client.Run(ctx, observation.SubscribeRequest{
 		Type: "subscribe", Workspace: options.Workspace, HistoryLimit: options.History, Format: options.Format,
@@ -168,6 +171,7 @@ func printWorkspaceUsage(w io.Writer) {
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  -history int     recent events to replay (1-200, default 100)")
 	fmt.Fprintln(w, "  -format string   text or json (default text)")
+	fmt.Fprintln(w, "  -detail          show semantic purpose, operation IDs, and execution facts")
 }
 
 func stdoutIsTTY() bool {

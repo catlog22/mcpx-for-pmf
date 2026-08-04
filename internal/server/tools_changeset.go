@@ -45,9 +45,15 @@ func (r *Runtime) toolChangePrepare(ctx context.Context, req mcp.CallToolRequest
 		return r.changeError(envReq, session.ID, session.WorkspaceName, err)
 	}
 	summary, _ := envReq.Payload["summary"].(string)
-	prepared, err := r.changesets.Prepare(ctx, session.ID, principal.ID, session.WorkspacePath, summary, operations)
+	clientRequestID, _ := envReq.Payload["idempotency_key"].(string)
+	prepared, replayed, err := r.changesets.PrepareIdempotentWithOptions(ctx, session.ID, principal.ID, strings.TrimSpace(clientRequestID), session.WorkspacePath, summary, operations, changeset.PrepareOptions{})
 	if err != nil {
 		return r.changeError(envReq, session.ID, session.WorkspaceName, err)
+	}
+	if replayed {
+		payload := changeSummaryDTO(prepared)
+		payload["idempotent_replay"] = true
+		return changeDiffResultFromDTO(prepared, payload), nil
 	}
 	_ = r.remote.AddEvent(ctx, principal, remotesession.Event{RemoteSessionID: session.ID, Type: "changeset.prepared", OperationID: prepared.ID, Summary: prepared.Summary})
 	return changeDiffResult(prepared), nil
@@ -114,6 +120,13 @@ func (r *Runtime) changeRequest(ctx context.Context, req mcp.CallToolRequest, ed
 	if fail != nil {
 		return envReq, principal, remotesession.Session{}, fail
 	}
+	if edit {
+		if err := validatePurpose(envReq.Intent); err != nil {
+			response := envelope.Fail(envelope.StatusError, envReq.RequestID, envReq.Workspace, nil, "PURPOSE_REQUIRED", err.Error())
+			result, _ := r.resultJSON(response)
+			return envReq, principal, remotesession.Session{}, result
+		}
+	}
 	remoteSessionID, err := requireRemoteSessionID(envReq)
 	if err != nil {
 		result, _ := r.remoteError(envReq, "", "", err)
@@ -132,7 +145,7 @@ func (r *Runtime) changeRequest(ctx context.Context, req mcp.CallToolRequest, ed
 }
 
 func (r *Runtime) applyChangeset(ctx context.Context, envReq envelope.Request, principalID string, session remotesession.Session, item changeset.Changeset) (*mcp.CallToolResult, error) {
-	result, err := r.changesets.Apply(ctx, item.ID, session.WorkspacePath)
+	applyResult, err := r.changesets.Apply(ctx, item.ID, session.WorkspacePath)
 	if err != nil {
 		return r.changeError(envReq, session.ID, session.WorkspaceName, err)
 	}
@@ -146,7 +159,21 @@ func (r *Runtime) applyChangeset(ctx context.Context, envReq envelope.Request, p
 		_ = r.remote.AddEvent(ctx, principal, remotesession.Event{RemoteSessionID: session.ID, Type: "changeset.applied", OperationID: item.ID, Summary: item.Summary})
 	}
 	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: session.ID, Workspace: session.WorkspaceName, Tool: "change_execute", Status: "ok", Detail: map[string]any{"changeset_id": item.ID, "digest": item.Digest}})
-	return r.remoteResult(envReq, session.ID, session.WorkspaceName, result)
+	payload := changeSummaryDTO(appliedItem)
+	payload["applied"] = true
+	payload["apply"] = applyResult
+	if raw, ok := envReq.Payload["verify"].([]any); ok {
+		verify := make([]string, 0, len(raw))
+		for _, item := range raw {
+			if step, ok := item.(string); ok && strings.TrimSpace(step) != "" {
+				verify = append(verify, strings.TrimSpace(step))
+			}
+		}
+		if len(verify) > 0 {
+			payload["verify"] = r.runVerifySteps(ctx, envReq, session, verify)
+		}
+	}
+	return compactToolResult(payload, fmt.Sprintf("Changeset %s applied.", item.ID)), nil
 }
 
 func parseChangeOperations(value any) ([]changeset.Operation, error) {

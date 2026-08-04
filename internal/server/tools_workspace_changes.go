@@ -35,7 +35,7 @@ func (r *Runtime) toolWorkspaceChanges(ctx context.Context, req mcp.CallToolRequ
 	}
 	fallback := report.UnifiedDiff
 	if !report.GitAvailable {
-		fallback = "当前 Workspace 不是 Git 仓库；Git 状态和 diff 不适用，但 file_read、change_execute 等文件操作仍可用。"
+		fallback = "当前 Workspace 不是 Git 仓库；Git 状态和 diff 不适用，但 source_read、change_prepare 等文件操作仍可用。"
 	}
 	if fallback == "" {
 		fallback = "No tracked Git diff."

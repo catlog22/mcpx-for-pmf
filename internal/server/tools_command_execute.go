@@ -31,7 +31,7 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req mcp.CallToolReques
 	if fail != nil {
 		return fail, nil
 	}
-	purpose, scope, intentErr := commandIntent(envReq.Payload)
+	purpose, scope, intentErr := commandIntent(envReq)
 	if intentErr != nil {
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "bad_request", intentErr.Error())
 	}
@@ -62,8 +62,9 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req mcp.CallToolReques
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "denied", "command denied by policy")
 	case security.Confirm:
 		yield := commandYield(envReq.Payload)
-		if !userConfirmed(envReq.Payload) || !r.hasPendingCommandConfirmation(remote.ID, command, purpose, scope) {
-			_, confirmationErr := r.approvals.Put(approval.Pending{
+		confirmationToken := stringPayload(envReq.Payload, "confirmation_token")
+		if !r.hasPendingCommandConfirmation(remote.ID, principal.ID, command, purpose, scope, confirmationToken) {
+			pending, confirmationErr := r.approvals.PutPending(approval.Pending{
 				Tool: "command_execute", Summary: command, Command: command,
 				CommandYieldMs: int(yield / time.Millisecond), Purpose: purpose, Scope: scope,
 				CommandDigest: commandDigest, WorkDir: remote.WorkspacePath,
@@ -77,14 +78,15 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req mcp.CallToolReques
 				map[string]any{
 					"command": command, "purpose": purpose, "scope": scope,
 					"command_digest": commandDigest, "confirmation_required": true,
-					"confirmation_message": "请向用户展示命令及用途，等待明确确认；确认后使用相同 command 和 purpose，并设置 user_confirmed=true 重试。",
+					"confirmation_token":   pending.ConfirmationToken,
+					"confirmation_message": "请向用户展示命令及用途，获得明确语义确认后，使用相同 command、purpose 和 confirmation_token 重试。该 token 仅绑定本次操作，不承担认证职责。",
 				}, "USER_CONFIRMATION_REQUIRED", "命令执行等待用户语义确认")
 			response.RemoteSessionID = remote.ID
 			return r.resultJSON(response)
 		}
 		result, executeErr := r.executeCommandTask(ctx, envReq, principal, remote, command, yield, purpose, scope, commandDigest)
 		if executeErr == nil {
-			r.consumePendingCommandConfirmation(remote.ID, command, purpose, scope)
+			r.consumePendingCommandConfirmation(remote.ID, principal.ID, command, purpose, scope, confirmationToken)
 		}
 		return result, executeErr
 	}
@@ -93,7 +95,11 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req mcp.CallToolReques
 }
 
 func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Request, principal auth.Principal, remote remotesession.Session, command string, yield time.Duration, purpose, scope, commandDigest string) (*mcp.CallToolResult, error) {
-	task, err := r.tasks.StartRemoteWithObservation(ctx, envReq.RequestID, "command_execute", remote.ID, remote.WorkspaceName, remote.WorkspacePath, command)
+	originTool := toolInvocationName(ctx)
+	if originTool == "" {
+		originTool = "command_execute"
+	}
+	task, err := r.tasks.StartRemoteWithObservation(ctx, envReq.RequestID, originTool, remote.ID, remote.WorkspaceName, remote.WorkspacePath, command)
 	if err != nil {
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "start_error", err.Error())
 	}
@@ -105,6 +111,8 @@ func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Reques
 	data["purpose"] = purpose
 	data["scope"] = scope
 	data["command_digest"] = commandDigest
+	data["command"] = command
+	data["working_directory"] = remote.WorkspacePath
 	data["workspace_scoped"] = scope == "workspace"
 	capTaskExecutionOutput(data, config.MaxResultBytes(r.cfg.Limits))
 	if completed {
@@ -112,6 +120,11 @@ func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Reques
 		data["task_id"] = ""
 		detail := commandExecutionDetail(purpose, scope, commandDigest)
 		detail["exit_code"] = data["exit_code"]
+		if exitCode, ok := data["exit_code"].(int); ok && exitCode != 0 {
+			response := envelope.Fail(envelope.StatusError, envReq.RequestID, remote.WorkspaceName, data, "COMMAND_FAILED", fmt.Sprintf("命令退出码为 %d", exitCode))
+			response.RemoteSessionID = remote.ID
+			return r.resultJSON(response)
+		}
 		r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "command_execute", Command: command, Status: "ok", Detail: detail})
 		result := compactToolResult(data, commandOutputText(data, fmt.Sprintf("Command completed with exit code %v.", data["exit_code"])))
 		return result, nil
@@ -122,16 +135,22 @@ func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Reques
 		"stdout_offset": data["stdout_next_offset"], "stderr_offset": data["stderr_next_offset"],
 		"yield_time_ms": int(yield / time.Millisecond),
 	})
+	data["summary"] = fmt.Sprintf("Command is running as Task %s.", task.ID)
 	detail := commandExecutionDetail(purpose, scope, commandDigest)
 	detail["task_id"] = task.ID
 	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "command_execute", Command: command, Status: "running", Detail: detail})
-	result := compactToolResult(data, commandOutputText(data, fmt.Sprintf("Command is running as Task %s.", task.ID)))
-	return result, nil
+	response := envelope.Accepted(envReq.RequestID, remote.WorkspaceName, data)
+	response.RemoteSessionID = remote.ID
+	responseData, responseErr := r.resultJSON(response)
+	if responseErr != nil {
+		return nil, responseErr
+	}
+	return responseData, nil
 }
 
 // commandOutputText renders the model-facing summary with any stdout/stderr
 // inline, so completed command output is readable directly in the conversation.
-// Truncated streams state the truncation and point to task_manage for more.
+// Truncated streams state the truncation and point to task_read/task_control for more.
 func commandOutputText(data map[string]any, summary string) string {
 	var builder strings.Builder
 	builder.WriteString(summary)
@@ -146,7 +165,7 @@ func commandOutputText(data map[string]any, summary string) string {
 		builder.WriteString(text)
 	}
 	if truncated, _ := data["output_truncated"].(bool); truncated {
-		builder.WriteString("\n\nOutput truncated; call task_manage with action=attach or logs to read more.")
+		builder.WriteString("\n\nOutput truncated; call task_control(operation=attach) or task_read(view=logs) to read more.")
 	}
 	return builder.String()
 }
@@ -170,16 +189,15 @@ func capTaskExecutionOutput(data map[string]any, maxBytes int) {
 	}
 }
 
-func commandIntent(payload map[string]any) (purpose, scope string, err error) {
-	purpose, _ = payload["purpose"].(string)
-	purpose = strings.TrimSpace(purpose)
+func commandIntent(req envelope.Request) (purpose, scope string, err error) {
+	purpose = strings.TrimSpace(req.Intent)
 	if purpose == "" {
 		return "", "", fmt.Errorf("purpose is required and must describe the user's requested development action")
 	}
 	if len(purpose) > 512 {
 		return "", "", fmt.Errorf("purpose exceeds 512 bytes")
 	}
-	scope, _ = payload["scope"].(string)
+	scope, _ = req.Payload["scope"].(string)
 	scope = strings.TrimSpace(scope)
 	if scope == "" {
 		scope = "workspace"
@@ -191,7 +209,10 @@ func commandIntent(payload map[string]any) (purpose, scope string, err error) {
 }
 
 func commandRequestDigest(requestID, remoteSessionID, workspace, command, purpose, scope string) string {
-	value := strings.Join([]string{requestID, remoteSessionID, workspace, command, purpose, scope}, "\x00")
+	// Request IDs identify transport attempts. They must not change the
+	// semantic operation digest used to bind confirmation_token across retry.
+	_ = requestID
+	value := strings.Join([]string{remoteSessionID, workspace, command, purpose, scope}, "\x00")
 	digest := sha256.Sum256([]byte(value))
 	return "sha256:" + hex.EncodeToString(digest[:])
 }
@@ -211,18 +232,22 @@ func commandYield(payload map[string]any) time.Duration {
 	return time.Duration(yield) * time.Millisecond
 }
 
-func (r *Runtime) hasPendingCommandConfirmation(remoteSessionID, command, purpose, scope string) bool {
+func (r *Runtime) hasPendingCommandConfirmation(remoteSessionID, principalID, command, purpose, scope, confirmationToken string) bool {
+	confirmationToken = strings.TrimSpace(confirmationToken)
+	if confirmationToken == "" {
+		return false
+	}
 	for _, pending := range r.approvals.ListRemoteSession(remoteSessionID) {
-		if pending.Tool == "command_execute" && pending.Command == command && pending.Purpose == purpose && pending.Scope == scope {
+		if pending.Tool == "command_execute" && pending.PrincipalID == principalID && pending.Command == command && pending.Purpose == purpose && pending.Scope == scope && pending.ConfirmationToken == confirmationToken {
 			return true
 		}
 	}
 	return false
 }
 
-func (r *Runtime) consumePendingCommandConfirmation(remoteSessionID, command, purpose, scope string) {
+func (r *Runtime) consumePendingCommandConfirmation(remoteSessionID, principalID, command, purpose, scope, confirmationToken string) {
 	for _, pending := range r.approvals.ListRemoteSession(remoteSessionID) {
-		if pending.Tool == "command_execute" && pending.Command == command && pending.Purpose == purpose && pending.Scope == scope {
+		if pending.Tool == "command_execute" && pending.PrincipalID == principalID && pending.Command == command && pending.Purpose == purpose && pending.Scope == scope && pending.ConfirmationToken == confirmationToken {
 			_, _ = r.approvals.Consume(pending.ID)
 			return
 		}

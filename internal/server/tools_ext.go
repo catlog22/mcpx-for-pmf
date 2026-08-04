@@ -114,14 +114,14 @@ func (r *Runtime) toolFileChanges(ctx context.Context, req mcp.CallToolRequest) 
 	since, _ := envReq.Payload["since"].(string)
 	since = strings.TrimSpace(since)
 	if since == "" {
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "snapshot_required", "snapshot_id is required; call workspace_state with action=snapshot first")
+		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "snapshot_required", "snapshot_id is required; call workspace_observe with view=snapshot first")
 	}
 	old, err := r.fileSnapshots.Get(ctx, remote.ID, since)
 	if err != nil {
 		code := "snap_error"
 		if errors.Is(err, filesnapshot.ErrNotFound) {
 			code = "snapshot_not_found"
-			err = fmt.Errorf("snapshot %q was not found; call workspace_state with action=snapshot and retry with its snapshot_id", since)
+			err = fmt.Errorf("snapshot %q was not found; call workspace_observe with view=snapshot and retry with its snapshot_id", since)
 		}
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, code, err.Error())
 	}
@@ -165,14 +165,14 @@ func (r *Runtime) toolSecretsProvide(ctx context.Context, req mcp.CallToolReques
 	}
 	if secretID == "" {
 		refs := r.secrets.Cache(remote.ID, values)
-		r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "secrets_provide", Status: "ok", Detail: map[string]any{"refs": refs}})
+		r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: firstString(toolInvocationName(ctx), "secret_provide"), Status: "ok", Detail: map[string]any{"refs": refs}})
 		return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, map[string]any{"cached_refs": refs, "persisted": false})
 	}
 	p, err := r.secrets.Provide(remote.ID, secretID, values)
 	if err != nil {
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "secret_error", err.Error())
 	}
-	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "secrets_provide", Status: "ok", SecretID: secretID})
+	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: firstString(toolInvocationName(ctx), "secret_provide"), Status: "ok", SecretID: secretID})
 	if p.ResumeExec && p.Command != "" {
 		res, err := terminal.Exec(ctx, terminal.ExecOptions{
 			WorkDir:  p.WorkDir,
@@ -268,8 +268,13 @@ func (r *Runtime) toolMCPCall(ctx context.Context, req mcp.CallToolRequest) (*mc
 	b, _ := json.Marshal(res)
 	var data any
 	_ = json.Unmarshal(b, &data)
-	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "mcp_call", Status: "ok", Detail: map[string]any{"server": serverName, "tool": toolName}})
-	return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, data)
+	if upstream, ok := res.(*mcp.CallToolResult); ok && upstream.IsError {
+		response := envelope.Fail(envelope.StatusError, envReq.RequestID, remote.WorkspaceName, data, "MCP_CALL_FAILED", fmt.Sprintf("MCP %s/%s returned an error", serverName, toolName))
+		response.RemoteSessionID = remote.ID
+		return r.resultJSON(response)
+	}
+	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: firstString(toolInvocationName(ctx), "mcp_call"), Status: "ok", Detail: map[string]any{"server": serverName, "tool": toolName}})
+	return compactToolResult(data, fmt.Sprintf("MCP %s/%s completed.", serverName, toolName)), nil
 }
 
 // mcpManagerForWorkspace returns a request-local immutable view. A shared
@@ -319,9 +324,9 @@ func skillItems(skills []skill.Skill) []map[string]any {
 			"revision":         revision,
 			"priority":         (index + 1) * 10,
 			"required":         forced,
-			"trigger":          map[string]any{"kind": "explicit", "tool": "extension_manage"},
+			"trigger":          map[string]any{"kind": "explicit", "tool": "extension_discover"},
 			"invocation": map[string]any{
-				"tool": "extension_manage", "requires_remote_session": true,
+				"tool": "extension_discover", "requires_remote_session": true,
 				"arguments": map[string]any{"action": "call", "kind": "skill", "name": s.Manifest.Name, "arguments": map[string]any{}},
 			},
 		})
@@ -364,6 +369,11 @@ func (r *Runtime) toolSkillExecute(ctx context.Context, req mcp.CallToolRequest)
 		response.RemoteSessionID = remote.ID
 		return r.resultJSON(response)
 	}
-	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "skill_execute", Status: "ok", Detail: map[string]any{"name": name}})
-	return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, out)
+	if exitCode, ok := out["exit_code"].(int); ok && exitCode != 0 {
+		response := envelope.Fail(envelope.StatusError, envReq.RequestID, remote.WorkspaceName, out, "SKILL_FAILED", fmt.Sprintf("Skill exited with code %d", exitCode))
+		response.RemoteSessionID = remote.ID
+		return r.resultJSON(response)
+	}
+	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: firstString(toolInvocationName(ctx), "skill_call"), Status: "ok", Detail: map[string]any{"name": name}})
+	return compactToolResult(out, fmt.Sprintf("Skill %s completed.", name)), nil
 }

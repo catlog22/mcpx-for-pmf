@@ -141,7 +141,7 @@ func renderCodeChange(data map[string]any) string {
 	if changesetID != "" {
 		fmt.Fprintf(&b, "### Changeset %s", changesetID)
 	}
-	if status, _ := data["status"].(string); status == "need_confirmation" {
+	if status, _ := data["status"].(string); status == "waiting_confirmation" || status == "need_confirmation" {
 		b.WriteString("\n\n> ⚠️ 此变更需要确认后才能应用。")
 	}
 	diffMeta, _ := data["diff"].(map[string]any)

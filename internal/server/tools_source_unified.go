@@ -83,7 +83,7 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req mcp.CallToolReque
 				}
 				details := map[string]any{}
 				if code == "NOT_FOUND" {
-					details["next_action"] = nextActionWithReason("context_query", "locate this path before retrying file_read", map[string]any{
+					details["next_action"] = nextActionWithReason("context_query", "locate this path before retrying source_read", map[string]any{
 						"remote_session_id": session.ID,
 						"action":            "list",
 					})
@@ -228,7 +228,7 @@ func fullFileReadDisplay(read file.FullReadResult, data map[string]any, summary 
 	return sourceReadDisplay(data, summary)
 }
 
-// sourceReadDisplay is the host/model-facing representation of file_read.
+// sourceReadDisplay is the host/model-facing representation of source_read.
 // The public ARC wrapper keeps the complete machine data in response metadata;
 // the first text content remains useful to a terminal agent without requiring
 // it to decode a protocol envelope before it can inspect source code.
@@ -273,7 +273,7 @@ func sourceReadDisplay(data map[string]any, summary string) string {
 		}
 		builder.WriteString("```")
 		if truncated, _ := item["truncated"].(bool); truncated {
-			builder.WriteString("\n\n> 内容已截断；请继续调用 `file_read` 读取后续内容。")
+			builder.WriteString("\n\n> 内容已截断；请继续调用 `source_read(view=file)` 读取后续内容。")
 		}
 		if revision, _ := item["sha256"].(string); strings.TrimSpace(revision) != "" {
 			fmt.Fprintf(&builder, "\n\nRevision: `%s`", revision)

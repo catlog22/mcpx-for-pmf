@@ -32,13 +32,13 @@ func RenderToolContent(tool, resultType, renderer, summary string, data any) (st
 		return renderWorkspaceList(summary, asMap)
 	case "session_open":
 		return renderSessionOpen(summary, asMap)
-	case "context_query":
+	case "context_query", "source_read":
 		return renderContextQuery(summary, asMap)
-	case "plan_manage":
+	case "plan_manage", "plan_create", "plan_read", "plan_transition":
 		if text, ok := renderPlanData(summary, asMap); ok {
 			return text, true
 		}
-	case "artifact_manage":
+	case "artifact_manage", "artifact_read":
 		if text, ok := renderArtifactRead(summary, asMap); ok {
 			return text, true
 		}
@@ -50,7 +50,7 @@ func RenderToolContent(tool, resultType, renderer, summary string, data any) (st
 	if text, ok := renderKnownCollection(summary, asMap); ok {
 		return text, true
 	}
-	if tool == "session_manage" || tool == "remote_session_get" {
+	if tool == "session_manage" || tool == "session_read" || tool == "remote_session_get" {
 		if text, ok := renderSessionSummary(summary, asMap); ok {
 			return text, true
 		}
@@ -526,7 +526,7 @@ func isBlockField(key string) bool {
 
 func isGenericSummary(summary string) bool {
 	summary = strings.TrimSpace(summary)
-	if summary == "" || strings.EqualFold(summary, "ok") || strings.EqualFold(summary, "result") {
+	if summary == "" || strings.EqualFold(summary, "ok") || strings.EqualFold(summary, "succeeded") || strings.EqualFold(summary, "accepted") || strings.EqualFold(summary, "result") {
 		return true
 	}
 	var value any
@@ -684,7 +684,7 @@ func appendInstructions(builder *strings.Builder, value any) {
 
 func writeHumanSummary(builder *strings.Builder, summary string) {
 	summary = strings.TrimSpace(summary)
-	if summary == "" || strings.EqualFold(summary, "ok") || strings.EqualFold(summary, "result") {
+	if summary == "" || strings.EqualFold(summary, "ok") || strings.EqualFold(summary, "succeeded") || strings.EqualFold(summary, "accepted") || strings.EqualFold(summary, "result") {
 		return
 	}
 	builder.WriteString(summary)

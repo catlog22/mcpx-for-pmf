@@ -40,13 +40,13 @@ func actionColor(tool string, failed bool) string {
 		return ansiRed
 	}
 	switch strings.ToLower(strings.TrimSpace(tool)) {
-	case "command_execute":
+	case "command_execute", "command_run":
 		return ansiAmber
-	case "context_query":
+	case "context_query", "source_read":
 		return ansiCyan
 	case "file_read":
 		return ansiBlue
-	case "change_execute", "file.changed":
+	case "change_execute", "change_apply", "change_revert", "file.changed":
 		return ansiGreen
 	case "session_open", "workspace_list", "session.lifecycle":
 		return ansiMagenta

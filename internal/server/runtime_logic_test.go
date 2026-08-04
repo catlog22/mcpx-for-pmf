@@ -111,7 +111,7 @@ func TestTerminalExecRunsAfterSemanticConfirmation(t *testing.T) {
 		t.Fatal(err)
 	}
 	response := decodeToolResult(t, out)
-	if response["status"] != "need_confirmation" {
+	if response["status"] != "waiting_confirmation" {
 		t.Fatalf("command must require semantic confirmation: %+v", response)
 	}
 	data, _ := response["data"].(map[string]any)
@@ -122,7 +122,7 @@ func TestTerminalExecRunsAfterSemanticConfirmation(t *testing.T) {
 	confirmReq.Params.Arguments = map[string]any{
 		"intent":            "用户已确认执行该命令",
 		"remote_session_id": created.Session.ID, "command": "echo approved-run",
-		"purpose": "run the command test", "scope": "workspace", "user_confirmed": true,
+		"purpose": "run the command test", "scope": "workspace", "confirmation_token": data["confirmation_token"],
 	}
 	approved, err := rt.toolCommandExecute(context.Background(), confirmReq)
 	if err != nil {

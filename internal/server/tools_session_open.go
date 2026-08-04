@@ -157,7 +157,7 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req mcp.CallToolRequest) 
 		"client_refresh":        clientRefreshPayload(envReq.Payload, revisions),
 		"recommended_workflows": map[string]any{
 			"bootstrap":     []string{"session_open"},
-			"source_change": []string{"context_query", "file_read", "change_execute", "command_execute"},
+			"source_change": []string{"source_read", "change_prepare", "change_apply", "command_run"},
 		},
 		"opened_at": time.Now().UTC().Format(time.RFC3339),
 	}

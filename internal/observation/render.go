@@ -32,6 +32,7 @@ func renderText(w io.Writer, event Event, color, suppressCommandOutput bool) err
 type renderOptions struct {
 	colorMode     ColorMode
 	terminalWidth int
+	detail        bool
 }
 
 func renderTextWithOptions(w io.Writer, event Event, options renderOptions, suppressCommandOutput bool) error {
@@ -69,7 +70,7 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 	var payload map[string]any
 	_ = json.Unmarshal(event.Output, &payload)
 	verb, label := toolAction(event.Tool, event.Input)
-	if event.Tool == "file_read" && label == "files" {
+	if (event.Tool == "file_read" || (event.Tool == "source_read" && publicView(event.Input) == "file")) && label == "files" {
 		if result, ok := payload["result"].(map[string]any); ok {
 			if outputLabel := fileReadResultLabel(result); outputLabel != "" {
 				label = outputLabel
@@ -82,7 +83,10 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 		return err
 	}
 
-	details := make([]string, 0, 2)
+	details := make([]string, 0, 3)
+	if facts := eventFactLine(event, options.detail); facts != "" {
+		details = append(details, facts)
+	}
 	if failed {
 		if failureMessage == "" {
 			failureMessage = errorSummary(payload)
@@ -91,23 +95,23 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 			details = append(details, "failed: "+compactLine(message))
 		}
 	} else {
-		if event.ProgressSummary != "" {
+		if event.ProgressSummary != "" && len(details) < 3 {
 			details = append(details, compactLine(event.ProgressSummary))
 		}
-		if result, ok := payload["result"].(map[string]any); ok && len(details) < 2 {
+		if result, ok := payload["result"].(map[string]any); ok && len(details) < 3 {
 			if output := humanToolOutput(event.Tool, result); output != "" {
-				if suppressCommandOutput && event.Tool == "command_execute" {
+				if suppressCommandOutput && (event.Tool == "command_execute" || event.Tool == "command_run") {
 					output = commandCompletionSummary(output)
 				}
 				details = append(details, output)
 			}
 		}
 	}
-	if len(details) == 0 && status != "" && status != "ok" {
+	if len(details) == 0 && status != "" && status != "succeeded" {
 		details = append(details, strings.ReplaceAll(status, "_", " "))
 	}
-	if len(details) > 2 {
-		details = details[:2]
+	if len(details) > 3 {
+		details = details[:3]
 	}
 	return writeChildren(w, details, options.colorMode != ColorModeNone)
 }
@@ -305,13 +309,21 @@ func lifecycleVerb(summary string) string {
 func toolAction(tool string, raw []byte) (string, string) {
 	input := inputMap(raw)
 	action, _ := input["action"].(string)
+	if strings.TrimSpace(action) == "" {
+		for _, key := range []string{"view", "operation", "transition"} {
+			if value, ok := input[key].(string); ok {
+				action = value
+				break
+			}
+		}
+	}
 	action = strings.ToLower(strings.TrimSpace(action))
 	verb := actionVerb(tool, action)
 	label := ""
 
 	// Special case: skill/MCP calls via extension_manage (or skill_execute) should display
 	// the skill/MCP name in terminal observation instead of "extension_manage".
-	if (tool == "extension_manage" || tool == "skill_execute") && action == "call" {
+	if (tool == "extension_manage" || tool == "skill_execute" || tool == "skill_call" || tool == "mcp_call") && (action == "call" || tool == "skill_call" || tool == "mcp_call") {
 		if kind, ok := input["kind"].(string); ok {
 			kind = strings.ToLower(strings.TrimSpace(kind))
 			if kind == "skill" {
@@ -327,7 +339,7 @@ func toolAction(tool string, raw []byte) (string, string) {
 	}
 
 	switch tool {
-	case "command_execute":
+	case "command_execute", "command_run":
 		label, _ = input["command"].(string)
 		if strings.TrimSpace(label) == "" {
 			label, _ = input["task"].(string)
@@ -337,10 +349,19 @@ func toolAction(tool string, raw []byte) (string, string) {
 		label = fileReadLabel(input)
 	case "context_query":
 		label = contextQueryCommand(input)
-	case "change_execute":
+	case "source_read":
+		if input["view"] == "file" {
+			label = fileReadLabel(input)
+		} else {
+			label = contextQueryCommand(map[string]any{"action": input["view"], "query": input["query"], "paths": input["paths"], "include_glob": input["include_glob"], "exclude_glob": input["exclude_glob"]})
+		}
+	case "change_execute", "change_apply", "change_revert":
 		label = changeLabel(input)
 	case "progress_report":
 		label, _ = input["summary"].(string)
+		if strings.TrimSpace(label) == "" {
+			label, _ = input["current"].(string)
+		}
 	case "workspace_list":
 		label = "workspaces"
 	case "session_open":
@@ -348,12 +369,26 @@ func toolAction(tool string, raw []byte) (string, string) {
 		if strings.TrimSpace(label) == "" {
 			label, _ = input["remote_session_id"].(string)
 		}
+		if strings.TrimSpace(label) == "" {
+			label, _ = input["session_id"].(string)
+		}
 	case "runtime_inspect":
 		label = runtimeInspectLabel(action)
+	case "runtime_read":
+		label = runtimeInspectLabel(stringValue(input["view"]))
 	case "workspace_state":
 		label = workspaceStateLabel(action)
+	case "workspace_observe":
+		label = workspaceStateLabel(stringValue(input["view"]))
 	case "screenshot_capture":
 		label = "screenshot"
+	case "skill_call":
+		label = stringValue(input["name"])
+	case "mcp_call":
+		label = stringValue(input["server"])
+		if toolName := stringValue(input["tool"]); toolName != "" {
+			label += "/" + toolName
+		}
 	default:
 		for _, key := range []string{"workspace", "path", "changeset_id", "task_id", "artifact_id", "remote_session_id"} {
 			if value, ok := input[key].(string); ok && strings.TrimSpace(value) != "" {
@@ -371,9 +406,62 @@ func toolAction(tool string, raw []byte) (string, string) {
 	return verb, label
 }
 
+func publicView(raw []byte) string {
+	input := inputMap(raw)
+	view, _ := input["view"].(string)
+	return strings.ToLower(strings.TrimSpace(view))
+}
+
+func eventFactLine(event Event, detail bool) string {
+	parts := make([]string, 0, 9)
+	if event.Tool != "" {
+		parts = append(parts, "tool="+event.Tool)
+	}
+	if event.Command != "" {
+		parts = append(parts, "command="+compactCommand(event.Command))
+	}
+	if event.WorkingDirectory != "" {
+		parts = append(parts, "cwd="+compactLine(event.WorkingDirectory))
+	}
+	if event.ExitCode != nil {
+		parts = append(parts, fmt.Sprintf("exit=%d", *event.ExitCode))
+	}
+	if event.DurationMs > 0 {
+		parts = append(parts, fmt.Sprintf("duration=%dms", event.DurationMs))
+	}
+	if event.SkillName != "" {
+		parts = append(parts, "skill="+event.SkillName)
+	}
+	if event.MCPServer != "" {
+		mcp := "mcp=" + event.MCPServer
+		if event.MCPTool != "" {
+			mcp += "/" + event.MCPTool
+		}
+		parts = append(parts, mcp)
+	}
+	if event.Path != "" {
+		parts = append(parts, "path="+event.Path)
+	}
+	if detail && event.Purpose != "" {
+		parts = append(parts, "purpose="+compactLine(event.Purpose))
+	}
+	if detail && event.OperationID != "" {
+		parts = append(parts, "operation="+event.OperationID)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " · ")
+}
+
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return strings.TrimSpace(text)
+}
+
 func actionVerb(tool, action string) string {
 	switch tool {
-	case "command_execute":
+	case "command_execute", "command_run":
 		return "Ran"
 	case "context_query":
 		return "Searched"
@@ -381,12 +469,18 @@ func actionVerb(tool, action string) string {
 		return "Read"
 	case "change_execute":
 		return "Edited"
+	case "change_prepare":
+		return "Prepared"
+	case "change_apply", "change_revert", "artifact_register":
+		return "Edited"
 	case "session_open":
 		return "Opened"
 	case "workspace_list":
 		return "Listed"
 	case "progress_report":
 		return "Reported"
+	case "session_transition":
+		return "Updated"
 	case "screenshot_capture":
 		return "Captured"
 	case "runtime_inspect":
@@ -396,6 +490,18 @@ func actionVerb(tool, action string) string {
 			return "Created"
 		}
 		return "Read"
+	case "workspace_observe", "workspace_history_read", "session_read", "source_read", "change_read", "task_read", "plan_read", "runtime_read", "environment_read", "artifact_read", "extension_discover":
+		return "Read"
+	case "task_control":
+		return "Controlled"
+	case "plan_create", "environment_snapshot_create":
+		return "Created"
+	case "plan_transition":
+		return "Updated"
+	case "skill_call", "mcp_call":
+		return "Called"
+	case "secret_provide":
+		return "Provided"
 	}
 	switch action {
 	case "create", "created", "register", "prepare":
@@ -733,7 +839,7 @@ func commandCompletionSummary(output string) string {
 }
 
 func humanToolOutput(tool string, result map[string]any) string {
-	if tool == "context_query" {
+	if tool == "context_query" || tool == "source_read" {
 		if summary := contextQueryOutputSummary(result); summary != "" {
 			return summary
 		}
@@ -767,9 +873,9 @@ func humanToolOutput(tool string, result map[string]any) string {
 
 func structuredToolOutputSummary(tool string, data map[string]any) string {
 	switch tool {
-	case "extension_manage":
+	case "extension_manage", "extension_discover":
 		return extensionManageOutputSummary(data)
-	case "runtime_inspect":
+	case "runtime_inspect", "runtime_read":
 		return runtimeInspectOutputSummary(data)
 	}
 	return ""
@@ -829,13 +935,13 @@ func remoteDataSummary(tool string, data map[string]any) string {
 			name, _ = remote["workspace_name"].(string)
 		}
 		return fmt.Sprintf("Session %s opened for workspace %s.", id, name)
-	case "plan_manage":
+	case "plan_manage", "plan_create", "plan_read", "plan_transition":
 		return planManageOutputSummary(data)
-	case "environment_inspect":
+	case "environment_inspect", "environment_read", "environment_snapshot_create":
 		return environmentInspectOutputSummary(data)
-	case "runtime_inspect":
+	case "runtime_inspect", "runtime_read":
 		return runtimeInspectOutputSummary(data)
-	case "workspace_state":
+	case "workspace_state", "workspace_observe":
 		return workspaceStateOutputSummary(data)
 	case "screenshot_capture":
 		return screenshotCaptureOutputSummary(data)

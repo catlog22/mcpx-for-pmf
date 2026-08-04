@@ -22,6 +22,7 @@ const (
 )
 
 type runtimeContextKey struct{}
+type toolInvocationNameKey struct{}
 
 // RuntimeContext is gateway-owned lifecycle metadata. It is never decoded
 // from tool arguments and is not part of an MCP input schema.
@@ -136,4 +137,13 @@ func runtimeContextWithTiming(value RuntimeContext, timing interactionTiming) Ru
 	value.ProcessingMs = timing.ProcessingMs
 	value.ServerElapsed = timing.ServerElapsedMs
 	return value
+}
+
+func withToolInvocationName(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, toolInvocationNameKey{}, name)
+}
+
+func toolInvocationName(ctx context.Context) string {
+	value, _ := ctx.Value(toolInvocationNameKey{}).(string)
+	return strings.TrimSpace(value)
 }
