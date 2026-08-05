@@ -31,6 +31,7 @@ type ReadResult struct {
 	Offset     int    `json:"offset"`
 	Limit      int    `json:"limit"`
 	Truncated  bool   `json:"truncated"`
+	LineEnding string `json:"line_ending,omitempty"`
 	SHA256     string `json:"-"`
 }
 
@@ -46,11 +47,12 @@ type FullReadOptions struct {
 // Content is intentionally excluded from JSON serialization so callers choose
 // the appropriate MCP content type instead of duplicating large payloads.
 type FullReadResult struct {
-	Path     string `json:"path"`
-	Content  []byte `json:"-"`
-	Size     int64  `json:"size_bytes"`
-	MIMEType string `json:"mime_type"`
-	SHA256   string `json:"sha256"`
+	Path       string `json:"path"`
+	Content    []byte `json:"-"`
+	Size       int64  `json:"size_bytes"`
+	MIMEType   string `json:"mime_type"`
+	LineEnding string `json:"line_ending,omitempty"`
+	SHA256     string `json:"sha256"`
 }
 
 // Read loads a bounded text window while hashing the same stream. It keeps
@@ -103,11 +105,13 @@ func Read(opts ReadOptions) (ReadResult, error) {
 	hasher := sha256.New()
 	reader := bufio.NewReaderSize(f, 64*1024)
 	selected := make([]string, 0, opts.Limit)
+	crlfCount, lfCount, crCount := 0, 0, 0
 	lineNumber := 0
 	for {
 		raw, readErr := reader.ReadBytes('\n')
 		if len(raw) > 0 {
 			_, _ = hasher.Write(raw)
+			observeLineEndings(raw, &crlfCount, &lfCount, &crCount)
 			line := raw
 			if line[len(line)-1] == '\n' {
 				line = line[:len(line)-1]
@@ -149,6 +153,7 @@ func Read(opts ReadOptions) (ReadResult, error) {
 		Offset:     start,
 		Limit:      opts.Limit,
 		Truncated:  truncated,
+		LineEnding: lineEndingName(crlfCount, lfCount, crCount),
 		SHA256:     "sha256:" + hex.EncodeToString(digest),
 	}, nil
 }
@@ -193,8 +198,57 @@ func ReadFull(opts FullReadOptions) (FullReadResult, error) {
 	digest := sha256.Sum256(content)
 	return FullReadResult{
 		Path: opts.Path, Content: content, Size: int64(len(content)),
-		MIMEType: detectMIME(opts.Path, content), SHA256: "sha256:" + hex.EncodeToString(digest[:]),
+		MIMEType: detectMIME(opts.Path, content), LineEnding: detectLineEnding(content),
+		SHA256: "sha256:" + hex.EncodeToString(digest[:]),
 	}, nil
+}
+
+func detectLineEnding(content []byte) string {
+	crlfCount, lfCount, crCount := 0, 0, 0
+	observeLineEndings(content, &crlfCount, &lfCount, &crCount)
+	return lineEndingName(crlfCount, lfCount, crCount)
+}
+
+func observeLineEndings(content []byte, crlfCount, lfCount, crCount *int) {
+	for index := 0; index < len(content); index++ {
+		switch content[index] {
+		case '\r':
+			if index+1 < len(content) && content[index+1] == '\n' {
+				*crlfCount++
+				index++
+			} else {
+				*crCount++
+			}
+		case '\n':
+			*lfCount++
+		}
+	}
+}
+
+func lineEndingName(crlfCount, lfCount, crCount int) string {
+	kinds := 0
+	if crlfCount > 0 {
+		kinds++
+	}
+	if lfCount > 0 {
+		kinds++
+	}
+	if crCount > 0 {
+		kinds++
+	}
+	if kinds == 0 {
+		return "none"
+	}
+	if kinds > 1 {
+		return "mixed"
+	}
+	if crlfCount > 0 {
+		return "CRLF"
+	}
+	if lfCount > 0 {
+		return "LF"
+	}
+	return "CR"
 }
 
 func detectMIME(path string, content []byte) string {

@@ -19,7 +19,25 @@ func (r *Runtime) addTool(s *mcpserver.MCPServer, tool mcp.Tool, handler mcpserv
 	tool = requireIntentSchema(tool)
 	tool.OutputSchema = mcp.ToolOutputSchema{}
 	tool.RawOutputSchema = arc.OutputSchema()
-	s.AddTool(tool, r.instrumentTool(tool.Name, handler))
+	instrumented := r.instrumentTool(tool.Name, handler)
+	if r.toolHandlers == nil {
+		r.toolHandlers = map[string]mcpserver.ToolHandlerFunc{}
+	}
+	if r.toolMeta == nil {
+		r.toolMeta = map[string]toolAnnotation{}
+	}
+	r.toolHandlers[tool.Name] = instrumented
+	r.toolMeta[tool.Name] = toolAnnotation{
+		ReadOnly:    boolPointerValue(tool.Annotations.ReadOnlyHint),
+		Destructive: boolPointerValue(tool.Annotations.DestructiveHint),
+		Idempotent:  boolPointerValue(tool.Annotations.IdempotentHint),
+		OpenWorld:   boolPointerValue(tool.Annotations.OpenWorldHint),
+	}
+	s.AddTool(tool, instrumented)
+}
+
+func boolPointerValue(value *bool) bool {
+	return value != nil && *value
 }
 
 func requireIntentSchema(tool mcp.Tool) mcp.Tool {
@@ -101,7 +119,13 @@ func (r *Runtime) instrumentTool(name string, handler mcpserver.ToolHandlerFunc)
 			_ = r.observation.RecordToolStarted(callCtx, name, observationRequest, req.GetArguments())
 		}
 
-		result, err := handler(callCtx, req)
+		var result *mcp.CallToolResult
+		var err error
+		if !isOperationChild(callCtx) && r.operations != nil && asyncEligibleTool(name) && executionMode(req) == "async" && observationParseErr == nil {
+			result, err = r.submitAsyncTool(callCtx, name, req, observationRequest)
+		} else {
+			result, err = handler(callCtx, req)
+		}
 		completed := time.Now()
 		timing := makeInteractionTiming(runtime.StartedAtMs, received, completed)
 		runtime = runtimeContextWithTiming(runtime, timing)

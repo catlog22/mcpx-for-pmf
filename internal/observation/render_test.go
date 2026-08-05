@@ -16,7 +16,7 @@ func TestActionColorUsesToolAndErrorOverride(t *testing.T) {
 }
 
 func TestInteractionLineBudget(t *testing.T) {
-	if maxInteractionBodyLines != 20 {
+	if maxInteractionBodyLines != 50 {
 		t.Fatalf("body line budget=%d", maxInteractionBodyLines)
 	}
 }
@@ -419,7 +419,7 @@ func TestRenderTextShowsMarkdownFileDiff(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"• Edited auth.go", "↳ auth.go (update) +1 -1", "-old", "+new"} {
+	for _, want := range []string{"• Edited auth.go", "↳ auth.go (update) +1 -1", " 1 | --- a/auth.go", " 2 | +++ b/auth.go", " 3 | @@", " 4 | -old", " 5 | +new"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("file diff rendering missing %q: %q", want, text)
 		}
@@ -438,11 +438,8 @@ func TestRenderTextTruncatesLargeFileDiff(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	if !strings.Contains(text, "• Edited large.go") || !strings.Contains(text, "...") {
-		t.Fatalf("large diff was not summarized: %s", text)
-	}
-	if strings.Contains(text, "-line-5") || strings.Contains(text, "+line-5") {
-		t.Fatalf("large diff leaked beyond preview: %s", text)
+	if !strings.Contains(text, "• Edited large.go") || !strings.Contains(text, " 13 | +line-5") {
+		t.Fatalf("large diff rendering: %s", text)
 	}
 }
 

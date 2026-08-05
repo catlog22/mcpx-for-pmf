@@ -25,6 +25,8 @@ var toolCapabilityDefinitions = []toolCapabilityDefinition{
 	{Name: "workspace_list", Domain: "workspace"},
 	{Name: "workspace_observe", Domain: "workspace", RequiresRemoteSession: true},
 	{Name: "workspace_history_read", Domain: "workspace"},
+	{Name: "operation_batch", Domain: "operation", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+	{Name: "operation_manage", Domain: "operation", RequiresRemoteSession: true},
 	{Name: "session_open", Domain: "session"},
 	{Name: "session_read", Domain: "session"},
 	{Name: "session_transition", Domain: "session", Roles: []string{"owner", "editor"}},

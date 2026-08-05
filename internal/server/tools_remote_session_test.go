@@ -15,6 +15,7 @@ import (
 
 	"mcpx/internal/auth"
 	"mcpx/internal/config"
+	"mcpx/internal/remotesession"
 	"mcpx/internal/screenshot"
 )
 
@@ -394,5 +395,85 @@ func TestWorkspaceRevisionSingleRootUnchanged(t *testing.T) {
 	}
 	if strings.Contains(head, ":") {
 		t.Fatalf("single root head must stay bare: %q", head)
+	}
+}
+
+func TestSessionEventsIncludePendingConfirmations(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	rt.cfg.Security.Commands.Confirm = append(rt.cfg.Security.Commands.Confirm, `^echo\b`)
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := mcp.CallToolRequest{}
+	command.Params.Arguments = map[string]any{
+		"intent":            "request pending command confirmation",
+		"remote_session_id": created.Session.ID,
+		"command":           "echo pending", "purpose": "inspect pending", "scope": "workspace",
+	}
+	commandResult, err := rt.toolCommandExecute(context.Background(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commandResponse := decodeToolResult(t, commandResult)
+	commandData, _ := commandResponse["data"].(map[string]any)
+	token, _ := commandData["confirmation_token"].(string)
+	if commandResponse["status"] != "waiting_confirmation" || token == "" {
+		t.Fatalf("command confirmation = %+v", commandResponse)
+	}
+
+	events := mcp.CallToolRequest{}
+	events.Params.Arguments = map[string]any{
+		"intent":            "recover pending confirmation from event log",
+		"remote_session_id": created.Session.ID, "view": "events", "limit": 5,
+	}
+	eventsResult, err := rt.toolSessionRead(context.Background(), events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventsResponse := decodeToolResult(t, eventsResult)
+	eventsData, _ := eventsResponse["data"].(map[string]any)
+	items, ok := eventsData["pending_confirmations"].([]any)
+	if !ok || len(items) == 0 {
+		t.Fatalf("session events must expose pending confirmations: %+v", eventsData)
+	}
+	item := items[0].(map[string]any)
+	if item["confirmation_token"] != token || item["command"] != "echo pending" {
+		t.Fatalf("pending confirmation item=%+v want token=%s", item, token)
+	}
+}
+
+func TestRemoteSessionNotFoundExplainsExactCopy(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	request := mcp.CallToolRequest{}
+	request.Params.Arguments = map[string]any{
+		"intent":            "read a missing remote session",
+		"remote_session_id": "rs-does-not-exist",
+		"view":              "summary",
+	}
+	result, err := rt.toolSessionRead(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := decodeToolResult(t, result)
+	errorBody, _ := response["error"].(map[string]any)
+	if errorBody["code"] != "NOT_FOUND" {
+		t.Fatalf("missing session error = %+v", response)
+	}
+	message, _ := errorBody["message"].(string)
+	for _, phrase := range []string{"原样复制", "session_open"} {
+		if !strings.Contains(message, phrase) {
+			t.Fatalf("missing session error must explain %q: %s", phrase, message)
+		}
 	}
 }

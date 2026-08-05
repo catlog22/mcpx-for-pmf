@@ -13,7 +13,7 @@ func TestTextRendererGroupsInteractionIntoBoundedBlock(t *testing.T) {
 	events := []Event{
 		{Sequence: 42, RemoteSessionID: "4f8c2e90-6b2a-4b20-9d8c-1a1f8a12e7c4", RequestID: "req_42", Tool: "command_execute", Type: TypeToolStarted, Input: []byte(`{"command":"go test ./internal/auth"}`)},
 	}
-	for sequence := int64(43); sequence <= 52; sequence++ {
+	for sequence := int64(43); sequence <= 100; sequence++ {
 		events = append(events, Event{
 			Sequence: sequence, RequestID: "req_42", Tool: "command_execute", Type: TypeCommandOutput,
 			Stream: "stdout", Output: []byte(fmt.Sprintf(`{"text":"line-%d-a\nline-%d-b","bytes":17}`, sequence, sequence)),
@@ -115,7 +115,7 @@ func TestFormatRemoteSessionIDUsesCanonicalUUID(t *testing.T) {
 	}
 }
 
-func TestTextRendererAllowsTwentyBodyLinesBeforeEllipsis(t *testing.T) {
+func TestTextRendererAllowsFiftyBodyLinesBeforeEllipsis(t *testing.T) {
 	renderer := NewTextRenderer(false)
 	var output bytes.Buffer
 	block := &interactionBlock{key: "test", sequence: 1, tool: "file_read"}

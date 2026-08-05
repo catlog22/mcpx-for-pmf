@@ -28,6 +28,7 @@ import (
 	"mcpx/internal/logging"
 	"mcpx/internal/oauth"
 	"mcpx/internal/observation"
+	"mcpx/internal/operation"
 	"mcpx/internal/plan"
 	"mcpx/internal/remotesession"
 	"mcpx/internal/screenshot"
@@ -73,13 +74,16 @@ type Runtime struct {
 	retentionDone   chan struct{}
 	screenshot      screenCapturer
 	observation     *observationBridge
+	operations      *operation.Service
 	observerSocket  *observation.SocketServer
 	closeOnce       sync.Once
 	closeErr        error
 
 	// For schema revision and capability catalog.
-	toolIndex   map[string]mcp.Tool
-	toolIndexMu sync.RWMutex
+	toolIndex    map[string]mcp.Tool
+	toolIndexMu  sync.RWMutex
+	toolHandlers map[string]mcpserver.ToolHandlerFunc
+	toolMeta     map[string]toolAnnotation
 	// changeExecuteRequests is only a short-lived lookup accelerator. The
 	// durable Changeset/idempotency record remains the source of truth.
 	changeExecuteRequests map[string]changeExecuteRequest
@@ -225,6 +229,8 @@ func New(opts Options) (*Runtime, error) {
 		retention:             retentionService,
 		screenshot:            screenshot.NewService(),
 		toolIndex:             map[string]mcp.Tool{},
+		toolHandlers:          map[string]mcpserver.ToolHandlerFunc{},
+		toolMeta:              map[string]toolAnnotation{},
 		changeExecuteRequests: map[string]changeExecuteRequest{},
 		projectConfigs:        map[string]projectConfigCacheEntry{},
 		build: BuildInfo{
@@ -238,6 +244,12 @@ func New(opts Options) (*Runtime, error) {
 		broker:  observation.NewBroker(),
 		resolve: runtime.observationTarget,
 	}
+	operations, err := operation.New(stateStore.DB(), operation.DefaultWorkers, runtime.observeOperationEvent)
+	if err != nil {
+		_ = stateStore.Close()
+		return nil, fmt.Errorf("initialize operations: %w", err)
+	}
+	runtime.operations = operations
 	taskManager.SetOutputSink(runtime.observeTaskOutput)
 	runtime.observerSocket = observation.NewSocketServer(
 		observation.SocketPath(home), runtime.observation.store, runtime.observation.broker,
@@ -451,6 +463,11 @@ func (r *Runtime) Close() error {
 				r.closeErr = err
 			}
 		}
+		if r.operations != nil {
+			if err := r.operations.Close(); err != nil && r.closeErr == nil {
+				r.closeErr = err
+			}
+		}
 		if r.observation != nil && r.observation.broker != nil {
 			r.observation.broker.Close()
 		}
@@ -530,6 +547,7 @@ func (r *Runtime) runRetention(ctx context.Context) {
 		"file_snapshots", report.DeletedFileSnapshots,
 		"environment_snapshots", report.DeletedEnvironmentSnaps,
 		"ephemeral_records", report.DeletedEphemeralRecords,
+		"operations", report.DeletedOperations,
 		"vacuumed", report.Vacuumed,
 	)
 }
@@ -719,7 +737,12 @@ func (r *Runtime) parseEnv(ctx context.Context, req mcp.CallToolRequest) (envelo
 	}
 	if runtime, ok := runtimeContextFrom(ctx); ok {
 		parsed.RequestID = runtime.RequestID
-		parsed.OperationID = "op_" + strings.TrimPrefix(runtime.RequestID, "req_")
+		parsed.OperationID = runtime.OperationID
+		if parsed.OperationID == "" {
+			parsed.OperationID = "op_" + strings.TrimPrefix(runtime.RequestID, "req_")
+		}
+		parsed.ParentOperationID = runtime.ParentOperationID
+		parsed.StepID = runtime.StepID
 		parsed.StartedAtMs = runtime.StartedAtMs
 	}
 	return parsed, nil

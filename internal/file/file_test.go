@@ -63,6 +63,29 @@ func TestReadAndPatch(t *testing.T) {
 	}
 }
 
+func TestReadReportsLineEnding(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "crlf.java"), []byte("class Demo {\r\n}\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	read, err := Read(ReadOptions{WorkspaceRoot: root, Path: "crlf.java", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.LineEnding != "CRLF" {
+		t.Fatalf("line ending = %q, want CRLF", read.LineEnding)
+	}
+
+	full, err := ReadFull(FullReadOptions{WorkspaceRoot: root, Path: "crlf.java", MaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full.LineEnding != "CRLF" {
+		t.Fatalf("full line ending = %q, want CRLF", full.LineEnding)
+	}
+}
+
 func TestReadFullReturnsWholeTextAndMIME(t *testing.T) {
 	root := t.TempDir()
 	content := []byte("<!doctype html>\n<html><body>preview</body></html>\n")

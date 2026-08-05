@@ -130,8 +130,15 @@ func renderCommandOutput(w io.Writer, event Event, options renderOptions) error 
 	if err := writeAction(w, "Read", stream, actionColor(event.Tool, false), options.colorMode != ColorModeNone); err != nil {
 		return err
 	}
-	lines := summaryLines(text, 2)
-	return writeChildren(w, lines, options.colorMode != ColorModeNone)
+	// Full output with line numbers (no truncation, consistent with recent diff improvement)
+	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	for i, line := range lines {
+		prefixed := fmt.Sprintf("%3d | %s", i+1, line)
+		if err := writeCodeChild(w, prefixed, options, options.terminalWidth-8); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
@@ -192,17 +199,8 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 			return err
 		}
 		if file.Diff != "" {
-			preview, truncated := diffPreview(file.Diff, maxFileDiffLines)
-			for _, line := range preview {
-				codeWidth := options.terminalWidth - 2 - 4
-				if err := writeCodeChild(w, line, options, codeWidth); err != nil {
-					return err
-				}
-			}
-			if truncated || file.DiffTruncated {
-				if err := writeChild(w, "...", options.colorMode != ColorModeNone); err != nil {
-					return err
-				}
+			if err := renderFullDiffWithContext(w, file.Diff, options); err != nil {
+				return err
 			}
 		}
 	}
@@ -216,8 +214,8 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 
 const (
 	maxToolSummaryRunes = 240
-	maxFileDiffLines    = 8
-	maxChangedFiles     = 6
+	maxFileDiffLines    = 1000  // removed limit for full diff display
+	maxChangedFiles     = 50    // reasonable default for many files
 )
 
 func writeAction(w io.Writer, verb, label, colorCode string, color bool) error {
@@ -447,6 +445,12 @@ func eventFactLine(event Event, detail bool) string {
 	}
 	if detail && event.OperationID != "" {
 		parts = append(parts, "operation="+event.OperationID)
+	}
+	if detail && event.ParentOperationID != "" {
+		parts = append(parts, "parent_operation="+event.ParentOperationID)
+	}
+	if detail && event.StepID != "" {
+		parts = append(parts, "step="+event.StepID)
 	}
 	if len(parts) == 0 {
 		return ""
@@ -788,12 +792,21 @@ func diffStats(diff string) string {
 	return fmt.Sprintf("+%d -%d", added, removed)
 }
 
-func diffPreview(diff string, maxLines int) ([]string, bool) {
+func renderFullDiffWithContext(w io.Writer, diff string, options renderOptions) error {
 	lines := strings.Split(strings.TrimSuffix(diff, "\n"), "\n")
-	if maxLines <= 0 || len(lines) <= maxLines {
-		return lines, false
+	if len(lines) == 0 {
+		return nil
 	}
-	return lines[:maxLines], true
+
+	// Render full diff with line numbers prefixed to every line (no truncation, full context shown).
+	// Headers and hunk markers are included as is.
+	for i, line := range lines {
+		prefixed := fmt.Sprintf("%3d | %s", i+1, line)
+		if err := writeCodeChild(w, prefixed, options, options.terminalWidth-8); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func compactLine(value string) string {
@@ -1262,14 +1275,22 @@ func contextQueryOutputSummary(result map[string]any) string {
 		summary = fmt.Sprintf("Found %d result(s)", len(paths))
 	}
 	summary = strings.TrimSuffix(strings.TrimSpace(summary), ".")
-	return compactLine(summary + ": " + compactPathList(paths))
+	summary = compactLine(summary)
+	if len(paths) > 20 {
+		summary += " (first 20 shown)"
+	}
+	return summary + ": " + compactPathList(paths)
 }
 
 func compactPathList(paths []string) string {
-	if len(paths) <= 4 {
+	if len(paths) == 0 {
+		return ""
+	}
+	maxShown := 20  // reasonable limit for terminal + folding
+	if len(paths) <= maxShown {
 		return strings.Join(paths, ", ")
 	}
-	return strings.Join(paths[:4], ", ") + fmt.Sprintf(", ... +%d more", len(paths)-4)
+	return strings.Join(paths[:maxShown], ", ") + fmt.Sprintf(", ... +%d more", len(paths)-maxShown)
 }
 
 func toolOutputSummary(text string) string {

@@ -29,7 +29,7 @@ const (
 )
 
 const (
-	maxInteractionBodyLines = 20
+	maxInteractionBodyLines = 50
 	defaultTerminalWidth    = 120
 )
 

@@ -121,6 +121,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	}
 	expectedTools := []string{
 		"workspace_list", "workspace_observe", "workspace_history_read", "session_open", "session_read", "session_transition",
+		"operation_batch", "operation_manage",
 		"source_read", "change_prepare", "change_read", "change_apply", "change_revert", "command_run", "task_read", "task_control",
 		"progress_report", "plan_create", "plan_read", "plan_transition", "runtime_read", "environment_read", "environment_snapshot_create",
 		"extension_discover", "skill_call", "mcp_call", "artifact_read", "artifact_register", "screenshot_capture", "secret_provide",
@@ -480,12 +481,20 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		t.Fatalf("plan create = %+v", planCreated)
 	}
 	planID, _ := planData["plan_id"].(string)
-	started := call("plan_manage", map[string]any{"action": "start_task", "remote_session_id": remoteID, "plan_id": planID, "task_id": "verify"})
-	if started["status"] != "ok" || started["data"].(map[string]any)["task_id"] != "verify" {
+	planTasks, _ := planData["tasks"].([]any)
+	taskID := ""
+	if len(planTasks) > 0 {
+		taskID, _ = planTasks[0].(map[string]any)["task_id"].(string)
+	}
+	if !strings.HasPrefix(taskID, "pt_") {
+		t.Fatalf("plan_create must issue server task id: %+v", planData)
+	}
+	started := call("plan_manage", map[string]any{"action": "start_task", "remote_session_id": remoteID, "plan_id": planID, "task_id": taskID})
+	if started["status"] != "ok" || started["data"].(map[string]any)["task_id"] != taskID {
 		t.Fatalf("plan start = %+v", started)
 	}
 	completed := call("plan_manage", map[string]any{
-		"action": "complete_task", "remote_session_id": remoteID, "plan_id": planID, "task_id": "verify",
+		"action": "complete_task", "remote_session_id": remoteID, "plan_id": planID, "task_id": taskID,
 		"evidence": []any{map[string]any{"kind": "source", "reference_id": "demo.go"}},
 	})
 	if completed["status"] != "ok" || completed["data"].(map[string]any)["status"] != "completed" {

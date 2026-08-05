@@ -21,13 +21,14 @@ func TestSourceReadDisplayIncludesMarkdownSourceBlock(t *testing.T) {
 		"path":        "src/Supplier.vue",
 		"content":     "<template>\n  <div />\n</template>\n",
 		"sha256":      "sha256:test-revision",
+		"line_ending": "CRLF",
 		"offset":      4,
 		"limit":       3,
 		"total_lines": 10,
 	}
 
 	display := sourceReadDisplay(data, "Read src/Supplier.vue (10 lines).")
-	for _, want := range []string{"Read src/Supplier.vue", "Revision: `sha256:test-revision`", "### `src/Supplier.vue` (lines 5-7 of 10)", "```vue", "<template>"} {
+	for _, want := range []string{"Read src/Supplier.vue", "Revision: `sha256:test-revision`", "换行：`CRLF`", "### `src/Supplier.vue` (lines 5-7 of 10)", "```vue", "<template>"} {
 		if !strings.Contains(display, want) {
 			t.Fatalf("source display missing %q: %s", want, display)
 		}

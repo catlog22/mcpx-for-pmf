@@ -105,7 +105,11 @@ func (r *Runtime) remoteError(envReq envelope.Request, remoteSessionID, workspac
 	case errors.Is(err, errRemoteSessionRequired):
 		code = "remote_session_required"
 	}
-	resp := envelope.Fail(status, envReq.RequestID, workspace, nil, code, err.Error())
+	message := err.Error()
+	if code == "not_found" {
+		message = "remote session not found：session_id 必须原样复制 session_open 返回的完整值，不能改写、缩写或凭记忆重输。"
+	}
+	resp := envelope.Fail(status, envReq.RequestID, workspace, nil, code, message)
 	resp.RemoteSessionID = remoteSessionID
 	switch code {
 	case "workspace_not_found":
@@ -229,7 +233,15 @@ func (r *Runtime) toolRemoteSessionEvents(ctx context.Context, req mcp.CallToolR
 	if err != nil {
 		return r.remoteError(envReq, remoteSessionID, "", err)
 	}
-	return r.remoteResult(envReq, remoteSessionID, "", map[string]any{"events": events})
+	data := map[string]any{"events": events}
+	// Models recovering a confirmed command from the event log also need the
+	// pending confirmation token; otherwise a lost retry token is unrecoverable.
+	if session, getErr := r.remote.Get(ctx, principal, remoteSessionID); getErr == nil && (session.Role == "owner" || session.Role == "approver") {
+		if pending := r.approvals.ListRemoteSession(session.ID); len(pending) > 0 {
+			data["pending_confirmations"] = pendingConfirmationItems(pending)
+		}
+	}
+	return r.remoteResult(envReq, remoteSessionID, "", data)
 }
 
 func (r *Runtime) toolRemoteSessionUpdate(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

@@ -2,6 +2,7 @@ package observation
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -42,5 +43,33 @@ func TestQuerySupportsSemanticFiltersAndNewestCursor(t *testing.T) {
 	}
 	if len(before) != 1 || before[0].Sequence != first.Sequence {
 		t.Fatalf("created_before filter returned %+v", before)
+	}
+}
+
+func TestQueryMatchesChangesetDomainKindsFromObserverNotice(t *testing.T) {
+	db := openObservationTestDB(t)
+	store := NewStore(db.DB())
+	created := time.Date(2026, 8, 4, 11, 0, 0, 0, time.UTC)
+	if _, err := store.Append(context.Background(), Event{
+		Workspace: "mcpx", Type: TypeObserverNotice, Status: "succeeded",
+		OperationID: "chg_notice", Summary: "changeset.prepared: draft",
+		Output: json.RawMessage(`{"source_type":"changeset.prepared"}`), CreatedAt: created,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(context.Background(), Event{
+		Workspace: "mcpx", Type: "changeset.prepared", Status: "succeeded",
+		OperationID: "chg_domain", Summary: "changeset prepared", CreatedAt: created.Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	events, _, err := store.Query(context.Background(), HistoryQuery{
+		Workspace: "mcpx", Kinds: []string{"changeset.prepared"}, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("changeset kind query returned %d events: %+v", len(events), events)
 	}
 }

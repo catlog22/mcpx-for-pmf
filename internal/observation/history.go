@@ -86,7 +86,7 @@ func (s *Store) Query(ctx context.Context, query HistoryQuery) ([]Event, string,
 
 	statement := `SELECT sequence, workspace_name,
         remote_session_id, request_id, operation_id, tool_name, event_type,
-        intent, progress_summary, input_json, output_json, summary, status, purpose, parent_operation_id,
+		intent, progress_summary, input_json, output_json, summary, status, purpose, parent_operation_id, step_id,
         command, working_directory, exit_code, duration_ms, skill_name, mcp_server, mcp_tool, path,
         resource_uri, stream, stream_offset, truncated, created_at
         FROM observation_events WHERE ` + strings.Join(where, " AND ") + `
@@ -145,6 +145,9 @@ func appendKindFilter(where *[]string, args *[]any, values []string) {
 			clauses = append(clauses, "status = 'waiting_confirmation' OR output_json LIKE '%CONFIRMATION%'")
 		case "error":
 			clauses = append(clauses, "status = 'failed'")
+		case "changeset.prepared", "changeset.applied", "changeset.reverted":
+			clauses = append(clauses, "(event_type = ? OR (event_type = 'observer.notice' AND (output_json LIKE ? OR summary LIKE ?)))")
+			*args = append(*args, value, `%"source_type":"`+value+`"%`, "%"+value+"%")
 		default:
 			clauses = append(clauses, "event_type = ?")
 			*args = append(*args, value)

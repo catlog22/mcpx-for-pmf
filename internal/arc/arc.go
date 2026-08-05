@@ -570,7 +570,7 @@ func resultDataSchema(name string) map[string]any {
 	case SchemaCodeChange:
 		return object(map[string]any{
 			"changeset_id": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"},
-			"summary": map[string]any{"type": "string"}, "digest": map[string]any{"type": "string"},
+			"summary": map[string]any{"type": "string"}, "digest": map[string]any{"type": "string"}, "expected_digest": map[string]any{"type": "string"},
 			"files": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{
 				"path": map[string]any{"type": "string"}, "new_path": map[string]any{"type": "string"},
 				"operation": map[string]any{"type": "string"}, "diff": map[string]any{"type": "string"},

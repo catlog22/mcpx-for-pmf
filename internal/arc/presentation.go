@@ -141,8 +141,18 @@ func renderCodeChange(data map[string]any) string {
 	if changesetID != "" {
 		fmt.Fprintf(&b, "### Changeset %s", changesetID)
 	}
+	digest, _ := data["digest"].(string)
+	if strings.TrimSpace(digest) == "" {
+		digest, _ = data["expected_digest"].(string)
+	}
+	if strings.TrimSpace(digest) != "" {
+		fmt.Fprintf(&b, "\n\n`expected_digest`: `%s`\n\n> 应用此 Changeset 时必须原样复制上述 `expected_digest`；不要使用 diff 统计、快照 ID 或空值。", digest)
+	}
 	if status, _ := data["status"].(string); status == "waiting_confirmation" || status == "need_confirmation" {
 		b.WriteString("\n\n> ⚠️ 此变更需要确认后才能应用。")
+	}
+	if token, _ := data["confirmation_token"].(string); strings.TrimSpace(token) != "" {
+		fmt.Fprintf(&b, "\n\n`confirmation_token`: `%s`\n\n> 获得用户确认后，使用同一 changeset_id、expected_digest 和上述 confirmation_token 原样重试。", token)
 	}
 	diffMeta, _ := data["diff"].(map[string]any)
 	diffText, _ := diffMeta["unified_diff"].(string)

@@ -227,16 +227,30 @@ func (r *Runtime) executePreparedChange(ctx context.Context, envReq envelope.Req
 	}
 	expectedDigest, _ := envReq.Payload["expected_digest"].(string)
 	if strings.TrimSpace(expectedDigest) == "" || expectedDigest != item.Digest {
-		path := ""
-		if len(item.Files) > 0 {
-			path = item.Files[0].Path
-		}
-		return r.changeError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("changeset digest mismatch for %s", path))
+		return r.changeDigestConflict(envReq, session, item, expectedDigest)
 	}
 	if apply, exists := envReq.Payload["apply"].(bool); exists && !apply {
 		return changeDiffResult(item), nil
 	}
 	return r.applyPreparedChange(ctx, envReq, principal, session, item, stringPayload(envReq.Payload, "confirmation_token"))
+}
+
+func (r *Runtime) changeDigestConflict(envReq envelope.Request, session remotesession.Session, item changeset.Changeset, providedDigest string) (*mcp.CallToolResult, error) {
+	response := envelope.Fail(envelope.StatusError, envReq.RequestID, session.WorkspaceName, map[string]any{
+		"changeset_id": item.ID, "expected_digest": item.Digest, "provided_digest": providedDigest,
+	}, "PATCH_CONFLICT", fmt.Sprintf("expected_digest 必须原样等于当前 Changeset 的 digest；当前正确值为 %s；不要使用 diff 统计、快照 ID 或空值。", item.Digest))
+	response.RemoteSessionID = session.ID
+	if response.Error != nil {
+		response.Error.Details["changeset_id"] = item.ID
+		response.Error.Details["expected_digest"] = item.Digest
+		response.Error.Details["provided_digest"] = providedDigest
+	}
+	addRecoveryAction(&response, "change_apply", "使用当前 Changeset 返回的完整 digest 原样重试；它不是 diff 统计或工作区快照 ID。", map[string]any{
+		"remote_session_id": session.ID,
+		"changeset_id":      item.ID,
+		"expected_digest":   item.Digest,
+	})
+	return r.resultJSON(response)
 }
 
 func (r *Runtime) executeRevertChange(ctx context.Context, envReq envelope.Request, principal auth.Principal, session remotesession.Session, sourceID string) (*mcp.CallToolResult, error) {

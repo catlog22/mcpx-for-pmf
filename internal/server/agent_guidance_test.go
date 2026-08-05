@@ -15,8 +15,19 @@ func TestAgentGuidanceUsesDedicatedRoutingWithoutBusinessArguments(t *testing.T)
 	if guidance["version"] != agentGuidanceVersion || guidance["priority"] != "high" {
 		t.Fatalf("guidance metadata = %+v", guidance)
 	}
-	routing, ok := guidance["tool_routing"].(map[string]any)
+	routingIface, ok := guidance["tool_routing"]
 	if !ok {
+		t.Fatalf("tool routing type = %T", guidance["tool_routing"])
+	}
+	var routing map[string]any
+	if m, ok := routingIface.(map[string]any); ok {
+		routing = m
+	} else if m, ok := routingIface.(map[string][]string); ok {
+		routing = make(map[string]any, len(m))
+		for k, v := range m {
+			routing[k] = v
+		}
+	} else {
 		t.Fatalf("tool routing type = %T", guidance["tool_routing"])
 	}
 	if !containsAnyString(routing["inspect_files"], "source_read") || !containsAnyString(routing["modify_files"], "change_prepare") {
@@ -134,6 +145,9 @@ func TestAgentGuidanceIncludesChangePayloadCheatSheet(t *testing.T) {
 	if !strings.Contains(joined, "完整 sha256") {
 		t.Fatalf("rules must carry file revision and non-Git guidance: %s", joined)
 	}
+	if !strings.Contains(joined, "line_ending") || !strings.Contains(joined, "保留目标文件原有的换行格式") {
+		t.Fatalf("rules must carry generic line-ending preservation guidance: %s", joined)
+	}
 	if !strings.Contains(joined, "自然语言展示") || !strings.Contains(joined, "confirmation_token") {
 		t.Fatalf("rules must require semantic user confirmation: %s", joined)
 	}
@@ -149,10 +163,10 @@ func TestAgentGuidanceIncludesChangePayloadCheatSheet(t *testing.T) {
 	if !strings.Contains(joined, "environment_read") || !strings.Contains(joined, "command_run") {
 		t.Fatalf("rules must prevent complex duplicate environment probes: %s", joined)
 	}
-	if !strings.Contains(joined, "tasks[].task_id") || !strings.Contains(joined, "绝不猜测") || !strings.Contains(joined, "plan_read") {
+	if !strings.Contains(joined, "服务端签发") || !strings.Contains(joined, "task_id") || !strings.Contains(joined, "绝不猜测") || !strings.Contains(joined, "plan_read") {
 		t.Fatalf("rules must require exact Plan task IDs: %s", joined)
 	}
-	if !strings.Contains(joined, "extension_discover") || !strings.Contains(joined, "Skill 或 MCP 名称") {
+	if !strings.Contains(joined, "extension_discover") {
 		t.Fatalf("rules must prevent extension name guesses: %s", joined)
 	}
 	if !strings.Contains(joined, "source_read") || !strings.Contains(joined, "只返回普通文件") || !strings.Contains(joined, "不要从嵌套文件路径推断") {

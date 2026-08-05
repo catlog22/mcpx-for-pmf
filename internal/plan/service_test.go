@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"mcpx/internal/state"
@@ -44,8 +45,59 @@ func TestServiceCreateGetAndRestartLoadsTasksEvidenceAndEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Goal != created.Goal || len(loaded.Tasks) != 2 || loaded.Tasks[1].DependsOn[0] != "design" {
+	if loaded.Goal != created.Goal || len(loaded.Tasks) != 2 || loaded.Tasks[1].DependsOn[0] != loaded.Tasks[0].ID {
 		t.Fatalf("reloaded plan = %+v", loaded)
+	}
+}
+
+func TestServiceCreateIssuesServerTaskIDsAndMapsDependencies(t *testing.T) {
+	ctx := context.Background()
+	store := openPlanStore(t)
+	defer store.Close()
+	remoteSessionID := seedPlanSession(t, store.DB())
+	service := NewService(store.DB())
+	input := CreateInput{Goal: "goal", Tasks: []TaskInput{
+		{ID: "audit-users", Title: "Backend"},
+		{ID: "frontend", Title: "Frontend", DependsOn: []string{"audit-users"}},
+		{Title: "Verify", DependsOn: []string{"audit-users"}},
+	}}
+	first, err := service.Create(ctx, remoteSessionID, "principal-test", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The same local labels must be reusable by a later plan without hitting
+	// the global plan_tasks primary key.
+	second, err := service.Create(ctx, remoteSessionID, "principal-test", input)
+	if err != nil {
+		t.Fatalf("reuse of local task ids must not conflict: %v", err)
+	}
+	for _, plan := range []Plan{first, second} {
+		if len(plan.Tasks) != 3 {
+			t.Fatalf("plan tasks=%d", len(plan.Tasks))
+		}
+		for index, task := range plan.Tasks {
+			if !strings.HasPrefix(task.ID, "pt_") {
+				t.Fatalf("task id must be server-issued: %q", task.ID)
+			}
+			if index > 0 {
+				other := plan.Tasks[0].ID
+				if task.DependsOn[0] != other {
+					t.Fatalf("dependency must map to final task id: %+v", task)
+				}
+			}
+		}
+	}
+	ids := make(map[string]bool)
+	for _, plan := range []Plan{first, second} {
+		for _, task := range plan.Tasks {
+			if ids[task.ID] {
+				t.Fatalf("task id must be unique across plans: %s", task.ID)
+			}
+			ids[task.ID] = true
+		}
+	}
+	if _, err := service.StartTask(ctx, remoteSessionID, first.ID, first.Tasks[0].ID, "principal-test"); err != nil {
+		t.Fatalf("start with server-issued task id: %v", err)
 	}
 }
 
@@ -61,32 +113,34 @@ func TestServiceEnforcesDependenciesAndCompletionEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.StartTask(ctx, remoteSessionID, created.ID, "second", "principal-test"); !errors.Is(err, ErrDependency) {
+	first := created.Tasks[0].ID
+	second := created.Tasks[1].ID
+	if _, err := service.StartTask(ctx, remoteSessionID, created.ID, second, "principal-test"); !errors.Is(err, ErrDependency) {
 		t.Fatalf("start dependent error = %v, want dependency error", err)
 	}
-	if _, err := service.BlockTask(ctx, remoteSessionID, created.ID, "first", "principal-test", "", nil); !errors.Is(err, ErrInvalidInput) {
+	if _, err := service.BlockTask(ctx, remoteSessionID, created.ID, first, "principal-test", "", nil); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("empty block reason error = %v, want invalid input", err)
 	}
-	if _, err := service.StartTask(ctx, remoteSessionID, created.ID, "first", "principal-test"); err != nil {
+	if _, err := service.StartTask(ctx, remoteSessionID, created.ID, first, "principal-test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.BlockTask(ctx, remoteSessionID, created.ID, "first", "principal-test", "dependency unavailable", nil); err != nil {
+	if _, err := service.BlockTask(ctx, remoteSessionID, created.ID, first, "principal-test", "dependency unavailable", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.StartTask(ctx, remoteSessionID, created.ID, "first", "principal-test"); err != nil {
+	if _, err := service.StartTask(ctx, remoteSessionID, created.ID, first, "principal-test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CompleteTask(ctx, remoteSessionID, created.ID, "first", "principal-test", nil); !errors.Is(err, ErrEvidenceRequired) {
+	if _, err := service.CompleteTask(ctx, remoteSessionID, created.ID, first, "principal-test", nil); !errors.Is(err, ErrEvidenceRequired) {
 		t.Fatalf("complete without evidence error = %v", err)
 	}
-	completed, err := service.CompleteTask(ctx, remoteSessionID, created.ID, "first", "principal-test", []EvidenceInput{{Kind: "source", ReferenceID: "internal/main.go"}})
+	completed, err := service.CompleteTask(ctx, remoteSessionID, created.ID, first, "principal-test", []EvidenceInput{{Kind: "source", ReferenceID: "internal/main.go"}})
 	if err != nil || completed.Status != TaskCompleted || len(completed.Evidence) != 1 {
 		t.Fatalf("completed task = %+v, err=%v", completed, err)
 	}
-	if _, err := service.StartTask(ctx, remoteSessionID, created.ID, "second", "principal-test"); err != nil {
+	if _, err := service.StartTask(ctx, remoteSessionID, created.ID, second, "principal-test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CompleteTask(ctx, remoteSessionID, created.ID, "second", "principal-test", []EvidenceInput{{Kind: "verification", ReferenceID: "test-run", Metadata: map[string]any{"status": "passed"}}}); err != nil {
+	if _, err := service.CompleteTask(ctx, remoteSessionID, created.ID, second, "principal-test", []EvidenceInput{{Kind: "verification", ReferenceID: "test-run", Metadata: map[string]any{"status": "passed"}}}); err != nil {
 		t.Fatal(err)
 	}
 	delivery, err := service.Deliver(ctx, remoteSessionID, created.ID, "principal-test")
@@ -113,23 +167,25 @@ func TestServiceRejectsCyclesAndPreservesCompletedTasksDuringReplan(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.StartTask(ctx, remoteSessionID, created.ID, "done", "principal-test"); err != nil {
+	done := created.Tasks[0].ID
+	todo := created.Tasks[1].ID
+	if _, err := service.StartTask(ctx, remoteSessionID, created.ID, done, "principal-test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CompleteTask(ctx, remoteSessionID, created.ID, "done", "principal-test", []EvidenceInput{{Kind: "source", ReferenceID: "done.go"}}); err != nil {
+	if _, err := service.CompleteTask(ctx, remoteSessionID, created.ID, done, "principal-test", []EvidenceInput{{Kind: "source", ReferenceID: "done.go"}}); err != nil {
 		t.Fatal(err)
 	}
 	updated, err := service.Replan(ctx, remoteSessionID, created.ID, "principal-test", ReplanInput{Reason: "split remaining work", Operations: []TaskOperation{
-		{Action: "add", TaskID: "verify", Title: "Verify", DependsOn: []string{"todo"}},
-		{Action: "update", TaskID: "todo", Title: "Updated todo"},
+		{Action: "add", TaskID: "verify", Title: "Verify", DependsOn: []string{todo}},
+		{Action: "update", TaskID: todo, Title: "Updated todo"},
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status != PlanInProgress || taskIndex(updated.Tasks, "done") < 0 || updated.Tasks[taskIndex(updated.Tasks, "done")].Status != TaskCompleted || taskIndex(updated.Tasks, "verify") < 0 {
+	if updated.Status != PlanInProgress || taskIndex(updated.Tasks, done) < 0 || updated.Tasks[taskIndex(updated.Tasks, done)].Status != TaskCompleted || taskIndex(updated.Tasks, "verify") < 0 {
 		t.Fatalf("replanned plan = %+v", updated)
 	}
-	if _, err := service.Replan(ctx, remoteSessionID, created.ID, "principal-test", ReplanInput{Reason: "mutate completed", Operations: []TaskOperation{{Action: "remove", TaskID: "done"}}}); !errors.Is(err, ErrInvalidState) {
+	if _, err := service.Replan(ctx, remoteSessionID, created.ID, "principal-test", ReplanInput{Reason: "mutate completed", Operations: []TaskOperation{{Action: "remove", TaskID: done}}}); !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("completed removal error = %v", err)
 	}
 	if _, err := service.Replan(ctx, remoteSessionID, created.ID, "principal-test", ReplanInput{Reason: "replace verify", Operations: []TaskOperation{
@@ -153,10 +209,11 @@ func TestServiceDeliveryBlocksDraftChangesetAndInvalidEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.StartTask(ctx, remoteSessionID, created.ID, "apply", "principal-test"); err != nil {
+	apply := created.Tasks[0].ID
+	if _, err := service.StartTask(ctx, remoteSessionID, created.ID, apply, "principal-test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CompleteTask(ctx, remoteSessionID, created.ID, "apply", "principal-test", []EvidenceInput{{Kind: "changeset", ReferenceID: "chg_test"}, {Kind: "verification", ReferenceID: "verify", Metadata: map[string]any{"status": "failed"}}}); err != nil {
+	if _, err := service.CompleteTask(ctx, remoteSessionID, created.ID, apply, "principal-test", []EvidenceInput{{Kind: "changeset", ReferenceID: "chg_test"}, {Kind: "verification", ReferenceID: "verify", Metadata: map[string]any{"status": "failed"}}}); err != nil {
 		t.Fatal(err)
 	}
 	blocked, err := service.Deliver(ctx, remoteSessionID, created.ID, "principal-test")

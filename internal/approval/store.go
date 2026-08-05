@@ -57,7 +57,11 @@ func NewPersistentStore(db *sql.DB) *Store {
 func contentKey(p Pending) string {
 	switch p.Tool {
 	case "command_execute":
-		return strings.Join([]string{p.PrincipalID, p.Command, p.Purpose, p.Scope}, "\x00")
+		// Purpose is intentionally excluded: models rephrase the same intent
+		// when retrying a confirmed command, and the confirmed action is the
+		// command itself. Binding to purpose alone turns a user confirmation
+		// into an unrecoverable token-mismatch loop.
+		return strings.Join([]string{p.PrincipalID, p.Command, p.Scope}, "\x00")
 	case "change_execute", "change_apply":
 		if p.ChangesetID == "" || p.ChangesetDigest == "" {
 			return ""

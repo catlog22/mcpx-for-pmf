@@ -186,6 +186,7 @@ func (s *Service) buildChangeset(remoteSessionID, workspaceRoot, summary string,
 	}
 	files := make([]FileChange, 0, len(operations))
 	seen := map[string]bool{}
+	chainByPath := map[string]FileChange{}
 	if err := rejectDeleteCreateConflicts(operations); err != nil {
 		return Changeset{}, err
 	}
@@ -193,7 +194,17 @@ func (s *Service) buildChangeset(remoteSessionID, workspaceRoot, summary string,
 		return Changeset{}, err
 	}
 	for index, operation := range operations {
-		prepared, err := prepareOperation(workspaceRoot, index, operation)
+		path := filepath.ToSlash(filepath.Clean(operation.Path))
+		op := strings.ToLower(strings.TrimSpace(operation.Operation))
+		chainable := chainableOperation(op)
+		var previous *FileChange
+		if prior, ok := chainByPath[path]; ok {
+			previous = &prior
+		}
+		if previous != nil && !chainable {
+			return Changeset{}, fmt.Errorf("path %q appears more than once", path)
+		}
+		prepared, err := prepareOperation(workspaceRoot, index, operation, previous)
 		if err != nil {
 			return Changeset{}, fmt.Errorf("operation %d: %w", index, err)
 		}
@@ -209,14 +220,18 @@ func (s *Service) buildChangeset(remoteSessionID, workspaceRoot, summary string,
 			prepared.Proposed = transformed
 			prepared.ProposedSHA256 = hashBytes(transformed)
 		}
-		for _, path := range []string{prepared.Path, prepared.NewPath} {
-			if path != "" {
-				if seen[path] {
-					return Changeset{}, fmt.Errorf("path %q appears more than once", path)
+		if !chainable || prepared.NewPath != "" {
+			for _, candidate := range []string{prepared.Path, prepared.NewPath} {
+				if candidate == "" {
+					continue
 				}
-				seen[path] = true
+				if _, exists := chainByPath[candidate]; exists || seen[candidate] {
+					return Changeset{}, fmt.Errorf("path %q appears more than once", candidate)
+				}
+				seen[candidate] = true
 			}
 		}
+		chainByPath[path] = prepared
 		files = append(files, prepared)
 	}
 	id, err := randomID("chg_", 16)
@@ -228,6 +243,20 @@ func (s *Service) buildChangeset(remoteSessionID, workspaceRoot, summary string,
 	changeset := Changeset{ID: id, RemoteSessionID: remoteSessionID, Status: "draft", Summary: summary, Digest: digest, Files: files, CreatedAt: now}
 	changeset.UnifiedDiff = unifiedDiff(files)
 	return changeset, nil
+}
+
+// chainableOperation reports whether multiple operations may target the same
+// path in one Changeset. Exact edits and unified diff updates apply in order
+// against the previous proposed content, which matches how models naturally
+// edit a file in several places. Destructive and structural operations remain
+// unique per path.
+func chainableOperation(op string) bool {
+	switch op {
+	case "replace_exact", "insert_before", "insert_after", "delete_exact", "replace_range", "update":
+		return true
+	default:
+		return false
+	}
 }
 
 // rejectDeleteCreateConflicts keeps destructive replacement in two explicit
@@ -259,7 +288,7 @@ func rejectDeleteCreateConflicts(operations []Operation) error {
 	return fmt.Errorf("delete/create conflict: one change_execute cannot mix delete and create operations (delete: %s; create: %s); submit them in separate change_execute calls, apply delete first, then re-read the workspace before creating files", strings.Join(deletePaths, ", "), strings.Join(createPaths, ", "))
 }
 
-func prepareOperation(workspaceRoot string, ordinal int, operation Operation) (FileChange, error) {
+func prepareOperation(workspaceRoot string, ordinal int, operation Operation, previous *FileChange) (FileChange, error) {
 	op := strings.ToLower(strings.TrimSpace(operation.Operation))
 	path := filepath.ToSlash(filepath.Clean(operation.Path))
 	if path == "." || filepath.IsAbs(operation.Path) {
@@ -274,21 +303,37 @@ func prepareOperation(workspaceRoot string, ordinal int, operation Operation) (F
 	}
 	prepared := FileChange{Ordinal: ordinal, Operation: op, Path: path, ExpectedSHA256: expectedSHA256}
 	exactOps := op == "replace_exact" || op == "insert_before" || op == "insert_after" || op == "delete_exact" || op == "replace_range"
+	if previous != nil {
+		if !chainableOperation(op) {
+			return FileChange{}, fmt.Errorf("path %q cannot chain operation %q", path, op)
+		}
+		// A chained operation may cite either the on-disk revision the model
+		// read (all exact edits in one batch) or the revision left by the
+		// previous chained edit (service-generated reverts).
+		if prepared.ExpectedSHA256 != previous.OriginalSHA256 && prepared.ExpectedSHA256 != previous.ProposedSHA256 {
+			return FileChange{}, fmt.Errorf("%w: %s", ErrStaleRevision, path)
+		}
+		prepared.Original = append([]byte(nil), previous.Proposed...)
+		prepared.OriginalMode = previous.OriginalMode
+		prepared.OriginalSHA256 = hashBytes(prepared.Original)
+	}
 	switch {
 	case exactOps:
 		if prepared.ExpectedSHA256 == "" {
 			return FileChange{}, fmt.Errorf("base_sha256 required for %s", op)
 		}
-		content, mode, err := readExisting(workspaceRoot, path)
-		if err != nil {
-			return FileChange{}, err
+		if previous == nil {
+			content, mode, err := readExisting(workspaceRoot, path)
+			if err != nil {
+				return FileChange{}, err
+			}
+			prepared.Original, prepared.OriginalMode = content, mode
+			prepared.OriginalSHA256 = hashBytes(content)
+			if prepared.OriginalSHA256 != prepared.ExpectedSHA256 {
+				return FileChange{}, fmt.Errorf("%w: %s", ErrStaleRevision, path)
+			}
 		}
-		prepared.Original, prepared.OriginalMode = content, mode
-		prepared.OriginalSHA256 = hashBytes(content)
-		if prepared.OriginalSHA256 != prepared.ExpectedSHA256 {
-			return FileChange{}, fmt.Errorf("%w: %s", ErrStaleRevision, path)
-		}
-		proposed, err := applyExactEdit(content, operation)
+		proposed, err := applyExactEdit(prepared.Original, operation)
 		if err != nil {
 			return FileChange{}, err
 		}
@@ -296,7 +341,25 @@ func prepareOperation(workspaceRoot string, ordinal int, operation Operation) (F
 		prepared.Operation = "update"
 		prepared.Proposed = proposed
 		prepared.ProposedSHA256 = hashBytes(proposed)
-	case op == "update" || op == "rename" || op == "delete":
+	case op == "update":
+		if prepared.ExpectedSHA256 == "" {
+			return FileChange{}, fmt.Errorf("base_sha256 (expected_sha256 alias) required for %s: %s", op, path)
+		}
+		if previous == nil {
+			content, mode, err := readExisting(workspaceRoot, path)
+			if err != nil {
+				return FileChange{}, err
+			}
+			prepared.Original, prepared.OriginalMode = content, mode
+			prepared.OriginalSHA256 = hashBytes(content)
+			if prepared.OriginalSHA256 != prepared.ExpectedSHA256 {
+				return FileChange{}, fmt.Errorf("%w: %s", ErrStaleRevision, path)
+			}
+		}
+	case op == "rename" || op == "delete":
+		if previous != nil {
+			return FileChange{}, fmt.Errorf("path %q cannot chain operation %q", path, op)
+		}
 		if prepared.ExpectedSHA256 == "" && op != "delete" {
 			return FileChange{}, fmt.Errorf("base_sha256 (expected_sha256 alias) required for %s: %s", op, path)
 		}
@@ -1284,6 +1347,7 @@ func (s *Service) insertTx(ctx context.Context, tx *sql.Tx, changeset Changeset,
 }
 
 func preflight(workspaceRoot string, files []FileChange) error {
+	validated := map[string]bool{}
 	for _, item := range files {
 		absolute, err := file.Resolve(workspaceRoot, item.Path)
 		if err != nil {
@@ -1309,6 +1373,13 @@ func preflight(workspaceRoot string, files []FileChange) error {
 			}
 			continue
 		}
+		// Chained edits share one on-disk revision: only the first operation
+		// is checked against the disk. Later operations were prepared against
+		// the previous proposed content and cannot be checked before apply.
+		if validated[item.Path] {
+			continue
+		}
+		validated[item.Path] = true
 		content, _, err := readExisting(workspaceRoot, item.Path)
 		if err != nil || hashBytes(content) != item.ExpectedSHA256 {
 			return fmt.Errorf("%w: %s", ErrStaleRevision, item.Path)

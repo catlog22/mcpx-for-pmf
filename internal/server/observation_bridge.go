@@ -14,6 +14,7 @@ import (
 	"mcpx/internal/envelope"
 	"mcpx/internal/logging"
 	"mcpx/internal/observation"
+	"mcpx/internal/operation"
 	"mcpx/internal/remotesession"
 	"mcpx/internal/terminal"
 )
@@ -89,18 +90,20 @@ func (b *observationBridge) RecordToolStarted(ctx context.Context, name string, 
 	workspace, remoteID := b.target(ctx, req)
 	input, truncated := observation.NormalizeToolInput(args, observation.MaxEventBytes)
 	return b.Record(ctx, observation.Event{
-		Workspace:       workspace,
-		RemoteSessionID: remoteID,
-		RequestID:       req.RequestID,
-		OperationID:     req.OperationID,
-		Tool:            name,
-		Type:            observation.TypeToolStarted,
-		Status:          "started",
-		Purpose:         req.Intent,
-		Intent:          req.Intent,
-		ProgressSummary: req.ProgressSummary,
-		Input:           input,
-		Truncated:       truncated,
+		Workspace:         workspace,
+		RemoteSessionID:   remoteID,
+		RequestID:         req.RequestID,
+		OperationID:       req.OperationID,
+		ParentOperationID: req.ParentOperationID,
+		StepID:            req.StepID,
+		Tool:              name,
+		Type:              observation.TypeToolStarted,
+		Status:            "started",
+		Purpose:           req.Intent,
+		Intent:            req.Intent,
+		ProgressSummary:   req.ProgressSummary,
+		Input:             input,
+		Truncated:         truncated,
 	})
 }
 
@@ -139,28 +142,30 @@ func (b *observationBridge) RecordToolCompleted(ctx context.Context, name string
 		truncated = true
 	}
 	return b.Record(ctx, observation.Event{
-		Workspace:        workspace,
-		RemoteSessionID:  remoteID,
-		RequestID:        req.RequestID,
-		OperationID:      req.OperationID,
-		Tool:             name,
-		Type:             observation.TypeToolCompleted,
-		Status:           status,
-		Purpose:          req.Intent,
-		Intent:           req.Intent,
-		ProgressSummary:  req.ProgressSummary,
-		Input:            input,
-		Output:           encoded,
-		Summary:          fmt.Sprintf("%s %s", name, status),
-		Command:          facts.Command,
-		WorkingDirectory: facts.WorkingDirectory,
-		ExitCode:         facts.ExitCode,
-		DurationMs:       facts.DurationMs,
-		SkillName:        facts.SkillName,
-		MCPServer:        facts.MCPServer,
-		MCPTool:          facts.MCPTool,
-		Path:             facts.Path,
-		Truncated:        truncated || inputTruncated,
+		Workspace:         workspace,
+		RemoteSessionID:   remoteID,
+		RequestID:         req.RequestID,
+		OperationID:       req.OperationID,
+		ParentOperationID: req.ParentOperationID,
+		StepID:            req.StepID,
+		Tool:              name,
+		Type:              observation.TypeToolCompleted,
+		Status:            status,
+		Purpose:           req.Intent,
+		Intent:            req.Intent,
+		ProgressSummary:   req.ProgressSummary,
+		Input:             input,
+		Output:            encoded,
+		Summary:           fmt.Sprintf("%s %s", name, status),
+		Command:           facts.Command,
+		WorkingDirectory:  facts.WorkingDirectory,
+		ExitCode:          facts.ExitCode,
+		DurationMs:        facts.DurationMs,
+		SkillName:         facts.SkillName,
+		MCPServer:         facts.MCPServer,
+		MCPTool:           facts.MCPTool,
+		Path:              facts.Path,
+		Truncated:         truncated || inputTruncated,
 	})
 }
 
@@ -186,7 +191,7 @@ func publicResultStatus(result *mcp.CallToolResult) string {
 			return "failed"
 		}
 	}
-	return ""
+	return operationResultStatus(result)
 }
 
 func toolObservationFacts(name string, args map[string]any, normalized json.RawMessage, timing interactionTiming) observation.Event {
@@ -311,6 +316,34 @@ func (r *Runtime) observeRemoteEvent(session remotesession.Session, event remote
 		ResourceURI:     event.ResourceURI,
 		Truncated:       truncated,
 		CreatedAt:       event.CreatedAt,
+	})
+}
+
+func (r *Runtime) observeOperationEvent(event operation.Event) {
+	if r == nil || r.observation == nil {
+		return
+	}
+	typeName := event.Type
+	parentOperationID := ""
+	if event.StepID != "" {
+		parentOperationID = event.OperationID
+	}
+	status := string(event.State)
+	if event.State == operation.StateQueued || event.State == operation.StateRunning {
+		status = "running"
+	}
+	_ = r.observation.Record(context.Background(), observation.Event{
+		Workspace:         event.WorkspaceName,
+		RemoteSessionID:   event.RemoteSessionID,
+		RequestID:         event.RequestID,
+		OperationID:       event.OperationID,
+		ParentOperationID: parentOperationID,
+		StepID:            event.StepID,
+		Tool:              event.Tool,
+		Type:              typeName,
+		Status:            status,
+		Summary:           event.Summary,
+		CreatedAt:         event.CreatedAt,
 	})
 }
 

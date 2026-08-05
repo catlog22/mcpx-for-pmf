@@ -1,0 +1,375 @@
+package server
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/mark3labs/mcp-go/mcp"
+
+	"mcpx/internal/envelope"
+	"mcpx/internal/operation"
+	"mcpx/internal/remotesession"
+)
+
+func operationTestSession(t *testing.T, rt *Runtime, workspace string) remotesession.Session {
+	t.Helper()
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get(workspace)
+	if !ok {
+		t.Fatalf("workspace %q was not registered", workspace)
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: workspace, WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return created.Session
+}
+
+func callOperationTool(t *testing.T, rt *Runtime, name string, arguments map[string]any) map[string]any {
+	t.Helper()
+	request := mcp.CallToolRequest{}
+	request.Params.Arguments = arguments
+	result, err := rt.toolHandlers[name](context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer := decodeARCEnvelope(t, result)
+	mcpx, _ := outer["mcpx"].(map[string]any)
+	payload, _ := mcpx["result"].(map[string]any)
+	return payload
+}
+
+func submitOperationForTest(t *testing.T, rt *Runtime, session remotesession.Session, stepID, result string) operation.Record {
+	t.Helper()
+	record, err := rt.operations.Submit(context.Background(), operation.SubmitSpec{
+		RemoteSessionID: session.ID,
+		WorkspaceName:   session.WorkspaceName,
+		RequestID:       "req_batch_test_" + stepID,
+		Purpose:         "批量查询测试",
+		Steps:           []operation.StepSpec{{ID: stepID, Tool: "source_read"}},
+	}, func(context.Context, operation.ExecuteInput) operation.ExecuteResult {
+		return operation.ExecuteResult{Result: []byte(result)}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, timedOut, err := rt.operations.Wait(context.Background(), record.ID, 5*time.Second)
+	if err != nil || timedOut || completed.State != operation.StateSucceeded {
+		t.Fatalf("operation did not complete: record=%+v timedOut=%v err=%v", completed, timedOut, err)
+	}
+	return completed
+}
+
+func operationErrorMessage(response map[string]any) string {
+	errorBody, _ := response["error"].(map[string]any)
+	if errorBody == nil {
+		data, _ := response["data"].(map[string]any)
+		errorBody, _ = data["error"].(map[string]any)
+	}
+	return fmt.Sprint(errorBody["message"])
+}
+
+func assertOperationFailed(t *testing.T, response map[string]any) {
+	t.Helper()
+	if response["status"] != "failed" {
+		t.Fatalf("expected failed response, got %+v", response)
+	}
+}
+
+func TestAsyncToolReturnsOperationAndWaitsForResult(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	session := operationTestSession(t, rt, "demo")
+
+	accepted := callOperationTool(t, rt, "source_read", map[string]any{
+		"session_id": session.ID, "purpose": "异步读取工作区", "execution_mode": "async", "view": "list", "limit": 5,
+	})
+	if accepted["status"] != "accepted" {
+		t.Fatalf("accepted response=%+v", accepted)
+	}
+	data, ok := accepted["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("accepted data=%T", accepted["data"])
+	}
+	operationID, _ := data["operation_id"].(string)
+	if operationID == "" {
+		t.Fatalf("missing operation id: %+v", accepted)
+	}
+
+	completed := callOperationTool(t, rt, "operation_manage", map[string]any{
+		"session_id": session.ID, "operation_id": operationID, "action": "wait", "timeout_ms": 5000,
+	})
+	if completed["status"] != "succeeded" {
+		t.Fatalf("completed response=%+v", completed)
+	}
+}
+
+func TestOperationBatchRunsAndRecordsChildSteps(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	session := operationTestSession(t, rt, "demo")
+	accepted := callOperationTool(t, rt, "operation_batch", map[string]any{
+		"session_id": session.ID,
+		"purpose":    "并行读取工作区目录",
+		"operations": []any{
+			map[string]any{"id": "list_a", "tool": "source_read", "arguments": map[string]any{"view": "list", "limit": 5}},
+			map[string]any{"id": "list_b", "tool": "source_read", "arguments": map[string]any{"view": "list", "limit": 5}},
+		},
+	})
+	if accepted["status"] != "accepted" {
+		t.Fatalf("batch response=%+v", accepted)
+	}
+	data := accepted["data"].(map[string]any)
+	operationID := data["operation_id"].(string)
+	completed := callOperationTool(t, rt, "operation_manage", map[string]any{
+		"session_id": session.ID, "operation_id": operationID, "action": "wait", "timeout_ms": 5000,
+	})
+	if completed["status"] != "succeeded" {
+		t.Fatalf("batch completion=%+v", completed)
+	}
+
+	events, err := rt.observation.store.History(context.Background(), "demo", 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seenSteps := map[string]bool{}
+	for _, event := range events {
+		if event.OperationID == operationID && event.StepID != "" {
+			seenSteps[event.StepID] = true
+		}
+	}
+	if !seenSteps["list_a"] || !seenSteps["list_b"] {
+		t.Fatalf("missing operation step events: %+v", seenSteps)
+	}
+}
+
+func TestOperationManageBatchStatusAndResult(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	session := operationTestSession(t, rt, "demo")
+	first := submitOperationForTest(t, rt, session, "first", `{"value":"first"}`)
+	second := submitOperationForTest(t, rt, session, "second", `{"value":"second"}`)
+	ids := []any{first.ID, second.ID}
+
+	status := callOperationTool(t, rt, "operation_manage", map[string]any{
+		"session_id": session.ID, "action": "status", "operation_ids": ids,
+	})
+	if status["status"] != "succeeded" {
+		t.Fatalf("batch status=%+v", status)
+	}
+	statusData, ok := status["data"].(map[string]any)
+	if !ok || statusData["action"] != "status" {
+		t.Fatalf("batch status data=%T %+v", status["data"], status)
+	}
+	statusItems, ok := statusData["items"].([]any)
+	if !ok || len(statusItems) != 2 {
+		t.Fatalf("batch status items=%T %+v", statusData["items"], statusData["items"])
+	}
+	for index, item := range statusItems {
+		view, ok := item.(map[string]any)
+		if !ok || view["operation_id"] != ids[index] || view["state"] != "succeeded" {
+			t.Fatalf("batch status item[%d]=%T %+v", index, item, item)
+		}
+	}
+
+	result := callOperationTool(t, rt, "operation_manage", map[string]any{
+		"session_id": session.ID, "action": "result", "operation_ids": ids,
+	})
+	if result["status"] != "succeeded" {
+		t.Fatalf("batch result=%+v", result)
+	}
+	resultData := result["data"].(map[string]any)
+	resultItems := resultData["items"].([]any)
+	for index, item := range resultItems {
+		view := item.(map[string]any)
+		value := view["result"].(map[string]any)["value"]
+		want := []string{"first", "second"}[index]
+		if view["operation_id"] != ids[index] || value != want || view["next_cursor"] != "" {
+			t.Fatalf("batch result item[%d]=%+v", index, view)
+		}
+	}
+
+	longFirst := submitOperationForTest(t, rt, session, "long-first", `{"value":"012345678901234567890123456789"}`)
+	longSecond := submitOperationForTest(t, rt, session, "long-second", `{"value":"abcdefghijabcdefghijabcdefghij"}`)
+	paged := callOperationTool(t, rt, "operation_manage", map[string]any{
+		"session_id": session.ID, "action": "result", "operation_ids": []any{longFirst.ID, longSecond.ID}, "limit": 10,
+	})
+	pagedItems := paged["data"].(map[string]any)["items"].([]any)
+	if len(pagedItems) != 2 {
+		t.Fatalf("paged items=%+v", pagedItems)
+	}
+	firstItem := pagedItems[0].(map[string]any)
+	cursor, _ := firstItem["next_cursor"].(string)
+	if cursor == "" {
+		t.Fatalf("first batch result must expose next_cursor: %+v", firstItem)
+	}
+	nextAction, _ := firstItem["next_action"].(map[string]any)
+	if nextAction["tool"] != "operation_manage" {
+		t.Fatalf("truncated batch result must expose operation_manage next_action: %+v", firstItem)
+	}
+	nextArgs, _ := nextAction["arguments"].(map[string]any)
+	if nextArgs["cursor"] != cursor || nextArgs["operation_id"] != longFirst.ID || nextArgs["action"] != "result" {
+		t.Fatalf("next_action arguments=%+v", nextArgs)
+	}
+	continued := callOperationTool(t, rt, "operation_manage", map[string]any{
+		"session_id": session.ID, "operation_id": longFirst.ID, "action": "result", "cursor": cursor, "limit": 10,
+	})
+	if continued["status"] != "succeeded" {
+		t.Fatalf("single result continuation=%+v", continued)
+	}
+}
+
+func TestOperationBatchResultUnwrapsToolContent(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	session := operationTestSession(t, rt, "demo")
+	// Real async steps persist the mcp.CallToolResult envelope; the batch
+	// result must hand models the inner tool JSON instead of escaped nesting.
+	record := submitOperationForTest(t, rt, session, "unwrapped", `{"result":{"available":true,"content":[{"text":"{\"status\":\"succeeded\",\"data\":{\"hello\":\"world\"}}"}]}}`)
+	response := callOperationTool(t, rt, "operation_manage", map[string]any{
+		"session_id": session.ID, "action": "result", "operation_ids": []any{record.ID},
+	})
+	if response["status"] != "succeeded" {
+		t.Fatalf("batch result=%+v", response)
+	}
+	items := response["data"].(map[string]any)["items"].([]any)
+	view := items[0].(map[string]any)
+	data, _ := view["result"].(map[string]any)["data"].(map[string]any)
+	if data["hello"] != "world" {
+		t.Fatalf("batch result must unwrap tool content: %+v", view)
+	}
+	if view["next_cursor"] != "" {
+		t.Fatalf("unexpected cursor for short result: %+v", view)
+	}
+}
+
+func TestOperationManageBatchValidationAndPermissions(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	session := operationTestSession(t, rt, "demo")
+	valid := submitOperationForTest(t, rt, session, "valid", `{"ok":true}`)
+
+	cases := []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"missing targets", map[string]any{"session_id": session.ID, "action": "status"}, "operation_id or operation_ids"},
+		{"both target forms", map[string]any{"session_id": session.ID, "action": "status", "operation_id": valid.ID, "operation_ids": []any{valid.ID}}, "mutually exclusive"},
+		{"empty operation_ids", map[string]any{"session_id": session.ID, "action": "status", "operation_ids": []any{}}, "operation_ids"},
+		{"duplicate operation_ids", map[string]any{"session_id": session.ID, "action": "status", "operation_ids": []any{valid.ID, valid.ID}}, "duplicate"},
+		{"batch wait", map[string]any{"session_id": session.ID, "action": "wait", "operation_ids": []any{valid.ID}}, "status or action=result"},
+		{"batch step", map[string]any{"session_id": session.ID, "action": "result", "operation_ids": []any{valid.ID}, "step_id": "valid"}, "step_id"},
+		{"batch cursor", map[string]any{"session_id": session.ID, "action": "result", "operation_ids": []any{valid.ID}, "cursor": "10"}, "cursor"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			response := callOperationTool(t, rt, "operation_manage", test.args)
+			assertOperationFailed(t, response)
+			if !strings.Contains(operationErrorMessage(response), test.want) {
+				t.Fatalf("error=%q, want substring %q", operationErrorMessage(response), test.want)
+			}
+		})
+	}
+
+	tooMany := make([]any, operation.MaxBatchQueries+1)
+	for index := range tooMany {
+		tooMany[index] = fmt.Sprintf("op-%d", index)
+	}
+	tooManyResponse := callOperationTool(t, rt, "operation_manage", map[string]any{
+		"session_id": session.ID, "action": "status", "operation_ids": tooMany,
+	})
+	assertOperationFailed(t, tooManyResponse)
+	if !strings.Contains(operationErrorMessage(tooManyResponse), "operation_ids") {
+		t.Fatalf("too many IDs error=%q", operationErrorMessage(tooManyResponse))
+	}
+
+	missing := callOperationTool(t, rt, "operation_manage", map[string]any{
+		"session_id": session.ID, "action": "result", "operation_ids": []any{valid.ID, "missing-operation"},
+	})
+	assertOperationFailed(t, missing)
+	if data, _ := missing["data"].(map[string]any); data["items"] != nil {
+		t.Fatalf("missing ID must not return partial data: %+v", missing)
+	}
+
+	otherSession := operationTestSession(t, rt, "demo")
+	foreign := submitOperationForTest(t, rt, otherSession, "foreign", `{"foreign":true}`)
+	forbidden := callOperationTool(t, rt, "operation_manage", map[string]any{
+		"session_id": session.ID, "action": "status", "operation_ids": []any{valid.ID, foreign.ID},
+	})
+	assertOperationFailed(t, forbidden)
+	if !strings.Contains(strings.ToLower(operationErrorMessage(forbidden)), "another remote session") {
+		t.Fatalf("foreign operation error=%q", operationErrorMessage(forbidden))
+	}
+
+	nested := callOperationTool(t, rt, "operation_batch", map[string]any{
+		"session_id": session.ID, "purpose": "批量读取结果", "operations": []any{
+			map[string]any{"id": "read", "tool": "operation_manage", "arguments": map[string]any{}},
+		},
+	})
+	assertOperationFailed(t, nested)
+	if !strings.Contains(operationErrorMessage(nested), "operation_ids") || !strings.Contains(operationErrorMessage(nested), "action=status/result") {
+		t.Fatalf("nested operation guidance=%q", operationErrorMessage(nested))
+	}
+}
+
+func TestOperationBatchStatusAggregation(t *testing.T) {
+	tests := []struct {
+		name   string
+		states []operation.State
+		want   envelope.Status
+	}{
+		{"confirmation wins", []operation.State{operation.StateSucceeded, operation.StateWaitingConfirmation}, envelope.StatusNeedConfirmation},
+		{"running after confirmation", []operation.State{operation.StateRunning, operation.StateSucceeded}, envelope.StatusAccepted},
+		{"failure after terminal", []operation.State{operation.StateFailed, operation.StateCancelled}, envelope.StatusError},
+		{"interrupted", []operation.State{operation.StateInterrupted, operation.StateCancelled}, envelope.StatusInterrupted},
+		{"all success", []operation.State{operation.StateSucceeded, operation.StateSucceeded}, envelope.StatusOK},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			records := make([]operation.Record, 0, len(test.states))
+			for _, state := range test.states {
+				records = append(records, operation.Record{State: state})
+			}
+			if got := operationBatchStatus(records); got != test.want {
+				t.Fatalf("status=%q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestOperationManageWaitTimeoutDoesNotCancel(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	session := operationTestSession(t, rt, "demo")
+	record, err := rt.operations.Submit(context.Background(), operation.SubmitSpec{
+		RemoteSessionID: session.ID, WorkspaceName: "demo", RequestID: "req_test", Purpose: "等待测试",
+		Steps: []operation.StepSpec{{ID: "wait", Tool: "source_read"}},
+	}, func(ctx context.Context, input operation.ExecuteInput) operation.ExecuteResult {
+		select {
+		case <-time.After(100 * time.Millisecond):
+			return operation.ExecuteResult{Result: []byte(`{"ok":true}`)}
+		case <-ctx.Done():
+			return operation.ExecuteResult{Err: ctx.Err()}
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, timedOut, err := rt.operations.Wait(context.Background(), record.ID, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !timedOut || (current.State != operation.StateQueued && current.State != operation.StateRunning) {
+		t.Fatalf("current=%+v timedOut=%v", current, timedOut)
+	}
+	final, timedOut, err := rt.operations.Wait(context.Background(), record.ID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if timedOut || final.State != operation.StateSucceeded {
+		t.Fatalf("final=%+v timedOut=%v", final, timedOut)
+	}
+}

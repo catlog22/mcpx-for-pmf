@@ -59,7 +59,11 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req mcp.CallToolReques
 	switch decision {
 	case security.Deny:
 		r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "command_execute", Command: command, Status: "denied", Detail: commandExecutionDetail(purpose, scope, commandDigest)})
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "denied", "command denied by policy")
+		message := "command denied by policy"
+		if containsUnsafeShellFeature(command) {
+			message += "；命令包含 $()、管道、重定向、后台符或换行等 shell 特性，被安全策略拒绝。请拆成简单命令逐条执行（例如先 git fetch，再 git rev-parse，最后 git status），不要组合或使用命令替换。"
+		}
+		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "denied", message)
 	case security.Confirm:
 		yield := commandYield(envReq.Payload)
 		confirmationToken := stringPayload(envReq.Payload, "confirmation_token")
@@ -74,13 +78,24 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req mcp.CallToolReques
 			if confirmationErr != nil {
 				return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "confirmation_store_error", confirmationErr.Error())
 			}
+			// Struct field order puts confirmation_token first in the JSON
+			// text, so host previews that truncate long tool output still show
+			// the full token to the model.
+			confirmationMessage := "confirmation_token: " + pending.ConfirmationToken + "；请向用户展示命令及用途，获得明确语义确认后，使用相同 command 和该 confirmation_token 重试。该 token 仅绑定本次操作，不承担认证职责。"
+			if confirmationToken != "" {
+				confirmationMessage = "你提供的 confirmation_token 未匹配当前待确认项；请使用本响应 data.confirmation_token 中的完整 token 原样重试：" + pending.ConfirmationToken + "（相同 command、session_id 和 scope）。"
+			}
+			confirmationData := commandConfirmationData{
+				ConfirmationToken:    pending.ConfirmationToken,
+				Command:              command,
+				Purpose:              purpose,
+				Scope:                scope,
+				CommandDigest:        commandDigest,
+				ConfirmationRequired: true,
+				ConfirmationMessage:  confirmationMessage,
+			}
 			response := envelope.Fail(envelope.StatusNeedConfirmation, envReq.RequestID, remote.WorkspaceName,
-				map[string]any{
-					"command": command, "purpose": purpose, "scope": scope,
-					"command_digest": commandDigest, "confirmation_required": true,
-					"confirmation_token":   pending.ConfirmationToken,
-					"confirmation_message": "请向用户展示命令及用途，获得明确语义确认后，使用相同 command、purpose 和 confirmation_token 重试。该 token 仅绑定本次操作，不承担认证职责。",
-				}, "USER_CONFIRMATION_REQUIRED", "命令执行等待用户语义确认")
+				confirmationData, "USER_CONFIRMATION_REQUIRED", "命令执行等待用户语义确认")
 			response.RemoteSessionID = remote.ID
 			return r.resultJSON(response)
 		}
@@ -92,6 +107,18 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req mcp.CallToolReques
 	}
 
 	return r.executeCommandTask(ctx, envReq, principal, remote, command, commandYield(envReq.Payload), purpose, scope, commandDigest)
+}
+
+// commandConfirmationData keeps confirmation_token first in the serialized
+// JSON payload so truncated host previews cannot hide it.
+type commandConfirmationData struct {
+	ConfirmationToken    string `json:"confirmation_token"`
+	Command              string `json:"command"`
+	Purpose              string `json:"purpose"`
+	Scope                string `json:"scope"`
+	CommandDigest        string `json:"command_digest"`
+	ConfirmationRequired bool   `json:"confirmation_required"`
+	ConfirmationMessage  string `json:"confirmation_message"`
 }
 
 func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Request, principal auth.Principal, remote remotesession.Session, command string, yield time.Duration, purpose, scope, commandDigest string) (*mcp.CallToolResult, error) {
@@ -238,7 +265,7 @@ func (r *Runtime) hasPendingCommandConfirmation(remoteSessionID, principalID, co
 		return false
 	}
 	for _, pending := range r.approvals.ListRemoteSession(remoteSessionID) {
-		if pending.Tool == "command_execute" && pending.PrincipalID == principalID && pending.Command == command && pending.Purpose == purpose && pending.Scope == scope && pending.ConfirmationToken == confirmationToken {
+		if pending.Tool == "command_execute" && pending.PrincipalID == principalID && pending.Command == command && pending.Scope == scope && pending.ConfirmationToken == confirmationToken {
 			return true
 		}
 	}
@@ -247,11 +274,21 @@ func (r *Runtime) hasPendingCommandConfirmation(remoteSessionID, principalID, co
 
 func (r *Runtime) consumePendingCommandConfirmation(remoteSessionID, principalID, command, purpose, scope, confirmationToken string) {
 	for _, pending := range r.approvals.ListRemoteSession(remoteSessionID) {
-		if pending.Tool == "command_execute" && pending.PrincipalID == principalID && pending.Command == command && pending.Purpose == purpose && pending.Scope == scope && pending.ConfirmationToken == confirmationToken {
+		if pending.Tool == "command_execute" && pending.PrincipalID == principalID && pending.Command == command && pending.Scope == scope && pending.ConfirmationToken == confirmationToken {
 			_, _ = r.approvals.Consume(pending.ID)
 			return
 		}
 	}
+}
+
+// containsUnsafeShellFeature mirrors the security matcher's rejection reason
+// so the model-facing error can explain why a compound verification command
+// was denied instead of leaving the model to guess.
+func containsUnsafeShellFeature(command string) bool {
+	withoutAnd := strings.ReplaceAll(command, "&&", "")
+	return strings.ContainsAny(command, "|<>`\n") ||
+		strings.Contains(command, "$(") ||
+		strings.Contains(withoutAnd, "&")
 }
 
 func (r *Runtime) toolTaskManage(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

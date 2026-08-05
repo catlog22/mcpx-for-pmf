@@ -248,6 +248,27 @@ func changeSummaryDTO(item changeset.Changeset) map[string]any {
 		"files": files, "diff": diff, "created_at": item.CreatedAt,
 		"source_changeset_id": item.SourceChangesetID,
 	}
+	if strings.TrimSpace(item.Digest) != "" {
+		dto["expected_digest"] = item.Digest
+		if item.Status == "draft" {
+			nextTool := "change_apply"
+			nextArguments := map[string]any{
+				"remote_session_id": item.RemoteSessionID,
+				"changeset_id":      item.ID,
+				"expected_digest":   item.Digest,
+			}
+			nextReason := "应用此 Changeset 时必须原样复制 digest 到 expected_digest；不要使用 diff 统计、快照 ID 或空值。"
+			if item.SourceChangesetID != "" {
+				nextTool = "change_revert"
+				nextReason = "回滚操作必须继续使用源 Changeset ID；digest 只用于识别当前变更，不要把生成的回滚草稿 ID 当作源 ID。"
+				nextArguments = map[string]any{
+					"remote_session_id": item.RemoteSessionID,
+					"changeset_id":      item.SourceChangesetID,
+				}
+			}
+			dto["next_action"] = nextActionWithReason(nextTool, nextReason, nextArguments)
+		}
+	}
 	if deleteSummary := deleteSummaryDTO(item.Files); deleteSummary != nil {
 		dto["delete_summary"] = deleteSummary
 	}
@@ -345,9 +366,15 @@ func changeDiffResult(item changeset.Changeset) *mcp.CallToolResult {
 }
 
 func changeDiffResultFromDTO(item changeset.Changeset, dto map[string]any) *mcp.CallToolResult {
+	if applied, _ := dto["applied"].(bool); applied {
+		delete(dto, "next_action")
+	}
 	diffMeta, _ := dto["diff"].(map[string]any)
 	mode, _ := diffMeta["mode"].(string)
 	fallback := fmt.Sprintf("Changeset %s digest=%s files=%d diff_mode=%s", item.ID, item.Digest, len(item.Files), mode)
+	if expectedDigest, _ := dto["expected_digest"].(string); expectedDigest != "" {
+		fallback += fmt.Sprintf("\n\nexpected_digest 必须原样复制为：%s（不要使用 diff 统计、快照 ID 或空值）", expectedDigest)
+	}
 	if summary := deleteSummaryDisplay(dto); summary != "" {
 		fallback += " · " + summary
 	}
@@ -461,6 +488,22 @@ func (r *Runtime) changeError(envReq envelope.Request, remoteSessionID, workspac
 	case strings.Contains(message, "new_path required"):
 		code = "MISSING_ARGUMENT"
 	}
+	patchGuidance := "先用 source_read(view=full) 获取当前内容、sha256 和 line_ending；重新生成补丁时必须保留目标文件原有换行格式，不要让换行格式差异把局部修改扩大为整文件换行变更。为保持最小 diff，使用带当前 base_sha256 的 replace_exact/insert_before/insert_after，并按当前换行格式组织 match 和 replacement；只有生成并核对局部 hunk 后才使用 update.patch。"
+	patchFormatGuidance := ""
+	if code == "PATCH_HUNKS_OVERLAP" && strings.Contains(message, "expected Unified Diff hunk header") {
+		patchFormatGuidance = "patch 必须是标准 unified diff：以 --- a/<path> 和 @@ -起始行,行数 +起始行,行数 @@ 开头；不接受 apply_patch 的 *** Begin Patch / *** Update File 格式。若难以生成局部 hunk，改用 replace_exact/insert_before/insert_after。"
+		message += "；" + patchFormatGuidance
+	}
+	if code == "PATCH_HUNKS_OVERLAP" && strings.Contains(message, "hunk line counts do not match its header") {
+		patchFormatGuidance = "patch hunk 头的行数（@@ -起始,旧行数 +起始,新行数 @@）必须与实际 -/+ 行数一致；请逐行核对 hunk 或改用 replace_exact/insert_before/insert_after。"
+		message += "；" + patchFormatGuidance
+	}
+	if code == "STALE_REVISION" {
+		message += "；patch 上下文与实际文件不一致（通常来自旧版本或生成错误）。仅需重试失败的这个文件操作，其他文件操作可保持 base_sha256 不变；先 source_read(view=full) 获取当前内容，按实际行内容重新生成 hunk，或改用 replace_exact/insert_before/insert_after。"
+	}
+	if code == "PATCH_HUNKS_OVERLAP" || code == "STALE_REVISION" {
+		message += "；" + patchGuidance
+	}
 	response := envelope.Fail(envelope.StatusError, envReq.RequestID, workspace, nil, code, message)
 	response.RemoteSessionID = remoteSessionID
 	if code == "STALE_REVISION" || code == "PATCH_CONFLICT" || code == "PATCH_CONTEXT_NOT_FOUND" || code == "PATCH_CONTEXT_AMBIGUOUS" || code == "PATCH_HUNKS_OVERLAP" {
@@ -489,6 +532,17 @@ func (r *Runtime) changeError(envReq envelope.Request, remoteSessionID, workspac
 			"remote_session_id": remoteSessionID,
 			"action":            "prepare",
 		})
+	}
+	if code == "PATCH_HUNKS_OVERLAP" || code == "STALE_REVISION" {
+		if response.Error != nil {
+			if response.Error.Details == nil {
+				response.Error.Details = map[string]any{}
+			}
+			response.Error.Details["patch_guidance"] = patchGuidance
+			if patchFormatGuidance != "" {
+				response.Error.Details["patch_format_guidance"] = patchFormatGuidance
+			}
+		}
 	}
 	if code == "DELETE_CREATE_CONFLICT" {
 		addRecoveryActions(&response,

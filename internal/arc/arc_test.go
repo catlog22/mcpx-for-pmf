@@ -194,11 +194,15 @@ func TestWrapToolResultUsesHumanContentAndHidesARCJSONFromHost(t *testing.T) {
 }
 
 func TestWrapToolResultMapsSemanticConfirmationWithoutApprovalAction(t *testing.T) {
-	raw := mcp.NewToolResultText(`{"ok":false,"status":"need_confirmation","data":{"confirmation_required":true,"confirmation_message":"请确认后重试","command":"go test ./...","purpose":"运行测试"},"error":{"code":"USER_CONFIRMATION_REQUIRED","message":"命令执行等待用户语义确认"}}`)
+	raw := mcp.NewToolResultText(`{"ok":false,"status":"need_confirmation","data":{"confirmation_required":true,"confirmation_message":"请确认后重试","command":"go test ./...","purpose":"运行测试","confirmation_token":"ct_full_token_1234567890abcdef"},"error":{"code":"USER_CONFIRMATION_REQUIRED","message":"命令执行等待用户语义确认"}}`)
 	wrapped := WrapToolResult("command_execute", ResultContext{
 		RequestID: "req_confirmation", TraceID: "tr_confirmation", SpanID: "sp_confirmation",
 		Timing: Timing{ServerElapsedMs: 4},
 	}, raw)
+	text := wrapped.Content[0].(mcp.TextContent).Text
+	if !strings.Contains(text, "confirmation_token: `ct_full_token_1234567890abcdef`") {
+		t.Fatalf("confirmation display must carry the token in text: %s", text)
+	}
 	result := decodeEnvelope(t, wrapped)["mcpx"].(map[string]any)["result"].(map[string]any)
 	if result["type"] != "error" || result["schema"] != SchemaError {
 		t.Fatalf("result = %+v", result)
@@ -225,6 +229,34 @@ func TestWrapToolResultRendersSemanticConfirmationCodeChangeDiff(t *testing.T) {
 	for _, want := range []string{"需要确认后才能应用", "```diff", "-const Value = 1", "+const Value = 2"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("confirmation diff missing %q: %s", want, text)
+		}
+	}
+}
+
+func TestWrapToolResultShowsChangeConfirmationToken(t *testing.T) {
+	raw := mcp.NewToolResultText(`{"status":"waiting_confirmation","data":{"changeset_id":"chg_token","expected_digest":"sha256:abc123","confirmation_required":true,"confirmation_token":"ct_change_token","files":[{"path":"a.txt","operation":"update","diff":"--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n"}]},"error":{"code":"USER_CONFIRMATION_REQUIRED","message":"文件变更等待用户语义确认"}}`)
+	wrapped := WrapToolResult("change_apply", ResultContext{
+		RequestID: "req_change_token", TraceID: "tr_change_token", SpanID: "sp_change_token",
+		Timing: Timing{ServerElapsedMs: 4},
+	}, raw)
+	text := wrapped.Content[0].(mcp.TextContent).Text
+	for _, want := range []string{"`confirmation_token`: `ct_change_token`", "同一 changeset_id、expected_digest 和上述 confirmation_token"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("change confirmation display missing %q: %s", want, text)
+		}
+	}
+}
+
+func TestWrapToolResultShowsOperationConfirmationToken(t *testing.T) {
+	raw := mcp.NewToolResultText(`{"status":"waiting_confirmation","data":{"operation_id":"op_wait","steps":[{"id":"main","tool":"command_run","state":"waiting_confirmation","confirmation_token":"ct_op_token"}],"confirmation_required":true},"error":{"code":"USER_CONFIRMATION_REQUIRED","message":"操作等待语义确认"}}`)
+	wrapped := WrapToolResult("operation_manage", ResultContext{
+		RequestID: "req_op_wait", TraceID: "tr_op_wait", SpanID: "sp_op_wait",
+		Timing: Timing{ServerElapsedMs: 4},
+	}, raw)
+	text := wrapped.Content[0].(mcp.TextContent).Text
+	for _, want := range []string{"op_wait", "confirmation_token: `ct_op_token`", "action=resume"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("operation confirmation display missing %q: %s", want, text)
 		}
 	}
 }
@@ -266,6 +298,18 @@ func TestOutputSchemaAndRegistry(t *testing.T) {
 		}
 		if item["$id"] != name {
 			t.Fatalf("schema %s id = %v", name, item["$id"])
+		}
+	}
+	var codeChangeSchema map[string]any
+	if err := json.Unmarshal(registry[SchemaCodeChange], &codeChangeSchema); err != nil {
+		t.Fatal(err)
+	}
+	codeChangeProperties, _ := codeChangeSchema["properties"].(map[string]any)
+	dataSchema, _ := codeChangeProperties["data"].(map[string]any)
+	codeChangeProperties, _ = dataSchema["properties"].(map[string]any)
+	for _, field := range []string{"digest", "expected_digest"} {
+		if codeChangeProperties[field] == nil {
+			t.Fatalf("code change schema missing %s: %+v", field, codeChangeSchema)
 		}
 	}
 	registry[SchemaText][0] = 'x'

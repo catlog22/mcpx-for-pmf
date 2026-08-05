@@ -32,15 +32,17 @@ const (
 type Request struct {
 	// RequestID and StartedAtMs are populated by the Gateway Runtime Context,
 	// never by MCP tool arguments.
-	RequestID       string         `json:"-"`
-	OperationID     string         `json:"-"`
-	Purpose         string         `json:"purpose,omitempty"`
-	Intent          string         `json:"intent,omitempty"`
-	ProgressSummary string         `json:"progress_summary,omitempty"`
-	RemoteSessionID string         `json:"remote_session_id,omitempty"`
-	Workspace       string         `json:"workspace,omitempty"`
-	StartedAtMs     int64          `json:"-"`
-	Payload         map[string]any `json:"payload"`
+	RequestID         string         `json:"-"`
+	OperationID       string         `json:"-"`
+	ParentOperationID string         `json:"-"`
+	StepID            string         `json:"-"`
+	Purpose           string         `json:"purpose,omitempty"`
+	Intent            string         `json:"intent,omitempty"`
+	ProgressSummary   string         `json:"progress_summary,omitempty"`
+	RemoteSessionID   string         `json:"remote_session_id,omitempty"`
+	Workspace         string         `json:"workspace,omitempty"`
+	StartedAtMs       int64          `json:"-"`
+	Payload           map[string]any `json:"payload"`
 }
 
 // ErrorBody is the machine-readable error contract returned by every failed
@@ -310,7 +312,7 @@ func ParseRequest(raw json.RawMessage) (Request, error) {
 		}
 	}
 	for key, value := range flat {
-		if key == "purpose" || key == "intent" || key == "progress_summary" || key == "session_id" || key == "remote_session_id" || key == "workspace" || key == "payload" || isRuntimeField(key) {
+		if key == "purpose" || key == "intent" || key == "progress_summary" || key == "session_id" || key == "remote_session_id" || key == "workspace" || key == "payload" || key == "execution_mode" || isRuntimeField(key) {
 			continue
 		}
 		if _, exists := req.Payload[key]; !exists {
@@ -325,7 +327,7 @@ func ParseRequest(raw json.RawMessage) (Request, error) {
 
 func isRuntimeField(key string) bool {
 	switch key {
-	case "request_id", "trace_id", "span_id", "started_at_ms", "received_at_ms", "completed_at_ms", "network_latency_ms", "processing_ms", "server_elapsed_ms", "client_info":
+	case "request_id", "trace_id", "span_id", "started_at_ms", "received_at_ms", "completed_at_ms", "network_latency_ms", "processing_ms", "server_elapsed_ms", "client_info", "execution_mode":
 		return true
 	default:
 		return false

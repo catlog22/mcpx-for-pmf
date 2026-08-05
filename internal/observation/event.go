@@ -15,12 +15,16 @@ const (
 )
 
 const (
-	TypeToolStarted      = "tool.started"
-	TypeToolCompleted    = "tool.completed"
-	TypeCommandOutput    = "command.output"
-	TypeFileChanged      = "file.changed"
-	TypeSessionLifecycle = "session.lifecycle"
-	TypeObserverNotice   = "observer.notice"
+	TypeToolStarted            = "tool.started"
+	TypeToolCompleted          = "tool.completed"
+	TypeCommandOutput          = "command.output"
+	TypeFileChanged            = "file.changed"
+	TypeSessionLifecycle       = "session.lifecycle"
+	TypeObserverNotice         = "observer.notice"
+	TypeOperationStarted       = "operation.started"
+	TypeOperationStepStarted   = "operation.step.started"
+	TypeOperationStepCompleted = "operation.step.completed"
+	TypeOperationCompleted     = "operation.completed"
 )
 
 // Event is the durable, sanitized timeline item consumed by workspace observers.
@@ -33,6 +37,7 @@ type Event struct {
 	RequestID         string          `json:"request_id,omitempty"`
 	OperationID       string          `json:"operation_id,omitempty"`
 	ParentOperationID string          `json:"parent_operation_id,omitempty"`
+	StepID            string          `json:"step_id,omitempty"`
 	Tool              string          `json:"tool,omitempty"`
 	Type              string          `json:"type"`
 	Status            string          `json:"status,omitempty"`

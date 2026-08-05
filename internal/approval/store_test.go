@@ -99,6 +99,14 @@ func TestPutDeduplicatesPendingContent(t *testing.T) {
 	if id1 != id2 {
 		t.Fatalf("same pending content must reuse approval_id: %s != %s", id1, id2)
 	}
+	// 相同命令不同 purpose 仍复用：模型重试时可能改述 purpose
+	idRephrased, err := s.Put(Pending{Tool: "command_execute", Command: "git status", Purpose: "rephrased intent", Scope: "workspace", RemoteSessionID: "rs1", PrincipalID: "p1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idRephrased != id1 {
+		t.Fatalf("same command with rephrased purpose must reuse approval_id: %s != %s", idRephrased, id1)
+	}
 	// 不同命令不聚合
 	id3, err := s.Put(Pending{Tool: "command_execute", Command: "git diff", Purpose: "inspect", Scope: "workspace", RemoteSessionID: "rs1", PrincipalID: "p1"})
 	if err != nil {

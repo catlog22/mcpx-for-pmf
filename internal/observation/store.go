@@ -61,13 +61,13 @@ func (s *Store) Append(ctx context.Context, event Event) (Event, error) {
 	}
 	result, err := s.db.ExecContext(ctx, `INSERT INTO observation_events
         (workspace_name, remote_session_id, request_id, operation_id, tool_name, event_type,
-		 intent, progress_summary, input_json, output_json, summary, status, purpose, parent_operation_id,
+		 intent, progress_summary, input_json, output_json, summary, status, purpose, parent_operation_id, step_id,
 		 command, working_directory, exit_code, duration_ms, skill_name, mcp_server, mcp_tool, path,
 		 resource_uri, stream, stream_offset, truncated, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.Workspace, event.RemoteSessionID, event.RequestID, event.OperationID, event.Tool,
 		event.Type, event.Intent, event.ProgressSummary, string(event.Input), string(event.Output), event.Summary,
-		event.Status, event.Purpose, event.ParentOperationID, event.Command, event.WorkingDirectory, exitCode,
+		event.Status, event.Purpose, event.ParentOperationID, event.StepID, event.Command, event.WorkingDirectory, exitCode,
 		event.DurationMs, event.SkillName, event.MCPServer, event.MCPTool, event.Path,
 		event.ResourceURI, event.Stream, event.Offset, boolInt(event.Truncated), event.CreatedAt.UnixMilli())
 	if err != nil {
@@ -95,7 +95,7 @@ func (s *Store) List(ctx context.Context, workspace string, afterSequence int64,
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT sequence, workspace_name,
         remote_session_id, request_id, operation_id, tool_name, event_type,
-        intent, progress_summary, input_json, output_json, summary, status, purpose, parent_operation_id,
+		intent, progress_summary, input_json, output_json, summary, status, purpose, parent_operation_id, step_id,
         command, working_directory, exit_code, duration_ms, skill_name, mcp_server, mcp_tool, path,
         resource_uri, stream, stream_offset, truncated, created_at
         FROM observation_events
@@ -126,7 +126,7 @@ func (s *Store) History(ctx context.Context, workspace string, afterSequence int
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT sequence, workspace_name,
         remote_session_id, request_id, operation_id, tool_name, event_type,
-        intent, progress_summary, input_json, output_json, summary, status, purpose, parent_operation_id,
+		intent, progress_summary, input_json, output_json, summary, status, purpose, parent_operation_id, step_id,
         command, working_directory, exit_code, duration_ms, skill_name, mcp_server, mcp_tool, path,
         resource_uri, stream, stream_offset, truncated, created_at
         FROM observation_events
@@ -156,7 +156,7 @@ func scanEvents(rows *sql.Rows, capacity int) ([]Event, error) {
 		var createdAt int64
 		if err := rows.Scan(&event.Sequence, &event.Workspace, &event.RemoteSessionID,
 			&event.RequestID, &event.OperationID, &event.Tool, &event.Type, &event.Intent,
-			&event.ProgressSummary, &input, &output, &event.Summary, &event.Status, &event.Purpose, &event.ParentOperationID,
+			&event.ProgressSummary, &input, &output, &event.Summary, &event.Status, &event.Purpose, &event.ParentOperationID, &event.StepID,
 			&event.Command, &event.WorkingDirectory, &exitCode, &event.DurationMs, &event.SkillName, &event.MCPServer, &event.MCPTool, &event.Path,
 			&event.ResourceURI, &event.Stream, &event.Offset, &truncated, &createdAt); err != nil {
 			return nil, err

@@ -88,6 +88,49 @@ func TestPrepareApplyHistoryAndRevert(t *testing.T) {
 	}
 }
 
+func TestPrepareAppliesChainedExactEditsForSamePath(t *testing.T) {
+	workspace, store, remoteID, principal := newChangesetFixture(t, nil)
+	original := []byte("one\ntwo\nthree\n")
+	if err := os.WriteFile(filepath.Join(workspace, "multi.txt"), original, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store.DB())
+	base := hashBytes(original)
+	prepared, err := service.Prepare(context.Background(), remoteID, principal.ID, workspace, "chained exact edits", []Operation{
+		{Operation: "replace_exact", Path: "multi.txt", BaseSHA256: base, Match: "one", Content: "ONE"},
+		{Operation: "replace_exact", Path: "multi.txt", BaseSHA256: base, Match: "three", Content: "THREE"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prepared.Files) != 2 {
+		t.Fatalf("chained files=%d want 2", len(prepared.Files))
+	}
+	if got, want := string(prepared.Files[0].Proposed), "ONE\ntwo\nthree\n"; got != want {
+		t.Fatalf("first edit proposed=%q want %q", got, want)
+	}
+	if got := string(prepared.Files[1].Original); got != string(prepared.Files[0].Proposed) {
+		t.Fatalf("second edit must chain from first proposed: %q", got)
+	}
+	if got, want := string(prepared.Files[1].Proposed), "ONE\ntwo\nTHREE\n"; got != want {
+		t.Fatalf("second edit proposed=%q want %q", got, want)
+	}
+	applied, err := service.Apply(context.Background(), prepared.ID, workspace)
+	if err != nil || applied.Status != "applied" {
+		t.Fatalf("apply chained edits: %+v err=%v", applied, err)
+	}
+	assertFile(t, filepath.Join(workspace, "multi.txt"), "ONE\ntwo\nTHREE\n")
+
+	revert, err := service.PrepareRevert(context.Background(), prepared.ID, principal.ID, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Apply(context.Background(), revert.ID, workspace); err != nil {
+		t.Fatal(err)
+	}
+	assertFile(t, filepath.Join(workspace, "multi.txt"), string(original))
+}
+
 func TestApplyCreatesNestedParentDirectories(t *testing.T) {
 	workspace, store, remoteID, principal := newChangesetFixture(t, nil)
 	service := NewService(store.DB())
@@ -267,7 +310,7 @@ func TestPrepareRejectsPatchWithStaleContext(t *testing.T) {
 	_, err := prepareOperation(workspace, 0, Operation{
 		Operation: "update", Path: "value.txt", BaseSHA256: hashBytes([]byte(original)),
 		Patch: "@@ -1,2 +1,2 @@\n one\n-missing\n+three\n",
-	})
+	}, nil)
 	if !errors.Is(err, ErrStaleRevision) {
 		t.Fatalf("expected stale patch context, got %v", err)
 	}
@@ -282,7 +325,7 @@ func TestPreparePatchPreservesUTF8BOMAndCRLF(t *testing.T) {
 	prepared, err := prepareOperation(workspace, 0, Operation{
 		Operation: "update", Path: "demo.go", BaseSHA256: hashBytes([]byte(original)),
 		Patch: "@@ -1,3 +1,3 @@\n \ufeffpackage demo\n \n-const Value = 1\n+const Value = 2\n",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +343,7 @@ func TestPrepareRangeEditPreservesCRLF(t *testing.T) {
 	}
 	prepared, err := prepareOperation(workspace, 0, Operation{
 		Operation: "replace_range", Path: "value.txt", BaseSHA256: hashBytes([]byte(original)), RangeStart: 1, RangeEnd: 2, Content: "TWO\n",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +364,7 @@ func TestPrepareUpdateNormalizesCRLFContent(t *testing.T) {
 	prepared, err := prepareOperation(workspace, 0, Operation{
 		Operation: "update", Path: "crlf.txt", ExpectedSHA256: hashBytes([]byte(original)),
 		Content: "line one\nline TWO\nline three\n",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +383,7 @@ func TestPrepareUpdateNormalizesMixedContentToLF(t *testing.T) {
 	prepared, err := prepareOperation(workspace, 0, Operation{
 		Operation: "update", Path: "lf.txt", ExpectedSHA256: hashBytes([]byte(original)),
 		Content: "line one\r\nline TWO\r\nline three\r\n",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +412,7 @@ func TestExactEditMatchesCRLFFileWithLFArguments(t *testing.T) {
 		{name: "replace_exact_multiline", op: Operation{Operation: "replace_exact", Path: "crlf.txt", BaseSHA256: hash, Match: "one\r\ntwo", Content: "ONE\r\nTWO"}, want: "ONE\r\nTWO\r\nthree\r\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			prepared, err := prepareOperation(workspace, 0, tc.op)
+			prepared, err := prepareOperation(workspace, 0, tc.op, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

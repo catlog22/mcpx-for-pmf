@@ -351,6 +351,48 @@ var migrations = []string{
 	ALTER TABLE observation_events ADD COLUMN path TEXT NOT NULL DEFAULT '';
 	CREATE INDEX IF NOT EXISTS idx_observation_events_history_filters
 		ON observation_events(workspace_name, remote_session_id, created_at, sequence);`,
+	`CREATE TABLE IF NOT EXISTS operations (
+		id TEXT PRIMARY KEY,
+		remote_session_id TEXT NOT NULL,
+		workspace_name TEXT NOT NULL,
+		request_id TEXT NOT NULL,
+		purpose TEXT NOT NULL DEFAULT '',
+		state TEXT NOT NULL CHECK (state IN ('queued','running','succeeded','failed','waiting_confirmation','interrupted','cancelled')),
+		result_json TEXT NOT NULL DEFAULT '{}',
+		error_json TEXT NOT NULL DEFAULT '{}',
+		created_at INTEGER NOT NULL,
+		started_at INTEGER,
+		completed_at INTEGER,
+		expires_at INTEGER NOT NULL,
+		FOREIGN KEY (remote_session_id) REFERENCES remote_sessions(id) ON DELETE CASCADE
+	);
+	CREATE TABLE IF NOT EXISTS operation_steps (
+		operation_id TEXT NOT NULL,
+		step_id TEXT NOT NULL,
+		tool_name TEXT NOT NULL,
+		arguments_json TEXT NOT NULL DEFAULT '{}',
+		depends_on_json TEXT NOT NULL DEFAULT '[]',
+		exclusive INTEGER NOT NULL DEFAULT 1,
+		state TEXT NOT NULL CHECK (state IN ('queued','running','succeeded','failed','waiting_confirmation','interrupted','cancelled','skipped')),
+		request_id TEXT NOT NULL,
+		result_json TEXT NOT NULL DEFAULT '{}',
+		error_json TEXT NOT NULL DEFAULT '{}',
+		confirmation_token TEXT NOT NULL DEFAULT '',
+		created_at INTEGER NOT NULL,
+		started_at INTEGER,
+		completed_at INTEGER,
+		PRIMARY KEY (operation_id, step_id),
+		FOREIGN KEY (operation_id) REFERENCES operations(id) ON DELETE CASCADE
+	);
+	CREATE INDEX IF NOT EXISTS idx_operations_session_created
+		ON operations(remote_session_id, created_at DESC, id DESC);
+	CREATE INDEX IF NOT EXISTS idx_operations_state
+		ON operations(state, created_at);
+	CREATE INDEX IF NOT EXISTS idx_operation_steps_state
+		ON operation_steps(operation_id, state, step_id);
+	CREATE INDEX IF NOT EXISTS idx_operations_retention
+		ON operations(state, expires_at, remote_session_id);`,
+	`ALTER TABLE observation_events ADD COLUMN step_id TEXT NOT NULL DEFAULT '';`,
 }
 
 func applyMigrations(ctx context.Context, db *sql.DB) error {

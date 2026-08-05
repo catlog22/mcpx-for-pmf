@@ -30,6 +30,25 @@ func TestRenderContentRendersCodeChangeDiff(t *testing.T) {
 	}
 }
 
+func TestRenderContentShowsExactChangesetDigest(t *testing.T) {
+	digest := "sha256:03d976c30cf6cd96e3f593d974f64afe6b89a181e43287573e2d168a55c30e3f"
+	text, ok := RenderContent("code_change", "diff", "summary", map[string]any{
+		"changeset_id":    "chg_digest",
+		"status":          "draft",
+		"digest":          digest,
+		"expected_digest": digest,
+		"diff":            map[string]any{"mode": "inline"},
+	})
+	if !ok {
+		t.Fatal("code_change diff renderer must produce a dedicated view")
+	}
+	for _, want := range []string{digest, "expected_digest", "必须原样复制"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("rendered Changeset text missing %q: %s", want, text)
+		}
+	}
+}
+
 func TestRenderContentFallsBackForNonCodeChange(t *testing.T) {
 	text, ok := RenderContent("search_result", "table", "search summary", map[string]any{"files": []any{}})
 	if ok || text != "search summary" {
