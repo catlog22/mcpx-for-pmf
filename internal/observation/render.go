@@ -18,7 +18,7 @@ func RenderText(w io.Writer, event Event, color bool) error {
 	if color {
 		mode = ColorModeANSI16
 	}
-	return renderTextWithOptions(w, event, renderOptions{colorMode: mode}, false)
+	return renderTextWithOptions(w, event, renderOptions{colorMode: mode, diffMode: DiffModeFull}, false)
 }
 
 func renderText(w io.Writer, event Event, color, suppressCommandOutput bool) error {
@@ -26,12 +26,17 @@ func renderText(w io.Writer, event Event, color, suppressCommandOutput bool) err
 	if color {
 		mode = ColorModeANSI16
 	}
-	return renderTextWithOptions(w, event, renderOptions{colorMode: mode}, suppressCommandOutput)
+	return renderTextWithOptions(w, event, renderOptions{colorMode: mode, diffMode: DiffModeFull}, suppressCommandOutput)
 }
 
 type renderOptions struct {
-	colorMode     ColorMode
-	terminalWidth int
+	colorMode            ColorMode
+	terminalWidth        int
+	detail               bool
+	diffMode             DiffMode
+	diffCache            *diffDocumentCache
+	suppressOutputAction bool
+	outputLineStart      int
 }
 
 func renderTextWithOptions(w io.Writer, event Event, options renderOptions, suppressCommandOutput bool) error {
@@ -69,7 +74,7 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 	var payload map[string]any
 	_ = json.Unmarshal(event.Output, &payload)
 	verb, label := toolAction(event.Tool, event.Input)
-	if event.Tool == "file_read" && label == "files" {
+	if (event.Tool == "file_read" || (event.Tool == "source_read" && publicView(event.Input) == "file")) && label == "files" {
 		if result, ok := payload["result"].(map[string]any); ok {
 			if outputLabel := fileReadResultLabel(result); outputLabel != "" {
 				label = outputLabel
@@ -78,11 +83,14 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 	}
 	status, _ := payload["status"].(string)
 	failed, failureMessage := toolFailure(payload)
-	if err := writeAction(w, verb, label, actionColor(event.Tool, failed), options.colorMode != ColorModeNone); err != nil {
+	if err := writeEventAction(w, event, verb, label, actionColor(event.Tool, failed), options.colorMode != ColorModeNone); err != nil {
 		return err
 	}
 
-	details := make([]string, 0, 2)
+	details := make([]string, 0, 3)
+	if facts := eventFactLine(event, options.detail); facts != "" {
+		details = append(details, facts)
+	}
 	if failed {
 		if failureMessage == "" {
 			failureMessage = errorSummary(payload)
@@ -91,23 +99,23 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 			details = append(details, "failed: "+compactLine(message))
 		}
 	} else {
-		if event.ProgressSummary != "" {
+		if event.ProgressSummary != "" && len(details) < 3 {
 			details = append(details, compactLine(event.ProgressSummary))
 		}
-		if result, ok := payload["result"].(map[string]any); ok && len(details) < 2 {
+		if result, ok := payload["result"].(map[string]any); ok && len(details) < 3 {
 			if output := humanToolOutput(event.Tool, result); output != "" {
-				if suppressCommandOutput && event.Tool == "command_execute" {
+				if suppressCommandOutput && (event.Tool == "command_execute" || event.Tool == "command_run") {
 					output = commandCompletionSummary(output)
 				}
 				details = append(details, output)
 			}
 		}
 	}
-	if len(details) == 0 && status != "" && status != "ok" {
+	if len(details) == 0 && status != "" && status != "succeeded" {
 		details = append(details, strings.ReplaceAll(status, "_", " "))
 	}
-	if len(details) > 2 {
-		details = details[:2]
+	if len(details) > 3 {
+		details = details[:3]
 	}
 	return writeChildren(w, details, options.colorMode != ColorModeNone)
 }
@@ -123,11 +131,23 @@ func renderCommandOutput(w io.Writer, event Event, options renderOptions) error 
 	if stream == "" {
 		stream = "output"
 	}
-	if err := writeAction(w, "Read", stream, actionColor(event.Tool, false), options.colorMode != ColorModeNone); err != nil {
-		return err
+	if !options.suppressOutputAction {
+		if err := writeEventAction(w, event, "Read", stream, commandStreamColor(event.Stream), options.colorMode != ColorModeNone); err != nil {
+			return err
+		}
 	}
-	lines := summaryLines(text, 2)
-	return writeChildren(w, lines, options.colorMode != ColorModeNone)
+	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	for i, line := range lines {
+		lineNumber := options.outputLineStart + i
+		if lineNumber <= 0 {
+			lineNumber = i + 1
+		}
+		prefixed := fmt.Sprintf("%3d | %s", lineNumber, line)
+		if err := writeCodeChild(w, prefixed, options, options.terminalWidth-8); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
@@ -136,11 +156,14 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 			Display string `json:"display"`
 		} `json:"delete_summary"`
 		Files []struct {
-			Path          string `json:"path"`
-			NewPath       string `json:"new_path"`
-			Operation     string `json:"operation"`
-			Diff          string `json:"diff"`
-			DiffTruncated bool   `json:"diff_truncated"`
+			Path            string         `json:"path"`
+			NewPath         string         `json:"new_path"`
+			Operation       string         `json:"operation"`
+			Diff            string         `json:"diff"`
+			DiffTruncated   bool           `json:"diff_truncated"`
+			OriginalFormat  fileFormatView `json:"original_format"`
+			ProposedFormat  fileFormatView `json:"proposed_format"`
+			FormatPreserved bool           `json:"format_preserved"`
 		} `json:"files"`
 	}
 	if err := json.Unmarshal(event.Output, &payload); err != nil || len(payload.Files) == 0 {
@@ -148,7 +171,7 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 		if label == "" {
 			label = "files"
 		}
-		if err := writeAction(w, "Edited", label, ansiGreen, options.colorMode != ColorModeNone); err != nil {
+		if err := writeEventAction(w, event, "Edited", label, ansiGreen, options.colorMode != ColorModeNone); err != nil {
 			return err
 		}
 		return writeChildren(w, []string{"file details unavailable"}, options.colorMode != ColorModeNone)
@@ -157,7 +180,7 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 	if len(payload.Files) == 1 {
 		label = payload.Files[0].Path
 	}
-	if err := writeAction(w, "Edited", label, actionColor(event.toolOrType(), false), options.colorMode != ColorModeNone); err != nil {
+	if err := writeEventAction(w, event, "Edited", label, actionColor(event.toolOrType(), false), options.colorMode != ColorModeNone); err != nil {
 		return err
 	}
 	if payload.DeleteSummary != nil && strings.TrimSpace(payload.DeleteSummary.Display) != "" {
@@ -176,7 +199,8 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 		if path == "" {
 			path = "unknown file"
 		}
-		stats := diffStats(file.Diff)
+		document := options.diffCache.get(file.Diff)
+		stats := document.stats()
 		line := path
 		if file.Operation != "" {
 			line += " (" + file.Operation + ")"
@@ -184,19 +208,23 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 		if stats != "" {
 			line += " " + stats
 		}
+		if format := fileFormatSummary(file); format != "" {
+			line += " [" + format + "]"
+		}
 		if err := writeChild(w, line, options.colorMode != ColorModeNone); err != nil {
 			return err
 		}
-		if file.Diff != "" {
-			preview, truncated := diffPreview(file.Diff, maxFileDiffLines)
-			for _, line := range preview {
-				codeWidth := options.terminalWidth - 2 - 4
-				if err := writeCodeChild(w, line, options, codeWidth); err != nil {
-					return err
-				}
+		if file.Diff != "" && options.diffMode != DiffModeSummary {
+			limit := 0
+			if options.diffMode == DiffModePreview {
+				limit = defaultDiffPreviewLines
+			}
+			truncated, err := renderDiffDocument(w, document, options, limit)
+			if err != nil {
+				return err
 			}
 			if truncated || file.DiffTruncated {
-				if err := writeChild(w, "...", options.colorMode != ColorModeNone); err != nil {
+				if err := writeChild(w, "diff preview truncated; use -diff full for complete output", options.colorMode != ColorModeNone); err != nil {
 					return err
 				}
 			}
@@ -210,18 +238,79 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 	return nil
 }
 
+func fileFormatSummary(file struct {
+	Path            string         `json:"path"`
+	NewPath         string         `json:"new_path"`
+	Operation       string         `json:"operation"`
+	Diff            string         `json:"diff"`
+	DiffTruncated   bool           `json:"diff_truncated"`
+	OriginalFormat  fileFormatView `json:"original_format"`
+	ProposedFormat  fileFormatView `json:"proposed_format"`
+	FormatPreserved bool           `json:"format_preserved"`
+}) string {
+	original := formatViewSummary(file.OriginalFormat)
+	proposed := formatViewSummary(file.ProposedFormat)
+	if original == "" {
+		return proposed
+	}
+	if proposed == "" || original == proposed {
+		return original
+	}
+	return original + " -> " + proposed
+}
+
+func formatViewSummary(format fileFormatView) string {
+	parts := make([]string, 0, 3)
+	if value := strings.TrimSpace(format.Charset); value != "" {
+		parts = append(parts, value)
+	}
+	if value := strings.TrimSpace(format.BOM); value != "" && value != "none" {
+		parts = append(parts, "BOM "+value)
+	}
+	if value := strings.TrimSpace(format.LineEnding); value != "" && value != "none" {
+		parts = append(parts, value)
+	}
+	if format.FinalNewline != nil {
+		if *format.FinalNewline {
+			parts = append(parts, "final newline")
+		} else {
+			parts = append(parts, "no final newline")
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
 const (
-	maxToolSummaryRunes = 240
-	maxFileDiffLines    = 8
-	maxChangedFiles     = 6
+	maxToolSummaryRunes     = 240
+	maxChangedFiles         = 50
+	defaultDiffPreviewLines = 40
 )
 
-func writeAction(w io.Writer, verb, label, colorCode string, color bool) error {
+type fileFormatView struct {
+	Charset      string `json:"charset"`
+	BOM          string `json:"bom"`
+	LineEnding   string `json:"line_ending"`
+	FinalNewline *bool  `json:"final_newline"`
+}
+
+func writeEventAction(w io.Writer, event Event, verb, label, fallbackColor string, color bool) error {
 	if label == "" {
 		label = "operation"
 	}
-	_, err := fmt.Fprintf(w, "%s %s %s\n", paint("•", colorCode, color), paint(verb, colorCode, color), compactLine(label))
+	colorCode := eventActionColor(event, fallbackColor)
+	marker := eventMarker(event)
+	_, err := fmt.Fprintf(w, "%s %s %s\n", paint(marker, colorCode, color), paint(verb, colorCode, color), compactLine(label))
 	return err
+}
+
+func commandStreamColor(stream string) string {
+	if strings.EqualFold(strings.TrimSpace(stream), "stderr") {
+		return ansiRed
+	}
+	if strings.EqualFold(strings.TrimSpace(stream), "stdout") {
+		return ansiBlue
+	}
+	return ansiAmber
 }
 
 func writeChildren(w io.Writer, values []string, color bool) error {
@@ -256,7 +345,7 @@ func renderSummaryEvent(w io.Writer, event Event, verb, summary string, raw []by
 	if strings.TrimSpace(summary) == "" {
 		summary = "event"
 	}
-	if err := writeAction(w, verb, summary, actionColor(event.toolOrType(), false), color); err != nil {
+	if err := writeEventAction(w, event, verb, summary, actionColor(event.toolOrType(), false), color); err != nil {
 		return err
 	}
 	var value map[string]any
@@ -305,11 +394,37 @@ func lifecycleVerb(summary string) string {
 func toolAction(tool string, raw []byte) (string, string) {
 	input := inputMap(raw)
 	action, _ := input["action"].(string)
+	if strings.TrimSpace(action) == "" {
+		for _, key := range []string{"view", "operation", "transition"} {
+			if value, ok := input[key].(string); ok {
+				action = value
+				break
+			}
+		}
+	}
 	action = strings.ToLower(strings.TrimSpace(action))
 	verb := actionVerb(tool, action)
 	label := ""
+
+	// Special case: skill/MCP calls via extension_manage (or skill_execute) should display
+	// the skill/MCP name in terminal observation instead of "extension_manage".
+	if (tool == "extension_manage" || tool == "skill_execute" || tool == "skill_call" || tool == "mcp_call") && (action == "call" || tool == "skill_call" || tool == "mcp_call") {
+		if kind, ok := input["kind"].(string); ok {
+			kind = strings.ToLower(strings.TrimSpace(kind))
+			if kind == "skill" {
+				if name, ok := input["name"].(string); ok && strings.TrimSpace(name) != "" {
+					label = name
+				}
+			} else if kind == "mcp" {
+				if name, ok := input["server"].(string); ok && strings.TrimSpace(name) != "" {
+					label = name
+				}
+			}
+		}
+	}
+
 	switch tool {
-	case "command_execute":
+	case "command_execute", "command_run":
 		label, _ = input["command"].(string)
 		if strings.TrimSpace(label) == "" {
 			label, _ = input["task"].(string)
@@ -319,10 +434,19 @@ func toolAction(tool string, raw []byte) (string, string) {
 		label = fileReadLabel(input)
 	case "context_query":
 		label = contextQueryCommand(input)
-	case "change_execute":
+	case "source_read":
+		if input["view"] == "file" {
+			label = fileReadLabel(input)
+		} else {
+			label = contextQueryCommand(map[string]any{"action": input["view"], "query": input["query"], "paths": input["paths"], "include_glob": input["include_glob"], "exclude_glob": input["exclude_glob"]})
+		}
+	case "change_execute", "change_apply", "change_revert":
 		label = changeLabel(input)
 	case "progress_report":
 		label, _ = input["summary"].(string)
+		if strings.TrimSpace(label) == "" {
+			label, _ = input["current"].(string)
+		}
 	case "workspace_list":
 		label = "workspaces"
 	case "session_open":
@@ -330,12 +454,26 @@ func toolAction(tool string, raw []byte) (string, string) {
 		if strings.TrimSpace(label) == "" {
 			label, _ = input["remote_session_id"].(string)
 		}
+		if strings.TrimSpace(label) == "" {
+			label, _ = input["session_id"].(string)
+		}
 	case "runtime_inspect":
 		label = runtimeInspectLabel(action)
+	case "runtime_read":
+		label = runtimeInspectLabel(stringValue(input["view"]))
 	case "workspace_state":
 		label = workspaceStateLabel(action)
+	case "workspace_observe":
+		label = workspaceStateLabel(stringValue(input["view"]))
 	case "screenshot_capture":
 		label = "screenshot"
+	case "skill_call":
+		label = stringValue(input["name"])
+	case "mcp_call":
+		label = stringValue(input["server"])
+		if toolName := stringValue(input["tool"]); toolName != "" {
+			label += "/" + toolName
+		}
 	default:
 		for _, key := range []string{"workspace", "path", "changeset_id", "task_id", "artifact_id", "remote_session_id"} {
 			if value, ok := input[key].(string); ok && strings.TrimSpace(value) != "" {
@@ -353,9 +491,68 @@ func toolAction(tool string, raw []byte) (string, string) {
 	return verb, label
 }
 
+func publicView(raw []byte) string {
+	input := inputMap(raw)
+	view, _ := input["view"].(string)
+	return strings.ToLower(strings.TrimSpace(view))
+}
+
+func eventFactLine(event Event, detail bool) string {
+	parts := make([]string, 0, 9)
+	if event.Tool != "" {
+		parts = append(parts, "tool="+event.Tool)
+	}
+	if event.Command != "" {
+		parts = append(parts, "command="+compactCommand(event.Command))
+	}
+	if event.WorkingDirectory != "" {
+		parts = append(parts, "cwd="+compactLine(event.WorkingDirectory))
+	}
+	if event.ExitCode != nil {
+		parts = append(parts, fmt.Sprintf("exit=%d", *event.ExitCode))
+	}
+	if event.DurationMs > 0 {
+		parts = append(parts, fmt.Sprintf("duration=%dms", event.DurationMs))
+	}
+	if event.SkillName != "" {
+		parts = append(parts, "skill="+event.SkillName)
+	}
+	if event.MCPServer != "" {
+		mcp := "mcp=" + event.MCPServer
+		if event.MCPTool != "" {
+			mcp += "/" + event.MCPTool
+		}
+		parts = append(parts, mcp)
+	}
+	if event.Path != "" {
+		parts = append(parts, "path="+event.Path)
+	}
+	if detail && event.Purpose != "" {
+		parts = append(parts, "purpose="+compactLine(event.Purpose))
+	}
+	if detail && event.OperationID != "" {
+		parts = append(parts, "operation="+event.OperationID)
+	}
+	if detail && event.ParentOperationID != "" {
+		parts = append(parts, "parent_operation="+event.ParentOperationID)
+	}
+	if detail && event.StepID != "" {
+		parts = append(parts, "step="+event.StepID)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " · ")
+}
+
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return strings.TrimSpace(text)
+}
+
 func actionVerb(tool, action string) string {
 	switch tool {
-	case "command_execute":
+	case "command_execute", "command_run":
 		return "Ran"
 	case "context_query":
 		return "Searched"
@@ -363,12 +560,18 @@ func actionVerb(tool, action string) string {
 		return "Read"
 	case "change_execute":
 		return "Edited"
+	case "change_prepare":
+		return "Prepared"
+	case "change_apply", "change_revert", "artifact_register":
+		return "Edited"
 	case "session_open":
 		return "Opened"
 	case "workspace_list":
 		return "Listed"
 	case "progress_report":
 		return "Reported"
+	case "session_transition":
+		return "Updated"
 	case "screenshot_capture":
 		return "Captured"
 	case "runtime_inspect":
@@ -378,6 +581,18 @@ func actionVerb(tool, action string) string {
 			return "Created"
 		}
 		return "Read"
+	case "workspace_observe", "workspace_history_read", "session_read", "source_read", "change_read", "task_read", "plan_read", "runtime_read", "environment_read", "artifact_read", "extension_discover":
+		return "Read"
+	case "task_control":
+		return "Controlled"
+	case "plan_create", "environment_snapshot_create":
+		return "Created"
+	case "plan_transition":
+		return "Updated"
+	case "skill_call", "mcp_call":
+		return "Called"
+	case "secret_provide":
+		return "Provided"
 	}
 	switch action {
 	case "create", "created", "register", "prepare":
@@ -647,29 +862,44 @@ func nestedErrorSummary(result map[string]any, allowPlainText bool) string {
 }
 
 func diffStats(diff string) string {
-	added, removed := 0, 0
-	for _, line := range strings.Split(diff, "\n") {
-		if strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---") {
-			continue
-		}
-		if strings.HasPrefix(line, "+") {
-			added++
-		} else if strings.HasPrefix(line, "-") {
-			removed++
-		}
-	}
-	if added == 0 && removed == 0 {
-		return ""
-	}
-	return fmt.Sprintf("+%d -%d", added, removed)
+	return parseDiffDocument(diff).stats()
 }
 
-func diffPreview(diff string, maxLines int) ([]string, bool) {
-	lines := strings.Split(strings.TrimSuffix(diff, "\n"), "\n")
-	if maxLines <= 0 || len(lines) <= maxLines {
-		return lines, false
+func renderFullDiffWithContext(w io.Writer, diff string, options renderOptions) error {
+	_, err := renderDiffDocument(w, options.diffCache.get(diff), options, 0)
+	return err
+}
+
+func renderDiffDocument(w io.Writer, document diffDocument, options renderOptions, limit int) (bool, error) {
+	if len(document.lines) == 0 {
+		return false, nil
 	}
-	return lines[:maxLines], true
+	for index, line := range document.lines {
+		if limit > 0 && index >= limit {
+			return true, nil
+		}
+		prefix := diffLinePrefix(line)
+		value := compactCodeLine(prefix + line.text)
+		value = styleRenderedDiffLine(value, line.kind, options.colorMode)
+		if width := options.terminalWidth - 8; width > 0 {
+			value = truncateRenderedLine(value, width)
+		}
+		if _, err := fmt.Fprintf(w, "    %s\n", value); err != nil {
+			return false, err
+		}
+	}
+	return false, nil
+}
+
+func diffLinePrefix(line diffLine) string {
+	switch {
+	case line.hasNew:
+		return fmt.Sprintf("%3d | ", line.newLine)
+	case line.hasOld:
+		return fmt.Sprintf("%3d | ", line.oldLine)
+	default:
+		return "| "
+	}
 }
 
 func compactLine(value string) string {
@@ -715,8 +945,17 @@ func commandCompletionSummary(output string) string {
 }
 
 func humanToolOutput(tool string, result map[string]any) string {
-	if tool == "context_query" {
-		if summary := contextQueryOutputSummary(result); summary != "" {
+	if tool == "context_query" || tool == "source_read" || tool == "file_read" {
+		summary := contextQueryOutputSummary(result)
+		if tool == "source_read" || tool == "file_read" {
+			if format := sourceFormatSummary(result); format != "" {
+				if summary == "" {
+					return format
+				}
+				return summary + " · " + format
+			}
+		}
+		if summary != "" {
 			return summary
 		}
 	}
@@ -747,11 +986,73 @@ func humanToolOutput(tool string, result map[string]any) string {
 	return ""
 }
 
+func sourceFormatSummary(result map[string]any) string {
+	structured, _ := result["structured_content"].(map[string]any)
+	if structured == nil {
+		return ""
+	}
+	if format, ok := structured["format"].(map[string]any); ok {
+		return formatMetadataSummary(structured, format)
+	}
+	items, _ := structured["items"].([]any)
+	if len(items) == 0 {
+		return ""
+	}
+	formats := make([]string, 0, 2)
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		format, _ := item["format"].(map[string]any)
+		if summary := formatMetadataSummary(item, format); summary != "" {
+			formats = append(formats, summary)
+		}
+		if len(formats) == 2 {
+			break
+		}
+	}
+	if len(formats) == 0 {
+		return ""
+	}
+	if len(formats) == 1 {
+		return formats[0]
+	}
+	return fmt.Sprintf("formats: %d files", len(items))
+}
+
+func formatMetadataSummary(item, format map[string]any) string {
+	if len(format) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, 4)
+	charset, _ := format["charset"].(string)
+	if strings.TrimSpace(charset) != "" {
+		parts = append(parts, "format="+strings.TrimSpace(charset))
+	}
+	bom, _ := format["bom"].(string)
+	if strings.TrimSpace(bom) != "" && bom != "none" {
+		parts = append(parts, "bom="+strings.TrimSpace(bom))
+	}
+	lineEnding, _ := format["line_ending"].(string)
+	if strings.TrimSpace(lineEnding) != "" && lineEnding != "none" {
+		parts = append(parts, "line-ending="+strings.TrimSpace(lineEnding))
+	}
+	if finalNewline, ok := format["final_newline"].(bool); ok {
+		if finalNewline {
+			parts = append(parts, "final-newline=yes")
+		} else {
+			parts = append(parts, "final-newline=no")
+		}
+	}
+	if revision, _ := item["sha256"].(string); strings.TrimSpace(revision) != "" {
+		parts = append(parts, "sha256="+strings.TrimSpace(revision))
+	}
+	return strings.Join(parts, " · ")
+}
+
 func structuredToolOutputSummary(tool string, data map[string]any) string {
 	switch tool {
-	case "extension_manage":
+	case "extension_manage", "extension_discover":
 		return extensionManageOutputSummary(data)
-	case "runtime_inspect":
+	case "runtime_inspect", "runtime_read":
 		return runtimeInspectOutputSummary(data)
 	}
 	return ""
@@ -811,13 +1112,13 @@ func remoteDataSummary(tool string, data map[string]any) string {
 			name, _ = remote["workspace_name"].(string)
 		}
 		return fmt.Sprintf("Session %s opened for workspace %s.", id, name)
-	case "plan_manage":
+	case "plan_manage", "plan_create", "plan_read", "plan_transition":
 		return planManageOutputSummary(data)
-	case "environment_inspect":
+	case "environment_inspect", "environment_read", "environment_snapshot_create":
 		return environmentInspectOutputSummary(data)
-	case "runtime_inspect":
+	case "runtime_inspect", "runtime_read":
 		return runtimeInspectOutputSummary(data)
-	case "workspace_state":
+	case "workspace_state", "workspace_observe":
 		return workspaceStateOutputSummary(data)
 	case "screenshot_capture":
 		return screenshotCaptureOutputSummary(data)
@@ -1138,14 +1439,22 @@ func contextQueryOutputSummary(result map[string]any) string {
 		summary = fmt.Sprintf("Found %d result(s)", len(paths))
 	}
 	summary = strings.TrimSuffix(strings.TrimSpace(summary), ".")
-	return compactLine(summary + ": " + compactPathList(paths))
+	summary = compactLine(summary)
+	if len(paths) > 20 {
+		summary += " (first 20 shown)"
+	}
+	return summary + ": " + compactPathList(paths)
 }
 
 func compactPathList(paths []string) string {
-	if len(paths) <= 4 {
+	if len(paths) == 0 {
+		return ""
+	}
+	maxShown := 20 // reasonable limit for terminal + folding
+	if len(paths) <= maxShown {
 		return strings.Join(paths, ", ")
 	}
-	return strings.Join(paths[:4], ", ") + fmt.Sprintf(", ... +%d more", len(paths)-4)
+	return strings.Join(paths[:maxShown], ", ") + fmt.Sprintf(", ... +%d more", len(paths)-maxShown)
 }
 
 func toolOutputSummary(text string) string {

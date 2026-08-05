@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"mcpx/internal/logging"
 )
 
 const maxOAuthBody = 8192
@@ -73,7 +75,7 @@ func (h *Handler) HandleAuthorizationServerMetadata(w http.ResponseWriter, r *ht
 		"token_endpoint":                        origin + MCPOAuthPrefix + "/token",
 		"registration_endpoint":                 origin + MCPOAuthPrefix + "/register",
 		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_post", "client_secret_basic"},
 		"scopes_supported":                      []string{DefaultScope},
@@ -101,9 +103,19 @@ func (h *Handler) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := h.S.Registry.Register(meta)
 	if err != nil {
+		logging.L().Info("oauth register",
+			"component", "oauth", "error", err.Error())
 		writeOAuthError(w, http.StatusBadRequest, "invalid_client_metadata", err.Error())
 		return
 	}
+	cid, _ := out["client_id"].(string)
+	nURIs := 0
+	if uris, ok := out["redirect_uris"].([]string); ok {
+		nURIs = len(uris)
+	}
+	logging.L().Info("oauth register",
+		"component", "oauth", "client_id", cid,
+		"redirect_uris_count", nURIs, "ok", true)
 	writeJSON(w, http.StatusCreated, out)
 }
 
@@ -132,9 +144,19 @@ func (h *Handler) authorizeGet(w http.ResponseWriter, r *http.Request) {
 		scope = DefaultScope
 	}
 	if err := h.validateAuthorizeParams(clientID, redirectURI, challenge, method); err != nil {
+		logging.L().Info("oauth authorize",
+			"component", "oauth", "method", "GET", "client_id", clientID,
+			"redirect_uri", redirectURI, "has_state", q.Get("state") != "",
+			"state_len", len(q.Get("state")), "resource", resource,
+			"scope", scope, "error", err.Error())
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	logging.L().Info("oauth authorize",
+		"component", "oauth", "method", "GET", "client_id", clientID,
+		"redirect_uri", redirectURI, "has_state", state != "",
+		"state_len", len(state), "resource", resource,
+		"scope", scope, "ok", true)
 	c, _ := h.S.Registry.Get(clientID)
 	name := clientID
 	if c != nil && c.ClientName != "" {
@@ -174,19 +196,36 @@ func (h *Handler) authorizePost(w http.ResponseWriter, r *http.Request) {
 	resource := r.FormValue("resource")
 	scope := r.FormValue("scope")
 	if err := h.validateAuthorizeParams(clientID, redirectURI, challenge, method); err != nil {
+		logging.L().Info("oauth authorize",
+			"component", "oauth", "method", "POST", "client_id", clientID,
+			"redirect_uri", redirectURI, "has_state", state != "",
+			"state_len", len(state), "error", err.Error())
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if !h.S.CheckPassword(password) {
+	passwordOK := h.S.CheckPassword(password)
+	if !passwordOK {
+		logging.L().Info("oauth authorize",
+			"component", "oauth", "method", "POST", "client_id", clientID,
+			"redirect_uri", redirectURI, "has_state", state != "",
+			"state_len", len(state), "password_ok", false)
 		http.Error(w, "invalid password", http.StatusUnauthorized)
 		return
 	}
+	logging.L().Info("oauth authorize",
+		"component", "oauth", "method", "POST", "client_id", clientID,
+		"redirect_uri", redirectURI, "has_state", state != "",
+		"state_len", len(state), "password_ok", true)
 	if resource == "" {
 		origin := h.S.EffectiveIssuer(OriginFromRequest(r, false))
 		resource = h.S.ResourceURL(origin)
 	}
 	code, err := h.S.IssueCode(clientID, redirectURI, challenge, method, resource, scope)
 	if err != nil {
+		logging.L().Info("oauth authorize",
+			"component", "oauth", "method", "POST", "client_id", clientID,
+			"redirect_uri", redirectURI, "has_state", state != "",
+			"state_len", len(state), "error", err.Error())
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -201,6 +240,10 @@ func (h *Handler) authorizePost(w http.ResponseWriter, r *http.Request) {
 		q.Set("state", state)
 	}
 	u.RawQuery = q.Encode()
+	logging.L().Info("oauth authorize redirect",
+		"component", "oauth", "client_id", clientID,
+		"redirect_target", u.String(), "has_state", state != "",
+		"state_len", len(state), "code_len", len(code))
 	http.Redirect(w, r, u.String(), http.StatusFound)
 }
 
@@ -228,12 +271,17 @@ func (h *Handler) HandleToken(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = r.ParseForm()
 	grant := r.FormValue("grant_type")
-	if grant != "authorization_code" {
-		writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type", "only authorization_code")
+	if grant != "authorization_code" && grant != "refresh_token" {
+		logging.L().Info("oauth token",
+			"component", "oauth", "grant_type", grant,
+			"error", "unsupported grant type")
+		writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type", "only authorization_code or refresh_token")
 		return
 	}
 	clientID, clientSecret, authMethod := h.clientAuth(r)
 	if clientID == "" {
+		logging.L().Info("oauth token",
+			"component", "oauth", "error", "missing client_id")
 		writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "missing client_id")
 		return
 	}
@@ -241,13 +289,43 @@ func (h *Handler) HandleToken(w http.ResponseWriter, r *http.Request) {
 		// try alternate methods if basic failed
 		c, ok := h.S.Registry.Get(clientID)
 		if !ok {
+			logging.L().Info("oauth token",
+				"component", "oauth", "client_id", clientID,
+				"auth_method", authMethod, "error", "unknown client")
 			writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "unknown client")
 			return
 		}
 		if !h.S.Registry.Authenticates(clientID, clientSecret, c.TokenEndpointAuthMethod) {
+			logging.L().Info("oauth token",
+				"component", "oauth", "client_id", clientID,
+				"auth_method", authMethod, "error", "client authentication failed")
 			writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "client authentication failed")
 			return
 		}
+	}
+	if grant == "refresh_token" {
+		refreshToken := r.FormValue("refresh_token")
+		resource := r.FormValue("resource")
+		tok, ttl, nextRefresh, err := h.S.ExchangeRefreshToken(refreshToken, clientID, resource)
+		if err != nil {
+			logging.L().Info("oauth token",
+				"component", "oauth", "client_id", clientID,
+				"auth_method", authMethod, "grant_type", "refresh_token",
+				"error", err.Error())
+			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", err.Error())
+			return
+		}
+		logging.L().Info("oauth token",
+			"component", "oauth", "client_id", clientID,
+			"auth_method", authMethod, "grant_type", "refresh_token", "ok", true)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"access_token":  tok,
+			"token_type":    "Bearer",
+			"expires_in":    ttl,
+			"scope":         DefaultScope,
+			"refresh_token": nextRefresh,
+		})
+		return
 	}
 	code := r.FormValue("code")
 	redirectURI := r.FormValue("redirect_uri")
@@ -255,14 +333,26 @@ func (h *Handler) HandleToken(w http.ResponseWriter, r *http.Request) {
 	resource := r.FormValue("resource")
 	tok, ttl, err := h.S.ExchangeCode(code, redirectURI, clientID, verifier, resource)
 	if err != nil {
+		logging.L().Info("oauth token",
+			"component", "oauth", "client_id", clientID,
+			"auth_method", authMethod, "error", err.Error())
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", err.Error())
 		return
 	}
+	logging.L().Info("oauth token",
+		"component", "oauth", "client_id", clientID,
+		"auth_method", authMethod, "ok", true)
+	res := resource
+	if res == "" {
+		res = h.S.ResourceURL(h.S.EffectiveIssuer(OriginFromRequest(r, false)))
+	}
+	refreshToken := h.S.IssueRefreshToken(clientID, res, DefaultScope)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"access_token": tok,
-		"token_type":   "Bearer",
-		"expires_in":   ttl,
-		"scope":        DefaultScope,
+		"access_token":  tok,
+		"token_type":    "Bearer",
+		"expires_in":    ttl,
+		"scope":         DefaultScope,
+		"refresh_token": refreshToken,
 	})
 }
 

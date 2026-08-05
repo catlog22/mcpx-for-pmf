@@ -25,6 +25,26 @@ func TestFail(t *testing.T) {
 	}
 }
 
+func TestMarshalUsesSingleStatusAndCompactMeta(t *testing.T) {
+	response := OK("req_1", "demo", map[string]any{"session_id": "rs_1", "value": "ready"})
+	response.RemoteSessionID = "rs_1"
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["status"] != "succeeded" || payload["ok"] != nil || payload["remote_session_id"] != nil {
+		t.Fatalf("public response leaked legacy status fields: %s", encoded)
+	}
+	meta, _ := payload["meta"].(map[string]any)
+	if meta["request_id"] != "req_1" || meta["operation_id"] != "op_1" || meta["session_id"] != "rs_1" {
+		t.Fatalf("response meta = %+v", meta)
+	}
+}
+
 func TestEnsureRequestID(t *testing.T) {
 	if EnsureRequestID("keep") != "keep" {
 		t.Fatal("should keep existing id")

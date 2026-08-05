@@ -29,8 +29,8 @@ func (r *Runtime) toolProgressReport(ctx context.Context, req mcp.CallToolReques
 	}
 	resultSummary, _ := envReq.Payload["result_summary"].(string)
 	resultSummary = strings.TrimSpace(resultSummary)
-	if len(resultSummary) > envelope.MaxIntentBytes {
-		return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", fmt.Sprintf("result summary exceeds %d bytes", envelope.MaxIntentBytes))
+	if len(resultSummary) > envelope.MaxResultSummaryBytes {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", fmt.Sprintf("result summary exceeds %d bytes", envelope.MaxResultSummaryBytes))
 	}
 	nextStep, _ := envReq.Payload["next_step"].(string)
 	nextStep = strings.TrimSpace(nextStep)
@@ -44,6 +44,8 @@ func (r *Runtime) toolProgressReport(ctx context.Context, req mcp.CallToolReques
 	}
 	relatedTool, _ := envReq.Payload["related_tool"].(string)
 	relatedTool = strings.TrimSpace(relatedTool)
+	phase, _ := envReq.Payload["phase"].(string)
+	phase = strings.TrimSpace(phase)
 
 	display := summary
 	if resultSummary != "" {
@@ -53,6 +55,7 @@ func (r *Runtime) toolProgressReport(ctx context.Context, req mcp.CallToolReques
 		display += " · next: " + nextStep
 	}
 	data := map[string]any{
+		"phase":             phase,
 		"summary":           display,
 		"progress_summary":  summary,
 		"result_summary":    resultSummary,

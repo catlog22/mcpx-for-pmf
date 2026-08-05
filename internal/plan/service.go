@@ -284,23 +284,46 @@ func normalizeTaskInputs(inputs []TaskInput) ([]Task, error) {
 	if len(inputs) == 0 || len(inputs) > 100 {
 		return nil, fmt.Errorf("%w: tasks must contain between 1 and 100 items", ErrInvalidInput)
 	}
+	// task_id from the model is only a local dependency reference inside this
+	// plan. The service always issues a globally unique final task id so the
+	// same label can be reused across plans without hitting the primary key.
+	localIDs := make([]string, len(inputs))
+	finalByLocal := make(map[string]string, len(inputs))
+	for i, input := range inputs {
+		local := strings.TrimSpace(input.ID)
+		if local == "" {
+			local = fmt.Sprintf("task-%d", i+1)
+		}
+		if _, exists := finalByLocal[local]; exists {
+			return nil, fmt.Errorf("%w: duplicate task id %s", ErrInvalidInput, local)
+		}
+		finalByLocal[local] = newID("pt_")
+		localIDs[i] = local
+	}
 	result := make([]Task, len(inputs))
-	ids := make(map[string]bool, len(inputs))
 	now := time.Time{}
 	for i, input := range inputs {
 		title := strings.TrimSpace(input.Title)
 		if title == "" {
 			return nil, fmt.Errorf("%w: task %d title is required", ErrInvalidInput, i)
 		}
-		id := strings.TrimSpace(input.ID)
-		if id == "" {
-			id = newID("pt_")
+		result[i] = Task{
+			ID: finalByLocal[localIDs[i]], Ordinal: i, Title: title,
+			Description: strings.TrimSpace(input.Description), Status: TaskTodo,
+			CreatedAt: now, UpdatedAt: now,
 		}
-		if ids[id] {
-			return nil, fmt.Errorf("%w: duplicate task id %s", ErrInvalidInput, id)
+	}
+	for i, input := range inputs {
+		deps := make([]string, 0, len(input.DependsOn))
+		for _, ref := range input.DependsOn {
+			ref = strings.TrimSpace(ref)
+			final, ok := finalByLocal[ref]
+			if !ok {
+				return nil, fmt.Errorf("%w: dependency %s does not exist", ErrDependency, ref)
+			}
+			deps = append(deps, final)
 		}
-		ids[id] = true
-		result[i] = Task{ID: id, Ordinal: i, Title: title, Description: strings.TrimSpace(input.Description), Status: TaskTodo, DependsOn: uniqueStrings(input.DependsOn), CreatedAt: now, UpdatedAt: now}
+		result[i].DependsOn = uniqueStrings(deps)
 	}
 	if err := validateTaskGraph(result); err != nil {
 		return nil, err

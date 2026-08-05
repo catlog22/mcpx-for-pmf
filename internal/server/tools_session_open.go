@@ -67,23 +67,64 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req mcp.CallToolRequest) 
 	effective := r.effectiveConfig(wsPath)
 	tools := r.runtimeToolCapabilities(effective, &session, false)
 
-	servers := []map[string]any{}
-	if manager, err := r.mcpManagerForWorkspace(wsPath); err == nil {
-		servers = manager.List()
-		if includeUpstreamTools && effective.Discovery.MCP.Enabled {
-			servers = r.enrichServersWithTools(ctx, manager, servers)
-		}
-	}
-
-	skills := []map[string]any{}
-	if effective.Discovery.Skills.Enabled {
-		skills = skillItems(skill.LoadAll(effective.Discovery.Skills.Dirs, wsPath))
-	}
-
-	docs := instruction.DiscoverAt(
-		r.cfg.Discovery.Instructions.GlobalAgentsPath, wsPath, "",
-		effective.Security.Files.MaxReadBytes,
+	var (
+		servers              = []map[string]any{}
+		skills               = []map[string]any{}
+		docs                 []instruction.Document
+		project              map[string]any
+		gitHead              string
+		treeDigest           string
+		activeChangesets     any
+		pendingConfirmations any
+		taskList             any
+		artifacts            any
 	)
+	var tasks any
+	var bootstrap sync.WaitGroup
+	bootstrap.Add(6)
+	go func() {
+		defer bootstrap.Done()
+		if manager, err := r.mcpManagerForWorkspace(wsPath); err == nil {
+			items := manager.List()
+			if includeUpstreamTools && effective.Discovery.MCP.Enabled {
+				items = r.enrichServersWithTools(ctx, manager, items)
+			}
+			servers = items
+		}
+	}()
+	go func() {
+		defer bootstrap.Done()
+		if effective.Discovery.Skills.Enabled {
+			skills = skillItems(skill.LoadAll(effective.Discovery.Skills.Dirs, wsPath))
+		}
+	}()
+	go func() {
+		defer bootstrap.Done()
+		docs = instruction.DiscoverAt(
+			r.cfg.Discovery.Instructions.GlobalAgentsPath, wsPath, "",
+			effective.Security.Files.MaxReadBytes,
+		)
+	}()
+	go func() {
+		defer bootstrap.Done()
+		project = inspectProject(ctx, wsPath)
+		if includeProjectTasks {
+			tasks = projecttask.Discover(wsPath)
+		}
+	}()
+	go func() {
+		defer bootstrap.Done()
+		gitHead, treeDigest = workspaceRevision(ctx, wsPath)
+	}()
+	go func() {
+		defer bootstrap.Done()
+		activeChangesets, _ = r.changesets.History(ctx, session.ID, 5)
+		pendingConfirmations = pendingConfirmationItems(r.approvals.ListRemoteSession(session.ID))
+		taskList, _ = r.tasks.List(session.ID, 20)
+		artifacts, _ = r.artifacts.List(ctx, session.ID, "", 20)
+	}()
+	bootstrap.Wait()
+
 	var instructionPayload any
 	if includeInstrContent {
 		items, _ := instruction.ReadContents(docs, 256<<10)
@@ -91,18 +132,6 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req mcp.CallToolRequest) 
 	} else {
 		instructionPayload = map[string]any{"documents": docs, "inline": false}
 	}
-
-	project := inspectProject(ctx, wsPath)
-	var tasks any
-	if includeProjectTasks {
-		tasks = projecttask.Discover(wsPath)
-	}
-
-	gitHead, treeDigest := workspaceRevision(ctx, wsPath)
-	activeChangesets, _ := r.changesets.History(ctx, session.ID, 5)
-	pendingConfirmations := pendingConfirmationItems(r.approvals.ListRemoteSession(session.ID))
-	taskList, _ := r.tasks.List(session.ID, 20)
-	artifacts, _ := r.artifacts.List(ctx, session.ID, "", 20)
 
 	toolManifest := r.registeredToolManifest()
 	build := r.build
@@ -157,7 +186,7 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req mcp.CallToolRequest) 
 		"client_refresh":        clientRefreshPayload(envReq.Payload, revisions),
 		"recommended_workflows": map[string]any{
 			"bootstrap":     []string{"session_open"},
-			"source_change": []string{"context_query", "file_read", "change_execute", "command_execute"},
+			"source_change": []string{"source_read", "change_prepare", "change_apply", "command_run"},
 		},
 		"opened_at": time.Now().UTC().Format(time.RFC3339),
 	}

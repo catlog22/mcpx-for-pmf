@@ -93,7 +93,7 @@ func TestWorkspaceInfoDoesNotAutoSelectSingleWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	errObj, _ := env["error"].(map[string]any)
-	if env["status"] != "error" || errObj["code"] != "REMOTE_SESSION_REQUIRED" {
+	if env["status"] != "failed" || errObj["code"] != "REMOTE_SESSION_REQUIRED" {
 		t.Fatalf("expected explicit workspace error, got %s", text)
 	}
 }
@@ -108,7 +108,7 @@ func TestRegisteredToolsExcludeCompatibilityInterfaces(t *testing.T) {
 			t.Fatalf("removed compatibility tool %q is still registered", removed)
 		}
 	}
-	for _, required := range []string{"workspace_list", "session_open", "file_read", "change_execute", "change_manage"} {
+	for _, required := range []string{"workspace_list", "session_open", "source_read", "change_apply", "change_read"} {
 		if _, exists := tools[required]; !exists {
 			t.Fatalf("required tool %q is missing", required)
 		}

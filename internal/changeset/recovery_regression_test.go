@@ -49,6 +49,41 @@ func TestPrepareIdempotentWithOptionsReturnsCommittedChangeset(t *testing.T) {
 	}
 }
 
+func TestPrepareWithoutIdempotencyKeyReusesEquivalentDraft(t *testing.T) {
+	workspace, store, remoteID, principal := newChangesetFixture(t, map[string]string{"value.txt": "old\n"})
+	service := NewService(store.DB())
+	ctx := context.Background()
+	operation := Operation{
+		Operation:      "update",
+		Path:           "value.txt",
+		ExpectedSHA256: hashBytes([]byte("old\n")),
+		Content:        "new\n",
+	}
+
+	first, replayed, err := service.PrepareIdempotentWithOptions(ctx, remoteID, principal.ID, "", workspace, "update value", []Operation{operation}, PrepareOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed {
+		t.Fatal("first request was unexpectedly replayed")
+	}
+	second, replayed, err := service.PrepareIdempotentWithOptions(ctx, remoteID, principal.ID, "", workspace, "update value", []Operation{operation}, PrepareOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replayed || second.ID != first.ID {
+		t.Fatalf("equivalent draft was not reused: first=%+v second=%+v replayed=%v", first, second, replayed)
+	}
+
+	var count int
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM changesets WHERE remote_session_id = ?`, remoteID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("equivalent prepare created %d changesets, want 1", count)
+	}
+}
+
 func TestApplyRollsBackWhenLaterFileFails(t *testing.T) {
 	workspace, store, remoteID, principal := newChangesetFixture(t, map[string]string{
 		"a.txt": "a-old\n",

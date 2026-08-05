@@ -22,22 +22,27 @@ const (
 )
 
 type runtimeContextKey struct{}
+type toolInvocationNameKey struct{}
+type operationChildKey struct{}
 
 // RuntimeContext is gateway-owned lifecycle metadata. It is never decoded
 // from tool arguments and is not part of an MCP input schema.
 type RuntimeContext struct {
-	RequestID      string
-	TraceID        string
-	SpanID         string
-	ParentSpanID   string
-	StartedAtMs    int64
-	ReceivedAtMs   int64
-	CompletedAtMs  int64
-	NetworkLatency int64
-	ProcessingMs   int64
-	ServerElapsed  int64
-	ClientName     string
-	ClientVersion  string
+	RequestID         string
+	OperationID       string
+	ParentOperationID string
+	StepID            string
+	TraceID           string
+	SpanID            string
+	ParentSpanID      string
+	StartedAtMs       int64
+	ReceivedAtMs      int64
+	CompletedAtMs     int64
+	NetworkLatency    int64
+	ProcessingMs      int64
+	ServerElapsed     int64
+	ClientName        string
+	ClientVersion     string
 }
 
 func withRuntimeContext(ctx context.Context, value RuntimeContext) context.Context {
@@ -135,5 +140,23 @@ func runtimeContextWithTiming(value RuntimeContext, timing interactionTiming) Ru
 	value.NetworkLatency = timing.NetworkLatencyMs
 	value.ProcessingMs = timing.ProcessingMs
 	value.ServerElapsed = timing.ServerElapsedMs
+	return value
+}
+
+func withToolInvocationName(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, toolInvocationNameKey{}, name)
+}
+
+func toolInvocationName(ctx context.Context) string {
+	value, _ := ctx.Value(toolInvocationNameKey{}).(string)
+	return strings.TrimSpace(value)
+}
+
+func withOperationChild(ctx context.Context) context.Context {
+	return context.WithValue(ctx, operationChildKey{}, true)
+}
+
+func isOperationChild(ctx context.Context) bool {
+	value, _ := ctx.Value(operationChildKey{}).(bool)
 	return value
 }

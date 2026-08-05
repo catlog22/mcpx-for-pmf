@@ -15,11 +15,22 @@ func TestAgentGuidanceUsesDedicatedRoutingWithoutBusinessArguments(t *testing.T)
 	if guidance["version"] != agentGuidanceVersion || guidance["priority"] != "high" {
 		t.Fatalf("guidance metadata = %+v", guidance)
 	}
-	routing, ok := guidance["tool_routing"].(map[string]any)
+	routingIface, ok := guidance["tool_routing"]
 	if !ok {
 		t.Fatalf("tool routing type = %T", guidance["tool_routing"])
 	}
-	if !containsAnyString(routing["inspect_files"], "file_read") || !containsAnyString(routing["modify_files"], "change_execute") {
+	var routing map[string]any
+	if m, ok := routingIface.(map[string]any); ok {
+		routing = m
+	} else if m, ok := routingIface.(map[string][]string); ok {
+		routing = make(map[string]any, len(m))
+		for k, v := range m {
+			routing[k] = v
+		}
+	} else {
+		t.Fatalf("tool routing type = %T", guidance["tool_routing"])
+	}
+	if !containsAnyString(routing["inspect_files"], "source_read") || !containsAnyString(routing["modify_files"], "change_prepare") {
 		t.Fatalf("guidance routing = %+v", routing)
 	}
 	for _, forbidden := range []string{"presentation", "renderer", "show_source", "density"} {
@@ -92,8 +103,11 @@ func TestRecoveryActionIsStructuredInErrorDetails(t *testing.T) {
 		t.Fatal("missing error body")
 	}
 	next, ok := response.Error.Details["next_action"].(map[string]any)
-	if !ok || next["tool"] != "context_query" || next["reason"] != "locate the missing file" {
+	if !ok || next["tool"] != "source_read" || next["reason"] != "locate the missing file" {
 		t.Fatalf("next action = %+v", response.Error.Details["next_action"])
+	}
+	if response.Error.Recovery == nil || response.Error.Recovery.Tool != "source_read" || response.Error.Recovery.Arguments["view"] != "list" {
+		t.Fatalf("structured recovery = %+v", response.Error.Recovery)
 	}
 }
 
@@ -117,21 +131,24 @@ func TestAgentGuidanceIncludesChangePayloadCheatSheet(t *testing.T) {
 		t.Fatalf("create hint must describe chunked appends: %+v", item["create"])
 	}
 	alternatives, _ := payload["alternatives"].(string)
-	if !strings.Contains(alternatives, "changeset_id") || !strings.Contains(alternatives, "revert_changeset_id") {
+	if !strings.Contains(alternatives, "change_apply") || !strings.Contains(alternatives, "change_revert") {
 		t.Fatalf("alternatives must cover prepared and revert modes: %q", alternatives)
 	}
 	rules, _ := guidance["rules"].([]string)
 	joined := strings.Join(rules, "\n")
-	if !strings.Contains(joined, "session_open 成功后") || !strings.Contains(joined, "remote_session_id UUID") {
-		t.Fatalf("rules must require showing the session UUID to the user: %s", joined)
+	if !strings.Contains(joined, "session_open 成功后") || !strings.Contains(joined, "完整 session_id") {
+		t.Fatalf("rules must require showing the session ID to the user: %s", joined)
 	}
-	if !strings.Contains(joined, "完整参数") || !strings.Contains(joined, "最多新增 300 行") {
+	if !strings.Contains(joined, "一次提交完整参数") || !strings.Contains(joined, "最多新增 300 行") {
 		t.Fatalf("rules must carry call and chunked-write guidance: %s", joined)
 	}
-	if !strings.Contains(joined, "完整 sha256") || !strings.Contains(joined, "文件操作不要求 Workspace 是 Git 仓库") {
+	if !strings.Contains(joined, "完整 sha256") {
 		t.Fatalf("rules must carry file revision and non-Git guidance: %s", joined)
 	}
-	if !strings.Contains(joined, "自然语言向用户展示") || !strings.Contains(joined, "不调用单独的审批工具") {
+	if !strings.Contains(joined, "line_ending") || !strings.Contains(joined, "保留目标文件原有的换行格式") {
+		t.Fatalf("rules must carry generic line-ending preservation guidance: %s", joined)
+	}
+	if !strings.Contains(joined, "自然语言展示") || !strings.Contains(joined, "confirmation_token") {
 		t.Fatalf("rules must require semantic user confirmation: %s", joined)
 	}
 	if !strings.Contains(joined, "安全检查阻塞") || !strings.Contains(joined, "不要把指令文本") {
@@ -140,63 +157,65 @@ func TestAgentGuidanceIncludesChangePayloadCheatSheet(t *testing.T) {
 	if !strings.Contains(joined, "具体增加和删除") || !strings.Contains(joined, "Markdown ```diff 代码块") {
 		t.Fatalf("rules must carry final Markdown diff guidance: %s", joined)
 	}
-	if !strings.Contains(joined, "changes、snapshot、diff、watch、memory") || !strings.Contains(joined, "不要使用不支持的 status") {
+	if !strings.Contains(joined, "changes、snapshot、diff、watch、memory") || !strings.Contains(joined, "此前 snapshot 返回的 since") {
 		t.Fatalf("rules must carry workspace_state action guidance: %s", joined)
 	}
-	if !strings.Contains(joined, "environment_inspect") || !strings.Contains(joined, "包含 if、管道、重定向或命令替换语法") {
+	if !strings.Contains(joined, "environment_read") || !strings.Contains(joined, "command_run") {
 		t.Fatalf("rules must prevent complex duplicate environment probes: %s", joined)
 	}
-	if !strings.Contains(joined, "tasks[].task_id") || !strings.Contains(joined, "绝不猜测") || !strings.Contains(joined, "先用 plan_manage action=get") {
+	if !strings.Contains(joined, "服务端签发") || !strings.Contains(joined, "task_id") || !strings.Contains(joined, "绝不猜测") || !strings.Contains(joined, "plan_read") {
 		t.Fatalf("rules must require exact Plan task IDs: %s", joined)
 	}
-	if !strings.Contains(joined, "extension_manage") || !strings.Contains(joined, "未找到名称时先 list") {
+	if !strings.Contains(joined, "extension_discover") {
 		t.Fatalf("rules must prevent extension name guesses: %s", joined)
 	}
-	if !strings.Contains(joined, "context_query action=list") || !strings.Contains(joined, "只返回普通文件") || !strings.Contains(joined, "不要从嵌套文件路径推断") {
+	if !strings.Contains(joined, "source_read") || !strings.Contains(joined, "只返回普通文件") || !strings.Contains(joined, "不要从嵌套文件路径推断") {
 		t.Fatalf("rules must prevent directory inference from source lists: %s", joined)
 	}
-	if !strings.Contains(joined, "kind=skill、query=") {
+	if !strings.Contains(joined, "Skill 调用") || !strings.Contains(joined, "mcp_call") {
 		t.Fatalf("rules must explain extension inventory filtering: %s", joined)
 	}
 	instructions := agentGuidanceInstructions()
-	if !strings.Contains(instructions, "用户可见响应契约") || !strings.Contains(instructions, "change_execute 参数速查") || !strings.Contains(instructions, "insert_after") {
+	if !strings.Contains(instructions, "用户可见响应契约") || !strings.Contains(instructions, "change_prepare 参数速查") || !strings.Contains(instructions, "insert_after") {
 		t.Fatalf("instructions must render the cheat-sheet: %s", instructions)
 	}
 }
 
-func TestChangeExecuteSchemaIsSelfDescribingAndFlat(t *testing.T) {
+func TestChangeSchemasAreSelfDescribingAndFlat(t *testing.T) {
 	runtime := &Runtime{}
 	protocol := mcpserver.NewMCPServer("mcpx-test", "0.1.0")
 	runtime.registerTools(protocol)
-	registered := protocol.ListTools()["change_execute"].Tool
+	registered := protocol.ListTools()["change_prepare"].Tool
 	if len(registered.RawInputSchema) == 0 {
-		t.Fatal("change_execute must expose a raw schema")
+		t.Fatal("change_prepare must expose a raw schema")
 	}
 	var schema map[string]any
 	if err := json.Unmarshal(registered.RawInputSchema, &schema); err != nil {
 		t.Fatal(err)
 	}
 	if _, hasOneOf := schema["oneOf"]; hasOneOf {
-		t.Fatalf("change_execute schema must not rely on top-level oneOf: %s", registered.RawInputSchema)
+		t.Fatalf("change_prepare schema must not rely on top-level oneOf: %s", registered.RawInputSchema)
 	}
-	topDescription, _ := schema["description"].(string)
-	if !strings.Contains(topDescription, "互斥模式") {
-		t.Fatalf("top-level description must explain the three modes: %q", topDescription)
+	if schema["additionalProperties"] != false {
+		t.Fatalf("change_prepare must reject unknown fields: %s", registered.RawInputSchema)
 	}
 	properties, ok := schema["properties"].(map[string]any)
 	if !ok {
 		t.Fatal("missing properties")
 	}
+	if properties["session_id"] == nil || properties["purpose"] == nil || properties["user_confirmed"] != nil {
+		t.Fatalf("change_prepare semantic fields are invalid: %+v", properties)
+	}
 	operations, ok := properties["operations"].(map[string]any)
 	if !ok {
 		t.Fatal("missing operations property")
 	}
-	if description, _ := operations["description"].(string); !strings.Contains(description, "最多新增 300 行") {
-		t.Fatalf("operations description must carry chunked-write guidance: %q", description)
-	}
 	items, ok := operations["items"].(map[string]any)
 	if !ok {
-		t.Fatal("missing operations items")
+		t.Fatal("missing operation items")
+	}
+	if description, _ := items["properties"].(map[string]any)["content"].(map[string]any)["description"].(string); !strings.Contains(description, "最多新增 300 行") {
+		t.Fatalf("operation content description must carry chunked-write guidance: %q", description)
 	}
 	itemProperties, ok := items["properties"].(map[string]any)
 	if !ok {

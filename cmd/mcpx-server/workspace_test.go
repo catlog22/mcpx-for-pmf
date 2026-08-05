@@ -9,11 +9,11 @@ import (
 )
 
 func TestParseWorkspaceObserverArgs(t *testing.T) {
-	options, err := parseWorkspaceObserverArgs([]string{"-history", "999", "-format", "JSON", "demo"})
+	options, err := parseWorkspaceObserverArgs([]string{"-history", "999", "-format", "JSON", "-diff", "summary", "-tool", "change_read", "-status", "succeeded", "-operation", "op_1", "-path", "src/demo.go", "demo"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.Workspace != "demo" || options.History != observation.MaxHistory || options.Format != "json" {
+	if options.Workspace != "demo" || options.History != observation.MaxHistory || options.Format != "json" || options.Diff != "summary" || options.Tool != "change_read" || options.Status != "succeeded" || options.Operation != "op_1" || options.Path != "src/demo.go" {
 		t.Fatalf("options=%+v", options)
 	}
 	if _, err := parseWorkspaceObserverArgs(nil); err == nil {
@@ -24,6 +24,9 @@ func TestParseWorkspaceObserverArgs(t *testing.T) {
 	}
 	if _, err := parseWorkspaceObserverArgs([]string{"-format", "yaml", "demo"}); err == nil {
 		t.Fatal("unsupported format should fail")
+	}
+	if _, err := parseWorkspaceObserverArgs([]string{"-diff", "invalid", "demo"}); err == nil {
+		t.Fatal("unsupported diff mode should fail")
 	}
 }
 

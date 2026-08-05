@@ -13,23 +13,24 @@ import (
 
 // Pending holds a deferred tool action awaiting human approval.
 type Pending struct {
-	ID              string
-	Tool            string
-	Summary         string
-	Command         string
-	CommandYieldMs  int
-	Purpose         string
-	Scope           string
-	CommandDigest   string
-	WorkDir         string
-	RequestID       string
-	Workspace       string
-	RemoteSessionID string
-	PrincipalID     string
-	ChangesetID     string
-	ChangesetDigest string
-	ContentKey      string
-	CreatedAt       time.Time
+	ID                string
+	Tool              string
+	Summary           string
+	Command           string
+	CommandYieldMs    int
+	Purpose           string
+	Scope             string
+	CommandDigest     string
+	WorkDir           string
+	RequestID         string
+	Workspace         string
+	RemoteSessionID   string
+	PrincipalID       string
+	ChangesetID       string
+	ChangesetDigest   string
+	ConfirmationToken string
+	ContentKey        string
+	CreatedAt         time.Time
 }
 
 // Store holds Remote Session-scoped pending approvals.
@@ -51,25 +52,40 @@ func NewPersistentStore(db *sql.DB) *Store {
 	return &Store{byID: map[string]Pending{}, db: db}
 }
 
-// contentKey computes the dedup key for a pending approval. command_execute
-// deliberately excludes RequestID: CommandDigest embeds it and changes on
-// every retry, which would defeat deduplication.
+// contentKey computes the dedup key for a pending approval. Transport request
+// IDs are excluded; the semantic operation remains bound to its principal.
 func contentKey(p Pending) string {
 	switch p.Tool {
 	case "command_execute":
-		return strings.Join([]string{p.Command, p.Purpose, p.Scope}, "\x00")
+		// Purpose is intentionally excluded: models rephrase the same intent
+		// when retrying a confirmed command, and the confirmed action is the
+		// command itself. Binding to purpose alone turns a user confirmation
+		// into an unrecoverable token-mismatch loop.
+		return strings.Join([]string{p.PrincipalID, p.Command, p.Scope}, "\x00")
 	case "change_execute", "change_apply":
 		if p.ChangesetID == "" || p.ChangesetDigest == "" {
 			return ""
 		}
-		return strings.Join([]string{p.ChangesetID, p.ChangesetDigest}, "\x00")
+		return strings.Join([]string{p.PrincipalID, p.ChangesetID, p.ChangesetDigest}, "\x00")
 	default:
 		return ""
 	}
 }
 
-// Put registers a pending action and returns approval_id.
+// Put registers a pending action and returns its internal ID. The internal ID
+// is not part of the public contract; public callers use ConfirmationToken.
 func (s *Store) Put(p Pending) (string, error) {
+	stored, err := s.PutPending(p)
+	if err != nil {
+		return "", err
+	}
+	return stored.ID, nil
+}
+
+// PutPending registers a pending action and returns the durable item including
+// its semantic confirmation token. The token is bound by the caller to the
+// same session, principal and operation digest; it is not an auth credential.
+func (s *Store) PutPending(p Pending) (Pending, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
@@ -83,17 +99,20 @@ func (s *Store) Put(p Pending) (string, error) {
 	if p.ContentKey == "" {
 		p.ContentKey = contentKey(p)
 	}
+	if p.ConfirmationToken == "" {
+		p.ConfirmationToken = newConfirmationToken()
+	}
 	// An incoming approval that is already past its TTL is stale: never fold it
 	// onto a live approval_id.
 	if p.ContentKey != "" && now.Sub(p.CreatedAt) < pendingTTL {
 		if existing, ok := s.findPendingLocked(p.RemoteSessionID, p.ContentKey); ok {
-			return existing.ID, nil
+			return existing, nil
 		}
 	}
 	if s.db != nil {
 		payload, err := json.Marshal(p)
 		if err != nil {
-			return "", fmt.Errorf("encode approval: %w", err)
+			return Pending{}, fmt.Errorf("encode approval: %w", err)
 		}
 		_, err = s.db.Exec(`INSERT OR REPLACE INTO approvals
             (id, remote_session_id, principal_id, tool, summary, payload_json, content_key, status, created_at, expires_at)
@@ -101,11 +120,11 @@ func (s *Store) Put(p Pending) (string, error) {
 			p.ID, p.RemoteSessionID, p.PrincipalID, p.Tool, p.Summary, string(payload), p.ContentKey,
 			p.CreatedAt.UnixMilli(), p.CreatedAt.Add(pendingTTL).UnixMilli())
 		if err != nil {
-			return "", fmt.Errorf("persist approval: %w", err)
+			return Pending{}, fmt.Errorf("persist approval: %w", err)
 		}
 	}
 	s.byID[p.ID] = p
-	return p.ID, nil
+	return p, nil
 }
 
 // Consume removes and returns a pending approval by id after the action succeeds.
@@ -236,4 +255,10 @@ func newID() string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
 	return fmt.Sprintf("a_%s", hex.EncodeToString(b[:]))
+}
+
+func newConfirmationToken() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("ct_%s", hex.EncodeToString(b[:]))
 }

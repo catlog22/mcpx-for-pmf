@@ -15,8 +15,19 @@ func TestActionColorUsesToolAndErrorOverride(t *testing.T) {
 	}
 }
 
+func TestEventStatusUsesSemanticMarkerAndColor(t *testing.T) {
+	confirmation := Event{Tool: "change_apply", Status: "waiting_confirmation"}
+	if eventMarker(confirmation) != "?" || eventActionColor(confirmation, ansiGreen) != ansiYellow {
+		t.Fatalf("confirmation style marker=%q color=%q", eventMarker(confirmation), eventActionColor(confirmation, ansiGreen))
+	}
+	failed := Event{Tool: "file_read", Status: "failed"}
+	if eventMarker(failed) != "!" || eventActionColor(failed, ansiBlue) != ansiRed {
+		t.Fatalf("failure style marker=%q color=%q", eventMarker(failed), eventActionColor(failed, ansiBlue))
+	}
+}
+
 func TestInteractionLineBudget(t *testing.T) {
-	if maxInteractionBodyLines != 20 {
+	if maxInteractionBodyLines != 50 {
 		t.Fatalf("body line budget=%d", maxInteractionBodyLines)
 	}
 }
@@ -419,7 +430,7 @@ func TestRenderTextShowsMarkdownFileDiff(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"• Edited auth.go", "↳ auth.go (update) +1 -1", "-old", "+new"} {
+	for _, want := range []string{"• Edited auth.go", "↳ auth.go (update) +1 -1", "    | --- a/auth.go", "    | +++ b/auth.go", "    | @@", "  1 | -old", "  1 | +new"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("file diff rendering missing %q: %q", want, text)
 		}
@@ -438,11 +449,47 @@ func TestRenderTextTruncatesLargeFileDiff(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	if !strings.Contains(text, "• Edited large.go") || !strings.Contains(text, "...") {
-		t.Fatalf("large diff was not summarized: %s", text)
+	if !strings.Contains(text, "• Edited large.go") || !strings.Contains(text, "  5 | +line-5") {
+		t.Fatalf("large diff rendering: %s", text)
 	}
-	if strings.Contains(text, "-line-5") || strings.Contains(text, "+line-5") {
-		t.Fatalf("large diff leaked beyond preview: %s", text)
+}
+
+func TestRenderFileChangedSupportsSummaryAndPreviewModes(t *testing.T) {
+	payload := []byte(`{"files":[{"path":"demo.go","operation":"update","diff":"--- a/demo.go\n+++ b/demo.go\n@@ -10 +20 @@\n-old\n+new\n"}]}`)
+	var summary bytes.Buffer
+	if err := renderFileChanged(&summary, Event{Type: TypeFileChanged, Output: payload}, renderOptions{diffMode: DiffModeSummary}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(summary.String(), "-old") || strings.Contains(summary.String(), "+new") || !strings.Contains(summary.String(), "+1 -1") {
+		t.Fatalf("summary diff=%q", summary.String())
+	}
+
+	var preview bytes.Buffer
+	if err := renderFileChanged(&preview, Event{Type: TypeFileChanged, Output: payload}, renderOptions{diffMode: DiffModePreview, terminalWidth: 120}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"10 | -old", "20 | +new"} {
+		if !strings.Contains(preview.String(), want) {
+			t.Fatalf("preview missing %q: %q", want, preview.String())
+		}
+	}
+}
+
+func TestRenderTextShowsSourceFormatMetadata(t *testing.T) {
+	var output bytes.Buffer
+	if err := RenderText(&output, Event{
+		Tool:   "file_read",
+		Type:   TypeToolCompleted,
+		Input:  []byte(`{"path":"demo.go"}`),
+		Output: []byte(`{"status":"succeeded","result":{"content":[{"type":"text","text":"Read demo.go."}],"structured_content":{"path":"demo.go","sha256":"sha256:abc","format":{"charset":"UTF-8","line_ending":"CRLF","final_newline":true}}}}`),
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{"format=UTF-8", "line-ending=CRLF", "final-newline=yes", "sha256=sha256:abc"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("format metadata %q missing: %q", want, text)
+		}
 	}
 }
 

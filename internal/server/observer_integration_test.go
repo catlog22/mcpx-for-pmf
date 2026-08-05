@@ -66,7 +66,7 @@ func TestObservationRecordsToolLifecycleAndRedacts(t *testing.T) {
 	if err := json.Unmarshal([]byte(completed.Output), &output); err != nil {
 		t.Fatal(err)
 	}
-	if output["status"] != "ok" {
+	if output["status"] != "succeeded" {
 		t.Fatalf("completed status=%+v", output)
 	}
 
@@ -92,7 +92,7 @@ func TestObservationRecordsToolLifecycleAndRedacts(t *testing.T) {
 	if err := json.Unmarshal([]byte(errorOutput), &errorView); err != nil {
 		t.Fatal(err)
 	}
-	if errorView["status"] != "error" || !strings.Contains(errorOutput, "observer operation failed") {
+	if errorView["status"] != "failed" || !strings.Contains(errorOutput, "observer operation failed") {
 		t.Fatalf("error completion was not observable: %s", errorOutput)
 	}
 }

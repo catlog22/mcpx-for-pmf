@@ -83,6 +83,7 @@ type Action struct {
 type Result struct {
 	Type         string        `json:"type"`
 	Schema       string        `json:"schema"`
+	Status       string        `json:"status"`
 	Summary      string        `json:"summary,omitempty"`
 	Data         any           `json:"data"`
 	Presentation *Presentation `json:"presentation,omitempty"`
@@ -124,7 +125,7 @@ func WrapToolResult(tool string, runtime ResultContext, raw *mcp.CallToolResult)
 	envelope.MCPX.Version = Version
 	envelope.MCPX.Trace = buildTrace(tool, runtime, runtime.Timing)
 	envelope.MCPX.Result = Result{
-		Type: resultType, Schema: schemaForType(resultType), Summary: summary,
+		Type: resultType, Schema: schemaForType(resultType), Status: publicResultStatus(raw, data), Summary: summary,
 		Data: resultData, Presentation: DefaultPresentation(resultType), Hints: hints, Actions: actions,
 	}
 	content := []mcp.Content{mcp.NewTextContent(display)}
@@ -181,6 +182,7 @@ func setMetadata(result *mcp.CallToolResult, envelope Envelope, resultType strin
 
 func extractResult(raw *mcp.CallToolResult) (map[string]any, string) {
 	if data, ok := toMap(raw.StructuredContent); ok {
+		data, _ = normalizePublicData(data).(map[string]any)
 		return data, resultSummary(data, firstText(raw))
 	}
 	text := firstText(raw)
@@ -189,9 +191,35 @@ func extractResult(raw *mcp.CallToolResult) (map[string]any, string) {
 	}
 	var data map[string]any
 	if json.Unmarshal([]byte(text), &data) == nil {
+		data, _ = normalizePublicData(data).(map[string]any)
 		return data, resultSummary(data, text)
 	}
 	return map[string]any{"text": text}, text
+}
+
+// normalizePublicData keeps internal handler names out of the ARC payload.
+// Public tools use session_id; remote_session_id remains an implementation
+// name for private handlers and persisted records.
+func normalizePublicData(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		result := make(map[string]any, len(typed))
+		for key, item := range typed {
+			if key == "remote_session_id" {
+				key = "session_id"
+			}
+			result[key] = normalizePublicData(item)
+		}
+		return result
+	case []any:
+		result := make([]any, len(typed))
+		for index, item := range typed {
+			result[index] = normalizePublicData(item)
+		}
+		return result
+	default:
+		return value
+	}
 }
 
 func classify(tool string, isError bool, data map[string]any, summary string) (string, any, Hints, []Action) {
@@ -201,7 +229,7 @@ func classify(tool string, isError bool, data map[string]any, summary string) (s
 	if isError || isErrorData(data) {
 		behavior := "summarize"
 		status, _ := data["status"].(string)
-		if status == "need_confirmation" || status == "need_secret" {
+		if status == "waiting_confirmation" || status == "need_confirmation" {
 			behavior = "ask_confirm"
 		}
 		errorResult := errorData(data)
@@ -217,23 +245,23 @@ func classify(tool string, isError bool, data map[string]any, summary string) (s
 	}
 	resultType := "text"
 	switch {
-	case tool == "plan_manage" && hasAnyKey(inner, "ready", "checks", "blockers"):
+	case (tool == "plan_manage" || tool == "plan_create" || tool == "plan_read" || tool == "plan_transition") && hasAnyKey(inner, "ready", "checks", "blockers"):
 		resultType = "delivery"
-	case tool == "plan_manage" && hasAnyKey(inner, "task_id", "task"):
+	case (tool == "plan_manage" || tool == "plan_create" || tool == "plan_read" || tool == "plan_transition") && hasAnyKey(inner, "task_id", "task"):
 		resultType = "plan_task"
-	case tool == "plan_manage":
+	case tool == "plan_manage" || tool == "plan_create" || tool == "plan_read" || tool == "plan_transition":
 		resultType = "plan"
-	case tool == "change_execute" || tool == "change_manage":
+	case tool == "change_execute" || tool == "change_manage" || tool == "change_prepare" || tool == "change_read" || tool == "change_apply" || tool == "change_revert":
 		// Tool identity wins over content heuristics: the Changeset DTO also
 		// carries a "files" key which would otherwise classify as search_result.
 		resultType = "code_change"
-	case tool == "context_query":
+	case tool == "context_query" || tool == "source_read":
 		resultType = "search_result"
 	case hasAnyKey(inner, "files", "matches"):
 		resultType = "search_result"
 	case hasAnyKey(inner, "changeset_id", "diff"):
 		resultType = "code_change"
-	case tool == "command_execute" || tool == "task_manage" || hasAnyKey(inner, "stdout", "stderr", "exit_code"):
+	case tool == "command_execute" || tool == "command_run" || tool == "task_manage" || tool == "task_read" || tool == "task_control" || hasAnyKey(inner, "stdout", "stderr", "exit_code"):
 		resultType = "log"
 	case hasAnyKey(inner, "columns", "rows"):
 		resultType = "table"
@@ -244,15 +272,28 @@ func classify(tool string, isError bool, data map[string]any, summary string) (s
 	if completed, ok := inner["completed_in_call"].(bool); ok && !completed {
 		behavior = "continue"
 	}
-	if data["status"] == "need_confirmation" {
+	if data["status"] == "waiting_confirmation" {
 		behavior = "ask_confirm"
 	}
 	return resultType, inner, Hints{PreferredBehavior: behavior}, actionsFrom(data)
 }
 
+func publicResultStatus(raw *mcp.CallToolResult, data map[string]any) string {
+	if status, ok := data["status"].(string); ok {
+		switch status {
+		case "succeeded", "accepted", "waiting_confirmation", "interrupted", "failed":
+			return status
+		}
+	}
+	if raw != nil && (raw.IsError || isErrorData(data)) {
+		return "failed"
+	}
+	return "succeeded"
+}
+
 func isErrorData(data map[string]any) bool {
 	status, _ := data["status"].(string)
-	return data["error"] != nil || status == "error" || status == "denied" || status == "unauthorized" || status == "need_confirmation" || status == "need_secret"
+	return data["error"] != nil || status == "failed" || status == "waiting_confirmation" || status == "need_confirmation" || status == "need_secret" || status == "denied" || status == "unauthorized" || status == "error"
 }
 
 func errorData(data map[string]any) map[string]any {
@@ -374,6 +415,14 @@ func resultSummary(data map[string]any, fallback string) string {
 	if summary, ok := data["summary"].(string); ok && strings.TrimSpace(summary) != "" {
 		return summary
 	}
+	if inner, ok := data["data"].(map[string]any); ok {
+		if summary, ok := inner["summary"].(string); ok && strings.TrimSpace(summary) != "" {
+			return summary
+		}
+		if message, ok := inner["message"].(string); ok && strings.TrimSpace(message) != "" {
+			return message
+		}
+	}
 	if message, ok := data["message"].(string); ok && message != "" {
 		return message
 	}
@@ -383,7 +432,7 @@ func resultSummary(data map[string]any, fallback string) string {
 		}
 	}
 	status, _ := data["status"].(string)
-	if status == "error" || status == "denied" || status == "unauthorized" || status == "need_confirmation" || status == "need_secret" {
+	if status == "failed" || status == "waiting_confirmation" {
 		return strings.ReplaceAll(status, "_", " ")
 	}
 	if strings.TrimSpace(fallback) != "" {
@@ -392,14 +441,14 @@ func resultSummary(data map[string]any, fallback string) string {
 			// Envelope.Response and legacy structured payloads must never leak
 			// into host-visible text as raw JSON. RenderToolContent receives the
 			// decoded data and will provide the useful Markdown representation.
-			if status != "" && status != "ok" {
+			if status != "" && status != "succeeded" {
 				return strings.ReplaceAll(status, "_", " ")
 			}
-			return "ok"
+			return "succeeded"
 		}
 		return fallback
 	}
-	if status != "" && status != "ok" {
+	if status != "" && status != "succeeded" {
 		return strings.ReplaceAll(status, "_", " ")
 	}
 	return ""
@@ -521,7 +570,7 @@ func resultDataSchema(name string) map[string]any {
 	case SchemaCodeChange:
 		return object(map[string]any{
 			"changeset_id": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"},
-			"summary": map[string]any{"type": "string"}, "digest": map[string]any{"type": "string"},
+			"summary": map[string]any{"type": "string"}, "digest": map[string]any{"type": "string"}, "expected_digest": map[string]any{"type": "string"},
 			"files": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{
 				"path": map[string]any{"type": "string"}, "new_path": map[string]any{"type": "string"},
 				"operation": map[string]any{"type": "string"}, "diff": map[string]any{"type": "string"},
@@ -624,9 +673,9 @@ func buildOutputSchema() json.RawMessage {
 						"type": "object", "required": []string{"trace_id", "span_id", "source", "tool", "started_at_ms", "received_at_ms", "completed_at_ms", "network_latency_ms", "duration"},
 					},
 					"result": map[string]any{
-						"type": "object", "required": []string{"type", "schema", "data"},
+						"type": "object", "required": []string{"type", "schema", "status", "data"},
 						"properties": map[string]any{
-							"type": map[string]any{"type": "string", "enum": typeValues}, "schema": map[string]any{"type": "string", "enum": schemaValues},
+							"type": map[string]any{"type": "string", "enum": typeValues}, "schema": map[string]any{"type": "string", "enum": schemaValues}, "status": map[string]any{"type": "string", "enum": []string{"succeeded", "accepted", "waiting_confirmation", "interrupted", "failed"}},
 							"summary": map[string]any{"type": "string"}, "data": map[string]any{"oneOf": dataRefs},
 							"presentation": map[string]any{
 								"type": "object", "required": []string{"default", "available", "fallback"},

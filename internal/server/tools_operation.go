@@ -1,0 +1,580 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/mark3labs/mcp-go/mcp"
+
+	"mcpx/internal/envelope"
+	"mcpx/internal/operation"
+	"mcpx/internal/remotesession"
+)
+
+func (r *Runtime) toolOperationBatch(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	envReq, _, session, fail := r.changeRequest(ctx, req, true)
+	if fail != nil {
+		return fail, nil
+	}
+	if session.Role != "owner" && session.Role != "editor" {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "forbidden", "operation_batch requires an owner or editor session")
+	}
+	items, ok := envReq.Payload["operations"].([]any)
+	if !ok || len(items) == 0 {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", "operations is required")
+	}
+	if len(items) > operation.MaxSteps {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", fmt.Sprintf("operations exceeds %d steps", operation.MaxSteps))
+	}
+	steps := make([]operation.StepSpec, 0, len(items))
+	for index, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", fmt.Sprintf("operations[%d] must be an object", index))
+		}
+		stepID, _ := item["id"].(string)
+		toolName, _ := item["tool"].(string)
+		arguments, _ := item["arguments"].(map[string]any)
+		stepID = strings.TrimSpace(stepID)
+		toolName = strings.TrimSpace(toolName)
+		if stepID == "" || toolName == "" || arguments == nil {
+			return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", fmt.Sprintf("operations[%d] requires id, tool and arguments", index))
+		}
+		if toolName == "operation_batch" || toolName == "operation_manage" || toolName == "secret_provide" {
+			message := fmt.Sprintf("tool %q cannot be nested in operation_batch", toolName)
+			if toolName == "operation_manage" {
+				message += "; use operation_manage with action=status/result and operation_ids for batch queries"
+			}
+			return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", message)
+		}
+		dependsOn, err := parseStringSliceValue(item["depends_on"])
+		if err != nil {
+			return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", fmt.Sprintf("step %q: %v", stepID, err))
+		}
+		if err := r.validateOperationToolArguments(toolName, arguments, session.ID, envReq.Intent); err != nil {
+			return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", fmt.Sprintf("step %q: %v", stepID, err))
+		}
+		r.toolIndexMu.RLock()
+		meta, exists := r.toolMeta[toolName]
+		_, registered := r.toolHandlers[toolName]
+		r.toolIndexMu.RUnlock()
+		if !exists || !registered {
+			return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", fmt.Sprintf("tool %q is not registered", toolName))
+		}
+		steps = append(steps, operation.StepSpec{
+			ID: stepID, Tool: toolName, Arguments: cloneArguments(arguments), DependsOn: dependsOn,
+			Exclusive: !meta.ReadOnly || meta.OpenWorld,
+		})
+	}
+	record, err := r.operations.Submit(ctx, operation.SubmitSpec{
+		RemoteSessionID: session.ID, WorkspaceName: session.WorkspaceName,
+		RequestID: envReq.RequestID, Purpose: envReq.Intent, Steps: steps,
+	}, r.executeOperationStep)
+	if err != nil {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "operation_submit_error", err.Error())
+	}
+	response := envelope.Accepted(envReq.RequestID, session.WorkspaceName, operationView(record, false))
+	response.RemoteSessionID = session.ID
+	return r.resultJSON(response)
+}
+
+func (r *Runtime) toolOperationManage(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	envReq, principal, fail := r.remoteRequest(ctx, req)
+	if fail != nil {
+		return fail, nil
+	}
+	remoteID, err := requireRemoteSessionID(envReq)
+	if err != nil {
+		return r.remoteError(envReq, "", "", err)
+	}
+	session, err := r.remote.Get(ctx, principal, remoteID)
+	if err != nil {
+		return r.remoteError(envReq, remoteID, "", err)
+	}
+	action := strings.ToLower(stringPayload(envReq.Payload, "action"))
+	if action == "" {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", "action is required")
+	}
+	if r.operations == nil {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "operation_unavailable", "asynchronous operations are unavailable")
+	}
+	operationIDs, batch, err := parseOperationTargets(envReq.Payload, action)
+	if err != nil {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", err.Error())
+	}
+	records := make([]operation.Record, len(operationIDs))
+	for index, operationID := range operationIDs {
+		record, err := r.operations.Get(ctx, operationID)
+		if err != nil {
+			return r.operationError(envReq, session, err)
+		}
+		if record.RemoteSessionID != session.ID {
+			return r.terminalError(envReq, session.ID, session.WorkspaceName, "forbidden", "operation belongs to another Remote Session")
+		}
+		records[index] = record
+	}
+	if batch {
+		return r.operationBatchManageResponse(ctx, envReq, session, action, records)
+	}
+	operationID := operationIDs[0]
+	record := records[0]
+	switch action {
+	case "status":
+		return r.operationResponse(envReq, session, record, operationView(record, false), false)
+	case "wait":
+		timeout := time.Duration(intPayload(envReq.Payload, "timeout_ms")) * time.Millisecond
+		if timeout <= 0 {
+			timeout = 30 * time.Second
+		}
+		if timeout > 60*time.Second {
+			timeout = 60 * time.Second
+		}
+		record, timedOut, err := r.operations.Wait(ctx, operationID, timeout)
+		if err != nil {
+			return r.operationError(envReq, session, err)
+		}
+		return r.operationResponse(envReq, session, record, operationView(record, !timedOut), timedOut)
+	case "result":
+		page, err := r.operations.Result(ctx, operationID, stringPayload(envReq.Payload, "step_id"), stringPayload(envReq.Payload, "cursor"), intPayload(envReq.Payload, "limit"))
+		if err != nil {
+			return r.operationError(envReq, session, err)
+		}
+		data := operationResultView(page)
+		data["step_id"] = page.StepID
+		return r.operationResponse(envReq, session, page.Operation, data, false)
+	case "cancel":
+		record, err := r.operations.Cancel(ctx, operationID)
+		if err != nil {
+			return r.operationError(envReq, session, err)
+		}
+		return r.operationResponse(envReq, session, record, operationView(record, false), false)
+	case "resume":
+		stepID := stringPayload(envReq.Payload, "step_id")
+		token := stringPayload(envReq.Payload, "confirmation_token")
+		record, err := r.operations.Resume(ctx, operationID, stepID, token, r.executeOperationStep)
+		if err != nil {
+			return r.operationError(envReq, session, err)
+		}
+		return r.operationResponse(envReq, session, record, operationView(record, false), false)
+	default:
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", fmt.Sprintf("unsupported operation action %q", action))
+	}
+}
+
+func parseOperationTargets(payload map[string]any, action string) ([]string, bool, error) {
+	operationID := strings.TrimSpace(stringPayload(payload, "operation_id"))
+	rawIDs, hasIDs := payload["operation_ids"]
+	if operationID != "" && hasIDs {
+		return nil, false, errors.New("operation_id and operation_ids are mutually exclusive")
+	}
+	if hasIDs {
+		ids, err := parseNonEmptyStringSlice(rawIDs, "operation_ids")
+		if err != nil {
+			return nil, false, err
+		}
+		if len(ids) == 0 || len(ids) > operation.MaxBatchQueries {
+			return nil, false, fmt.Errorf("operation_ids must contain 1-%d IDs", operation.MaxBatchQueries)
+		}
+		seen := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			if _, exists := seen[id]; exists {
+				return nil, false, fmt.Errorf("operation_ids contains duplicate ID %q", id)
+			}
+			seen[id] = struct{}{}
+		}
+		if action != "status" && action != "result" {
+			return nil, false, errors.New("batch operation_ids supports only action=status or action=result")
+		}
+		_, hasStepID := payload["step_id"]
+		_, hasCursor := payload["cursor"]
+		if hasStepID || hasCursor {
+			return nil, false, errors.New("step_id and cursor require a single operation_id")
+		}
+		return ids, true, nil
+	}
+	if operationID == "" {
+		return nil, false, errors.New("exactly one of operation_id or operation_ids is required")
+	}
+	return []string{operationID}, false, nil
+}
+
+func parseNonEmptyStringSlice(value any, field string) ([]string, error) {
+	var items []any
+	switch typed := value.(type) {
+	case []any:
+		items = typed
+	case []string:
+		items = make([]any, len(typed))
+		for index, item := range typed {
+			items[index] = item
+		}
+	default:
+		return nil, fmt.Errorf("%s must be an array of strings", field)
+	}
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		text, ok := item.(string)
+		text = strings.TrimSpace(text)
+		if !ok || text == "" {
+			return nil, fmt.Errorf("%s must contain only non-empty strings", field)
+		}
+		result = append(result, text)
+	}
+	return result, nil
+}
+
+func (r *Runtime) validateOperationToolArguments(toolName string, arguments map[string]any, sessionID, purpose string) error {
+	r.toolIndexMu.RLock()
+	tool, exists := r.toolIndex[toolName]
+	r.toolIndexMu.RUnlock()
+	if !exists {
+		return fmt.Errorf("tool %q is not registered", toolName)
+	}
+	if len(tool.RawInputSchema) == 0 {
+		return nil
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(tool.RawInputSchema, &schema); err != nil {
+		return fmt.Errorf("invalid schema for tool %q", toolName)
+	}
+	merged := cloneArguments(arguments)
+	merged["session_id"] = sessionID
+	merged["purpose"] = purpose
+	return validateOperationSchemaValue(merged, schema, "arguments")
+}
+
+func (r *Runtime) operationResponse(envReq envelope.Request, session remotesession.Session, record operation.Record, data map[string]any, timedOut bool) (*mcp.CallToolResult, error) {
+	if timedOut || record.State == operation.StateQueued || record.State == operation.StateRunning {
+		response := envelope.Accepted(envReq.RequestID, session.WorkspaceName, data)
+		response.RemoteSessionID = session.ID
+		return r.resultJSON(response)
+	}
+	if record.State == operation.StateWaitingConfirmation {
+		response := envelope.Fail(envelope.StatusNeedConfirmation, envReq.RequestID, session.WorkspaceName, data, "USER_CONFIRMATION_REQUIRED", "操作等待语义确认")
+		response.RemoteSessionID = session.ID
+		return r.resultJSON(response)
+	}
+	if record.State == operation.StateInterrupted || record.State == operation.StateCancelled {
+		response := envelope.Interrupted(envReq.RequestID, session.WorkspaceName, data)
+		response.RemoteSessionID = session.ID
+		return r.resultJSON(response)
+	}
+	if record.State == operation.StateFailed {
+		response := envelope.Fail(envelope.StatusError, envReq.RequestID, session.WorkspaceName, data, "OPERATION_FAILED", "异步操作执行失败")
+		response.RemoteSessionID = session.ID
+		return r.resultJSON(response)
+	}
+	response := envelope.OK(envReq.RequestID, session.WorkspaceName, data)
+	response.RemoteSessionID = session.ID
+	return r.resultJSON(response)
+}
+
+func (r *Runtime) operationBatchManageResponse(ctx context.Context, envReq envelope.Request, session remotesession.Session, action string, records []operation.Record) (*mcp.CallToolResult, error) {
+	items := make([]map[string]any, len(records))
+	switch action {
+	case "status":
+		for index, record := range records {
+			items[index] = operationView(record, false)
+		}
+	case "result":
+		limit := intPayload(envReq.Payload, "limit")
+		if limit <= 0 {
+			// Batch results are usually read for their content, not for a
+			// compact summary; default to the maximum single-result budget so
+			// a source_read batch is not truncated into unusable chunks.
+			limit = operation.MaxResultBytes
+		}
+		for index, record := range records {
+			page, err := r.operations.Result(ctx, record.ID, "", "", limit)
+			if err != nil {
+				return r.operationError(envReq, session, err)
+			}
+			records[index] = page.Operation
+			items[index] = operationResultView(page)
+		}
+	default:
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", fmt.Sprintf("unsupported batch operation action %q", action))
+	}
+	data := map[string]any{"action": action, "items": items}
+	status := operationBatchStatus(records)
+	var response envelope.Response
+	switch status {
+	case envelope.StatusAccepted:
+		response = envelope.Accepted(envReq.RequestID, session.WorkspaceName, data)
+	case envelope.StatusNeedConfirmation:
+		response = envelope.Fail(envelope.StatusNeedConfirmation, envReq.RequestID, session.WorkspaceName, data, "USER_CONFIRMATION_REQUIRED", "批量操作中存在等待语义确认的操作")
+	case envelope.StatusInterrupted:
+		response = envelope.Interrupted(envReq.RequestID, session.WorkspaceName, data)
+	case envelope.StatusError:
+		response = envelope.Fail(envelope.StatusError, envReq.RequestID, session.WorkspaceName, data, "OPERATION_FAILED", "批量操作中存在执行失败的操作")
+	default:
+		response = envelope.OK(envReq.RequestID, session.WorkspaceName, data)
+	}
+	response.RemoteSessionID = session.ID
+	return r.resultJSON(response)
+}
+
+func operationBatchStatus(records []operation.Record) envelope.Status {
+	if len(records) == 0 {
+		return envelope.StatusError
+	}
+	var hasRunning, hasFailed, hasInterrupted bool
+	for _, record := range records {
+		switch record.State {
+		case operation.StateWaitingConfirmation:
+			return envelope.StatusNeedConfirmation
+		case operation.StateQueued, operation.StateRunning:
+			hasRunning = true
+		case operation.StateFailed:
+			hasFailed = true
+		case operation.StateInterrupted, operation.StateCancelled:
+			hasInterrupted = true
+		case operation.StateSucceeded:
+		default:
+			return envelope.StatusError
+		}
+	}
+	if hasRunning {
+		return envelope.StatusAccepted
+	}
+	if hasFailed {
+		return envelope.StatusError
+	}
+	if hasInterrupted {
+		return envelope.StatusInterrupted
+	}
+	return envelope.StatusOK
+}
+
+func (r *Runtime) operationError(envReq envelope.Request, session remotesession.Session, err error) (*mcp.CallToolResult, error) {
+	code := "operation_error"
+	if errors.Is(err, operation.ErrNotFound) {
+		code = "operation_not_found"
+	} else if errors.Is(err, operation.ErrAlreadyCompleted) {
+		code = "operation_already_completed"
+	} else if errors.Is(err, operation.ErrConfirmation) {
+		code = "confirmation_invalid"
+	}
+	return r.terminalError(envReq, session.ID, session.WorkspaceName, code, err.Error())
+}
+
+func operationView(record operation.Record, includeResults bool) map[string]any {
+	data := map[string]any{
+		"operation_id": record.ID, "session_id": record.RemoteSessionID, "workspace": record.WorkspaceName,
+		"state": record.State, "purpose": record.Purpose,
+	}
+	steps := make([]map[string]any, 0, len(record.Steps))
+	for _, step := range record.Steps {
+		view := map[string]any{"id": step.ID, "tool": step.Tool, "state": step.State, "depends_on": step.DependsOn}
+		if step.ConfirmationToken != "" {
+			view["confirmation_token"] = step.ConfirmationToken
+		}
+		if includeResults {
+			view["result"] = operationResultValue(step.Result)
+			view["error"] = decodeJSONValue(step.Error)
+		}
+		steps = append(steps, view)
+	}
+	data["steps"] = steps
+	if record.State == operation.StateQueued || record.State == operation.StateRunning {
+		data["next_action"] = nextActionWithReason("operation_manage", "操作仍在执行；使用一次 wait 等待结果，不要重复轮询 status", map[string]any{
+			"session_id":   record.RemoteSessionID,
+			"operation_id": record.ID,
+			"action":       "wait",
+			"timeout_ms":   30000,
+		})
+	}
+	if includeResults {
+		data["result"] = operationResultValue(record.Result)
+		data["error"] = decodeJSONValue(record.Error)
+	}
+	return data
+}
+
+func operationResultView(page operation.ResultPage) map[string]any {
+	data := operationView(page.Operation, false)
+	data["result"] = operationResultValue(page.Result)
+	data["next_cursor"] = page.NextCursor
+	if page.NextCursor != "" {
+		arguments := map[string]any{
+			"session_id":   page.Operation.RemoteSessionID,
+			"operation_id": page.Operation.ID,
+			"action":       "result",
+			"cursor":       page.NextCursor,
+		}
+		if page.StepID != "" {
+			arguments["step_id"] = page.StepID
+		}
+		data["next_action"] = map[string]any{
+			"tool":      "operation_manage",
+			"reason":    "结果超过单次返回上限，使用返回的 cursor 继续读取剩余内容",
+			"arguments": arguments,
+		}
+	}
+	return data
+}
+
+// operationResultValue unwraps the mcp.CallToolResult envelope stored by an
+// operation step. Depending on where the result was persisted, the value is
+// either the raw CallToolResult or a wrapper with a result field. Returning
+// the inner text (parsed as JSON when possible) keeps status/wait/result
+// responses directly usable and avoids a second serial parsing round trip.
+func operationResultValue(raw json.RawMessage) any {
+	value := decodeJSONValue(raw)
+	wrapper, ok := value.(map[string]any)
+	if !ok {
+		return value
+	}
+	result := wrapper
+	if nested, hasNested := wrapper["result"].(map[string]any); hasNested {
+		result = nested
+	}
+	return unwrapToolContent(result, value)
+}
+
+func unwrapToolContent(result map[string]any, fallback any) any {
+	content, ok := result["content"].([]any)
+	if !ok || len(content) == 0 {
+		return fallback
+	}
+	first, ok := content[0].(map[string]any)
+	if !ok {
+		return fallback
+	}
+	text, ok := first["text"].(string)
+	if !ok || strings.TrimSpace(text) == "" {
+		return fallback
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(text), &decoded); err == nil {
+		return decoded
+	}
+	return text
+}
+
+func decodeJSONValue(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return map[string]any{}
+	}
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return string(raw)
+	}
+	return value
+}
+
+func parseStringSliceValue(value any) ([]string, error) {
+	if value == nil {
+		return nil, nil
+	}
+	items, ok := value.([]any)
+	if !ok {
+		return nil, errors.New("depends_on must be an array of strings")
+	}
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		text, ok := item.(string)
+		if !ok || strings.TrimSpace(text) == "" {
+			return nil, errors.New("depends_on must contain only non-empty strings")
+		}
+		result = append(result, strings.TrimSpace(text))
+	}
+	return result, nil
+}
+
+func validateOperationSchemaValue(value any, schema map[string]any, path string) error {
+	if branches, ok := schema["oneOf"].([]any); ok && len(branches) > 0 {
+		for _, raw := range branches {
+			branch, ok := raw.(map[string]any)
+			if ok && validateOperationSchemaValue(value, branch, path) == nil {
+				return nil
+			}
+		}
+		return fmt.Errorf("%s does not match any supported schema branch", path)
+	}
+	if enum, ok := schema["enum"].([]any); ok && len(enum) > 0 {
+		matched := false
+		for _, item := range enum {
+			if fmt.Sprint(item) == fmt.Sprint(value) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("%s has an unsupported value", path)
+		}
+	}
+	if constant, exists := schema["const"]; exists && fmt.Sprint(constant) != fmt.Sprint(value) {
+		return fmt.Errorf("%s has an unsupported value", path)
+	}
+	switch schemaType := schema["type"].(string); schemaType {
+	case "object":
+		object, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s must be an object", path)
+		}
+		properties, _ := schema["properties"].(map[string]any)
+		if required, ok := schema["required"].([]any); ok {
+			for _, raw := range required {
+				key, _ := raw.(string)
+				if _, exists := object[key]; !exists {
+					return fmt.Errorf("missing required field %q", key)
+				}
+			}
+		}
+		for key, item := range object {
+			rawSchema, known := properties[key].(map[string]any)
+			if !known {
+				if isOperationInjectedField(key) {
+					continue
+				}
+				if additional, explicit := schema["additionalProperties"].(bool); explicit && !additional {
+					return fmt.Errorf("unknown field %q", key)
+				}
+				continue
+			}
+			if err := validateOperationSchemaValue(item, rawSchema, path+"."+key); err != nil {
+				return err
+			}
+		}
+	case "array":
+		items, ok := value.([]any)
+		if !ok {
+			return fmt.Errorf("%s must be an array", path)
+		}
+		itemSchema, _ := schema["items"].(map[string]any)
+		for index, item := range items {
+			if err := validateOperationSchemaValue(item, itemSchema, fmt.Sprintf("%s[%d]", path, index)); err != nil {
+				return err
+			}
+		}
+	case "string":
+		if _, ok := value.(string); !ok {
+			return fmt.Errorf("%s must be a string", path)
+		}
+	case "number", "integer":
+		switch value.(type) {
+		case float64, float32, int, int64, int32, uint, uint64, uint32:
+		default:
+			return fmt.Errorf("%s must be a number", path)
+		}
+	case "boolean":
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("%s must be a boolean", path)
+		}
+	}
+	return nil
+}
+
+func isOperationInjectedField(key string) bool {
+	switch key {
+	case "session_id", "remote_session_id", "purpose", "intent", "progress_summary", "execution_mode":
+		return true
+	default:
+		return false
+	}
+}

@@ -51,7 +51,7 @@ func TestMachineToolCapabilitiesApplyRoleAndFeatureState(t *testing.T) {
 	for _, item := range items {
 		states[item["name"].(string)] = item["state"].(string)
 	}
-	if states["file_read"] != "available" || states["change_execute"] != "forbidden" || states["command_execute"] != "disabled" {
+	if states["source_read"] != "available" || states["change_apply"] != "forbidden" || states["command_run"] != "disabled" {
 		t.Fatalf("unexpected capability states: %+v", states)
 	}
 }
@@ -110,15 +110,15 @@ func TestCapabilityListIncludesInstructionsSkillsAndRoleState(t *testing.T) {
 		t.Fatalf("skills: %+v", skills)
 	}
 	tools := data["tools"].([]any)
-	foundChangeExecute := false
+	foundChangeApply := false
 	for _, raw := range tools {
 		item := raw.(map[string]any)
-		if item["name"] == "change_execute" {
-			foundChangeExecute = item["state"] == "available"
+		if item["name"] == "change_apply" {
+			foundChangeApply = item["state"] == "available"
 		}
 	}
-	if !foundChangeExecute {
-		t.Fatal("owner capability did not expose change_execute as available")
+	if !foundChangeApply {
+		t.Fatal("owner capability did not expose change_apply as available")
 	}
 
 	var readRequest mcp.CallToolRequest

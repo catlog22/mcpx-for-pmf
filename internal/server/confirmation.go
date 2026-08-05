@@ -8,10 +8,11 @@ func pendingConfirmationItems(pending []approval.Pending) []map[string]any {
 	items := make([]map[string]any, 0, len(pending))
 	for _, item := range pending {
 		view := map[string]any{
-			"tool":       item.Tool,
-			"summary":    item.Summary,
-			"workspace":  item.Workspace,
-			"created_at": item.CreatedAt,
+			"tool":               item.Tool,
+			"summary":            item.Summary,
+			"workspace":          item.Workspace,
+			"created_at":         item.CreatedAt,
+			"confirmation_token": item.ConfirmationToken,
 		}
 		if item.ChangesetID != "" {
 			view["changeset_id"] = item.ChangesetID

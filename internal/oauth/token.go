@@ -11,9 +11,11 @@ import (
 )
 
 const (
-	CodeTTLSeconds  = 300
-	MaxPendingCodes = 256
-	DefaultScope    = "mcp"
+	CodeTTLSeconds         = 300
+	MaxPendingCodes        = 256
+	RefreshTokenTTLSeconds = 30 * 24 * 3600
+	MaxRefreshTokens       = 4096
+	DefaultScope           = "mcp"
 )
 
 // Server holds process-local OAuth state.
@@ -24,8 +26,9 @@ type Server struct {
 	TokenTTL    int // seconds
 	Registry    *Registry
 
-	mu    sync.Mutex
-	codes map[string]*authCode
+	mu      sync.Mutex
+	codes   map[string]*authCode
+	refresh map[string]*refreshGrant
 }
 
 type authCode struct {
@@ -36,6 +39,14 @@ type authCode struct {
 	Resource            string
 	Scope               string
 	ExpiresAt           time.Time
+}
+
+// refreshGrant is a long-lived opaque refresh token bound to a client.
+type refreshGrant struct {
+	ClientID  string
+	Resource  string
+	Scope     string
+	ExpiresAt time.Time
 }
 
 // NewServer builds an OAuth server. tokenSecret must be non-empty.
@@ -50,6 +61,7 @@ func NewServer(password, serverURL string, tokenSecret []byte, tokenTTL int) *Se
 		TokenTTL:    tokenTTL,
 		Registry:    NewRegistry(),
 		codes:       map[string]*authCode{},
+		refresh:     map[string]*refreshGrant{},
 	}
 }
 
@@ -137,6 +149,73 @@ func (s *Server) ExchangeCode(code, redirectURI, clientID, codeVerifier, resourc
 		return "", 0, err
 	}
 	return tok, s.TokenTTL, nil
+}
+
+// IssueRefreshToken creates an opaque refresh token for the client/resource.
+func (s *Server) IssueRefreshToken(clientID, resource, scope string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneRefreshLocked()
+	if len(s.refresh) >= MaxRefreshTokens {
+		// Evict the oldest grant so a busy deployment cannot block reconnects.
+		var oldestKey string
+		var oldest time.Time
+		for k, g := range s.refresh {
+			if oldestKey == "" || g.ExpiresAt.Before(oldest) {
+				oldestKey, oldest = k, g.ExpiresAt
+			}
+		}
+		if oldestKey != "" {
+			delete(s.refresh, oldestKey)
+		}
+	}
+	if scope == "" {
+		scope = DefaultScope
+	}
+	tok := TokenURLSafe(32)
+	for s.refresh[tok] != nil {
+		tok = TokenURLSafe(32)
+	}
+	s.refresh[tok] = &refreshGrant{
+		ClientID:  clientID,
+		Resource:  resource,
+		Scope:     scope,
+		ExpiresAt: time.Now().Add(RefreshTokenTTLSeconds * time.Second),
+	}
+	return tok
+}
+
+// ExchangeRefreshToken rotates a refresh token and mints a new access token.
+func (s *Server) ExchangeRefreshToken(refreshToken, clientID, resource string) (string, int, string, error) {
+	s.mu.Lock()
+	g, ok := s.refresh[refreshToken]
+	if ok {
+		delete(s.refresh, refreshToken)
+	}
+	s.mu.Unlock()
+	if !ok || time.Now().After(g.ExpiresAt) {
+		return "", 0, "", fmt.Errorf("invalid_grant")
+	}
+	if g.ClientID != clientID {
+		return "", 0, "", fmt.Errorf("invalid_grant")
+	}
+	res := g.Resource
+	if resource != "" {
+		res = resource
+	}
+	issuer := s.EffectiveIssuer("")
+	if issuer == "" {
+		issuer = issuerFromResource(res)
+	}
+	if res == "" {
+		res = s.ResourceURL(issuer)
+	}
+	tok, err := s.CreateAccessToken(clientID, res, issuer)
+	if err != nil {
+		return "", 0, "", err
+	}
+	next := s.IssueRefreshToken(clientID, res, g.Scope)
+	return tok, s.TokenTTL, next, nil
 }
 
 func issuerFromResource(resource string) string {
@@ -228,6 +307,15 @@ func (s *Server) pruneCodesLocked() {
 	for k, v := range s.codes {
 		if now.After(v.ExpiresAt) {
 			delete(s.codes, k)
+		}
+	}
+}
+
+func (s *Server) pruneRefreshLocked() {
+	now := time.Now()
+	for k, v := range s.refresh {
+		if now.After(v.ExpiresAt) {
+			delete(s.refresh, k)
 		}
 	}
 }

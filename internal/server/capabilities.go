@@ -23,23 +23,36 @@ type toolCapabilityDefinition struct {
 // are fingerprinted from the resulting MCP registration.
 var toolCapabilityDefinitions = []toolCapabilityDefinition{
 	{Name: "workspace_list", Domain: "workspace"},
+	{Name: "workspace_observe", Domain: "workspace", RequiresRemoteSession: true},
+	{Name: "workspace_history_read", Domain: "workspace"},
+	{Name: "operation_batch", Domain: "operation", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+	{Name: "operation_manage", Domain: "operation", RequiresRemoteSession: true},
 	{Name: "session_open", Domain: "session"},
-	{Name: "file_read", Domain: "source", RequiresRemoteSession: true},
-	{Name: "context_query", Domain: "source", RequiresRemoteSession: true},
-	{Name: "change_execute", Domain: "change", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
-	{Name: "command_execute", Domain: "command", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "terminal"},
+	{Name: "session_read", Domain: "session"},
+	{Name: "session_transition", Domain: "session", Roles: []string{"owner", "editor"}},
+	{Name: "source_read", Domain: "source", RequiresRemoteSession: true},
+	{Name: "change_prepare", Domain: "change", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+	{Name: "change_read", Domain: "change", RequiresRemoteSession: true},
+	{Name: "change_discard", Domain: "change", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+	{Name: "change_apply", Domain: "change", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+	{Name: "change_revert", Domain: "change", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+	{Name: "command_run", Domain: "command", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "terminal"},
+	{Name: "task_read", Domain: "task", RequiresRemoteSession: true, Feature: "terminal"},
+	{Name: "task_control", Domain: "task", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "terminal"},
 	{Name: "progress_report", Domain: "observability", RequiresRemoteSession: true},
-	{Name: "session_manage", Domain: "session"},
-	{Name: "change_manage", Domain: "change", RequiresRemoteSession: true},
-	{Name: "task_manage", Domain: "task", RequiresRemoteSession: true, Feature: "terminal"},
-	{Name: "plan_manage", Domain: "plan", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
-	{Name: "runtime_inspect", Domain: "runtime"},
-	{Name: "environment_inspect", Domain: "environment"},
-	{Name: "workspace_state", Domain: "workspace", RequiresRemoteSession: true},
-	{Name: "extension_manage", Domain: "extension"},
-	{Name: "artifact_manage", Domain: "artifact", RequiresRemoteSession: true},
+	{Name: "plan_create", Domain: "plan", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+	{Name: "plan_read", Domain: "plan", RequiresRemoteSession: true},
+	{Name: "plan_transition", Domain: "plan", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+	{Name: "runtime_read", Domain: "runtime"},
+	{Name: "environment_read", Domain: "environment"},
+	{Name: "environment_snapshot_create", Domain: "environment", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+	{Name: "extension_discover", Domain: "extension"},
+	{Name: "skill_call", Domain: "extension", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "skills"},
+	{Name: "mcp_call", Domain: "extension", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "mcp"},
+	{Name: "artifact_read", Domain: "artifact", RequiresRemoteSession: true},
+	{Name: "artifact_register", Domain: "artifact", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "screenshot_capture", Domain: "screenshot", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
-	{Name: "secrets_provide", Domain: "secrets", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+	{Name: "secret_provide", Domain: "secrets", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 }
 
 func machineToolCapabilities(effective config.Config, session *remotesession.Session) []map[string]any {
@@ -65,7 +78,7 @@ func machineToolCapabilities(effective config.Config, session *remotesession.Ses
 			}
 		}
 		if state == "available" && definition.RequiresRemoteSession && session == nil {
-			state, reason = "requires_remote_session", "remote_session_id_required"
+			state, reason = "requires_remote_session", "session_id_required"
 		}
 		if state == "available" && session != nil && len(definition.Roles) > 0 && !containsString(definition.Roles, session.Role) {
 			state, reason = "forbidden", "role_not_allowed"

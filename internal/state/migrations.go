@@ -338,6 +338,62 @@ var migrations = []string{
 		ON environment_snapshots(created_at, remote_session_id);`,
 	`ALTER TABLE changeset_files ADD COLUMN deleted_files INTEGER NOT NULL DEFAULT 0;
 	ALTER TABLE changeset_files ADD COLUMN deleted_directories INTEGER NOT NULL DEFAULT 0;`,
+	`ALTER TABLE observation_events ADD COLUMN status TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN purpose TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN parent_operation_id TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN command TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN working_directory TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN exit_code INTEGER;
+	ALTER TABLE observation_events ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0;
+	ALTER TABLE observation_events ADD COLUMN skill_name TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN mcp_server TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN mcp_tool TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN path TEXT NOT NULL DEFAULT '';
+	CREATE INDEX IF NOT EXISTS idx_observation_events_history_filters
+		ON observation_events(workspace_name, remote_session_id, created_at, sequence);`,
+	`CREATE TABLE IF NOT EXISTS operations (
+		id TEXT PRIMARY KEY,
+		remote_session_id TEXT NOT NULL,
+		workspace_name TEXT NOT NULL,
+		request_id TEXT NOT NULL,
+		purpose TEXT NOT NULL DEFAULT '',
+		state TEXT NOT NULL CHECK (state IN ('queued','running','succeeded','failed','waiting_confirmation','interrupted','cancelled')),
+		result_json TEXT NOT NULL DEFAULT '{}',
+		error_json TEXT NOT NULL DEFAULT '{}',
+		created_at INTEGER NOT NULL,
+		started_at INTEGER,
+		completed_at INTEGER,
+		expires_at INTEGER NOT NULL,
+		FOREIGN KEY (remote_session_id) REFERENCES remote_sessions(id) ON DELETE CASCADE
+	);
+	CREATE TABLE IF NOT EXISTS operation_steps (
+		operation_id TEXT NOT NULL,
+		step_id TEXT NOT NULL,
+		tool_name TEXT NOT NULL,
+		arguments_json TEXT NOT NULL DEFAULT '{}',
+		depends_on_json TEXT NOT NULL DEFAULT '[]',
+		exclusive INTEGER NOT NULL DEFAULT 1,
+		state TEXT NOT NULL CHECK (state IN ('queued','running','succeeded','failed','waiting_confirmation','interrupted','cancelled','skipped')),
+		request_id TEXT NOT NULL,
+		result_json TEXT NOT NULL DEFAULT '{}',
+		error_json TEXT NOT NULL DEFAULT '{}',
+		confirmation_token TEXT NOT NULL DEFAULT '',
+		created_at INTEGER NOT NULL,
+		started_at INTEGER,
+		completed_at INTEGER,
+		PRIMARY KEY (operation_id, step_id),
+		FOREIGN KEY (operation_id) REFERENCES operations(id) ON DELETE CASCADE
+	);
+	CREATE INDEX IF NOT EXISTS idx_operations_session_created
+		ON operations(remote_session_id, created_at DESC, id DESC);
+	CREATE INDEX IF NOT EXISTS idx_operations_state
+		ON operations(state, created_at);
+	CREATE INDEX IF NOT EXISTS idx_operation_steps_state
+		ON operation_steps(operation_id, state, step_id);
+	CREATE INDEX IF NOT EXISTS idx_operations_retention
+		ON operations(state, expires_at, remote_session_id);`,
+	`ALTER TABLE observation_events ADD COLUMN step_id TEXT NOT NULL DEFAULT '';`,
+	`ALTER TABLE changesets ADD COLUMN discarded_at INTEGER;`,
 }
 
 func applyMigrations(ctx context.Context, db *sql.DB) error {

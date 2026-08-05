@@ -36,7 +36,7 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req mcp.CallToolReque
 	}
 	if raw, ok := envReq.Payload["items"].([]any); ok && len(raw) > 0 {
 		if mode == "full" {
-			return r.sourceError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("full mode currently accepts one path; read each preview file separately"))
+			return r.sourceError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("full mode requires a single path; batch items are only supported in window mode"))
 		}
 		if len(raw) > 20 {
 			return r.sourceError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("items exceeds maximum of 20"))
@@ -62,7 +62,8 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req mcp.CallToolReque
 		results := make([]map[string]any, 0, len(batch.Results))
 		for _, item := range batch.Results {
 			entry := map[string]any{
-				"path": item.Path, "ok": item.OK, "content": item.Content, "sha256": item.SHA256,
+				"path": item.Path, "ok": item.OK, "content": item.Content, "sha256": item.SHA256, "line_ending": item.LineEnding,
+				"format": formatMap(item.Format),
 				"offset": item.Offset, "limit": item.Limit, "total_lines": item.TotalLines, "truncated": item.Truncated,
 			}
 			if item.Truncated {
@@ -83,7 +84,7 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req mcp.CallToolReque
 				}
 				details := map[string]any{}
 				if code == "NOT_FOUND" {
-					details["next_action"] = nextActionWithReason("context_query", "locate this path before retrying file_read", map[string]any{
+					details["next_action"] = nextActionWithReason("context_query", "locate this path before retrying source_read", map[string]any{
 						"remote_session_id": session.ID,
 						"action":            "list",
 					})
@@ -126,7 +127,9 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req mcp.CallToolReque
 		return r.sourceError(envReq, session.ID, session.WorkspaceName, err)
 	}
 	data := map[string]any{
-		"path": read.Path, "content": read.Content, "sha256": read.SHA256, "offset": read.Offset, "limit": read.Limit, "total_lines": read.TotalLines, "truncated": read.Truncated,
+		"path": read.Path, "content": read.Content, "sha256": read.SHA256, "line_ending": read.LineEnding,
+		"format": formatMap(read.Format),
+		"offset": read.Offset, "limit": read.Limit, "total_lines": read.TotalLines, "truncated": read.Truncated,
 	}
 	if read.Truncated {
 		data["next_action"] = nextAction("file_read", map[string]any{"remote_session_id": session.ID, "path": path, "offset": read.Offset + read.Limit, "limit": read.Limit})
@@ -169,11 +172,13 @@ func sourceReadMode(payload map[string]any) string {
 
 func fullFileReadData(read file.FullReadResult) map[string]any {
 	data := map[string]any{
-		"path":       read.Path,
-		"mode":       "full",
-		"mime_type":  read.MIMEType,
-		"size_bytes": read.Size,
-		"sha256":     read.SHA256,
+		"path":        read.Path,
+		"mode":        "full",
+		"mime_type":   read.MIMEType,
+		"size_bytes":  read.Size,
+		"line_ending": read.LineEnding,
+		"format":      formatMap(read.Format),
+		"sha256":      read.SHA256,
 	}
 	if strings.HasPrefix(read.MIMEType, "image/") && read.MIMEType != "image/svg+xml" {
 		data["encoding"] = "base64"
@@ -213,6 +218,20 @@ func fullReadLineCount(content string) int {
 	return lines
 }
 
+func formatMap(format file.Format) map[string]any {
+	return map[string]any{
+		"charset":     format.Charset,
+		"bom":         format.BOM,
+		"line_ending": format.LineEnding,
+		"line_ending_counts": map[string]any{
+			"lf":   format.LineEndingCounts.LF,
+			"crlf": format.LineEndingCounts.CRLF,
+			"cr":   format.LineEndingCounts.CR,
+		},
+		"final_newline": format.FinalNewline,
+	}
+}
+
 func fullFileReadDisplay(read file.FullReadResult, data map[string]any, summary string) string {
 	if read.MIMEType == "text/html" && utf8.Valid(read.Content) {
 		content := string(read.Content)
@@ -223,12 +242,17 @@ func fullFileReadDisplay(read file.FullReadResult, data map[string]any, summary 
 		if !strings.HasSuffix(content, "\n") {
 			content += "\n"
 		}
-		return fence + "html\n" + content + fence + "\n\nRevision: `" + read.SHA256 + "`"
+		display := fence + "html\n" + content + fence + "\n\nRevision: `" + read.SHA256 + "`"
+		if read.LineEnding != "" && read.LineEnding != "none" {
+			display += "\n\n换行：`" + read.LineEnding + "`"
+		}
+		display += formatDisplay(data)
+		return display
 	}
 	return sourceReadDisplay(data, summary)
 }
 
-// sourceReadDisplay is the host/model-facing representation of file_read.
+// sourceReadDisplay is the host/model-facing representation of source_read.
 // The public ARC wrapper keeps the complete machine data in response metadata;
 // the first text content remains useful to a terminal agent without requiring
 // it to decode a protocol envelope before it can inspect source code.
@@ -273,13 +297,46 @@ func sourceReadDisplay(data map[string]any, summary string) string {
 		}
 		builder.WriteString("```")
 		if truncated, _ := item["truncated"].(bool); truncated {
-			builder.WriteString("\n\n> 内容已截断；请继续调用 `file_read` 读取后续内容。")
+			builder.WriteString("\n\n> 内容已截断；请继续调用 `source_read(view=file)` 读取后续内容。")
 		}
 		if revision, _ := item["sha256"].(string); strings.TrimSpace(revision) != "" {
 			fmt.Fprintf(&builder, "\n\nRevision: `%s`", revision)
 		}
+		if lineEnding, _ := item["line_ending"].(string); lineEnding != "" && lineEnding != "none" {
+			fmt.Fprintf(&builder, "\n\n换行：`%s`", lineEnding)
+		}
+		builder.WriteString(formatDisplay(item))
 	}
 	return builder.String()
+}
+
+func formatDisplay(item map[string]any) string {
+	format, ok := item["format"].(map[string]any)
+	if !ok || len(format) == 0 {
+		return ""
+	}
+	charset, _ := format["charset"].(string)
+	bom, _ := format["bom"].(string)
+	lineEnding, _ := format["line_ending"].(string)
+	finalNewline := "未知"
+	switch value := format["final_newline"].(type) {
+	case bool:
+		if value {
+			finalNewline = "是"
+		} else {
+			finalNewline = "否"
+		}
+	}
+	if charset == "" {
+		charset = "unknown"
+	}
+	if bom == "" {
+		bom = "unknown"
+	}
+	if lineEnding == "" {
+		lineEnding = "none"
+	}
+	return fmt.Sprintf("\n\n格式：字符集 `%s`；BOM `%s`；换行 `%s`；末尾换行 `%s`", charset, bom, lineEnding, finalNewline)
 }
 
 func sourceReadItems(data map[string]any) []map[string]any {

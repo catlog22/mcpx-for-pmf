@@ -13,7 +13,7 @@ func TestTextRendererGroupsInteractionIntoBoundedBlock(t *testing.T) {
 	events := []Event{
 		{Sequence: 42, RemoteSessionID: "4f8c2e90-6b2a-4b20-9d8c-1a1f8a12e7c4", RequestID: "req_42", Tool: "command_execute", Type: TypeToolStarted, Input: []byte(`{"command":"go test ./internal/auth"}`)},
 	}
-	for sequence := int64(43); sequence <= 52; sequence++ {
+	for sequence := int64(43); sequence <= 100; sequence++ {
 		events = append(events, Event{
 			Sequence: sequence, RequestID: "req_42", Tool: "command_execute", Type: TypeCommandOutput,
 			Stream: "stdout", Output: []byte(fmt.Sprintf(`{"text":"line-%d-a\nline-%d-b","bytes":17}`, sequence, sequence)),
@@ -97,6 +97,73 @@ func TestTextRendererSuppressesConsecutiveDuplicateProgressReports(t *testing.T)
 	}
 }
 
+func TestTextRendererMergesCommandOutputChunksAndStreams(t *testing.T) {
+	renderer := NewTextRenderer(false)
+	var output bytes.Buffer
+	events := []Event{
+		{Sequence: 1, RequestID: "req_output", Tool: "command_execute", Type: TypeToolStarted},
+		{Sequence: 2, RequestID: "req_output", Tool: "command_execute", Type: TypeCommandOutput, Stream: "stdout", Output: []byte(`{"text":"first\n"}`)},
+		{Sequence: 3, RequestID: "req_output", Tool: "command_execute", Type: TypeCommandOutput, Stream: "stdout", Offset: 6, Output: []byte(`{"text":"second\n"}`)},
+		{Sequence: 4, RequestID: "req_output", Tool: "command_execute", Type: TypeCommandOutput, Stream: "stderr", Output: []byte(`{"text":"warning\n"}`)},
+		{Sequence: 5, RequestID: "req_output", Tool: "command_execute", Type: TypeToolCompleted, Output: []byte(`{"status":"succeeded","result":{"content":[{"type":"text","text":"done"}]}}`)},
+	}
+	for _, event := range events {
+		if err := renderer.RenderEvent(&output, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	text := output.String()
+	if strings.Count(text, "Read stdout") != 1 || strings.Count(text, "Read stderr") != 1 {
+		t.Fatalf("stream headers were not merged: %q", text)
+	}
+	for _, want := range []string{"1 | first", "2 | second", "1 | warning"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("output line %q missing: %q", want, text)
+		}
+	}
+}
+
+func TestTextRendererFoldsRepeatedReadEvents(t *testing.T) {
+	renderer := NewTextRenderer(false)
+	var output bytes.Buffer
+	input := []byte(`{"path":"src/demo.go"}`)
+	result := []byte(`{"status":"succeeded","result":{"content":[{"type":"text","text":"Read 1 source item(s)."}]}}`)
+	events := []Event{
+		{Sequence: 1, RequestID: "req_read_1", Tool: "change_read", Type: TypeToolStarted, Input: input},
+		{Sequence: 2, RequestID: "req_read_1", Tool: "change_read", Type: TypeToolCompleted, Status: "succeeded", Input: input, Output: result},
+		{Sequence: 3, RequestID: "req_read_2", Tool: "change_read", Type: TypeToolStarted, Input: input},
+		{Sequence: 4, RequestID: "req_read_2", Tool: "change_read", Type: TypeToolCompleted, Status: "succeeded", Input: input, Output: result},
+		{Sequence: 5, RequestID: "req_other", Tool: "file_read", Type: TypeToolCompleted, Input: []byte(`{"path":"src/other.go"}`), Output: []byte(`{"status":"succeeded"}`)},
+	}
+	for _, event := range events {
+		if err := renderer.RenderEvent(&output, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	text := output.String()
+	if strings.Count(text, "Read src/demo.go") != 1 || !strings.Contains(text, "Repeated src/demo.go x2") {
+		t.Fatalf("repeated read was not folded: %q", text)
+	}
+}
+
+func TestTextRendererAppliesSemanticFilters(t *testing.T) {
+	renderer := NewTextRenderer(false)
+	renderer.SetFilter(EventFilter{Tool: "change_read", Path: "demo.go"})
+	var output bytes.Buffer
+	for _, event := range []Event{
+		{Sequence: 1, Tool: "file_read", Type: TypeToolCompleted, Path: "src/demo.go", Output: []byte(`{"status":"succeeded"}`)},
+		{Sequence: 2, Tool: "change_read", Type: TypeToolCompleted, Path: "src/other.go", Output: []byte(`{"status":"succeeded"}`)},
+		{Sequence: 3, Tool: "change_read", Type: TypeToolCompleted, Path: "src/demo.go", Output: []byte(`{"status":"succeeded"}`)},
+	} {
+		if err := renderer.RenderEvent(&output, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if text := output.String(); !strings.Contains(text, "change_read") || strings.Contains(text, "file_read") || strings.Contains(text, "other.go") {
+		t.Fatalf("semantic filter output=%q", text)
+	}
+}
+
 func TestFormatRemoteSessionIDUsesCanonicalUUID(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -115,7 +182,7 @@ func TestFormatRemoteSessionIDUsesCanonicalUUID(t *testing.T) {
 	}
 }
 
-func TestTextRendererAllowsTwentyBodyLinesBeforeEllipsis(t *testing.T) {
+func TestTextRendererAllowsFiftyBodyLinesBeforeEllipsis(t *testing.T) {
 	renderer := NewTextRenderer(false)
 	var output bytes.Buffer
 	block := &interactionBlock{key: "test", sequence: 1, tool: "file_read"}

@@ -21,6 +21,12 @@ type workspaceObserverOptions struct {
 	Workspace string
 	History   int
 	Format    string
+	Detail    bool
+	Diff      string
+	Tool      string
+	Status    string
+	Operation string
+	Path      string
 }
 
 func parseWorkspaceObserverArgs(args []string) (workspaceObserverOptions, error) {
@@ -28,6 +34,12 @@ func parseWorkspaceObserverArgs(args []string) (workspaceObserverOptions, error)
 	fs.SetOutput(io.Discard)
 	history := fs.Int("history", observation.DefaultHistory, "number of recent events to replay")
 	format := fs.String("format", "text", "text|json")
+	detail := fs.Bool("detail", false, "show semantic purpose, operation IDs, and execution facts")
+	diff := fs.String("diff", "preview", "summary|preview|full")
+	tool := fs.String("tool", "", "filter by tool name")
+	status := fs.String("status", "", "filter by event status")
+	operation := fs.String("operation", "", "filter by operation ID")
+	path := fs.String("path", "", "filter by file path")
 	if err := fs.Parse(args); err != nil {
 		return workspaceObserverOptions{}, err
 	}
@@ -44,7 +56,14 @@ func parseWorkspaceObserverArgs(args []string) (workspaceObserverOptions, error)
 	if *format != "text" && *format != "json" {
 		return workspaceObserverOptions{}, fmt.Errorf("format must be text or json")
 	}
-	return workspaceObserverOptions{Workspace: strings.TrimSpace(fs.Arg(0)), History: *history, Format: *format}, nil
+	if _, err := observation.ParseDiffMode(*diff); err != nil {
+		return workspaceObserverOptions{}, err
+	}
+	return workspaceObserverOptions{
+		Workspace: strings.TrimSpace(fs.Arg(0)), History: *history, Format: *format, Detail: *detail,
+		Diff: strings.ToLower(strings.TrimSpace(*diff)), Tool: strings.TrimSpace(*tool),
+		Status: strings.TrimSpace(*status), Operation: strings.TrimSpace(*operation), Path: strings.TrimSpace(*path),
+	}, nil
 }
 
 func runWorkspaceObserver(args []string) int {
@@ -70,6 +89,12 @@ func runWorkspaceObserver(args []string) int {
 	var textRenderer *observation.TextRenderer
 	if options.Format == "text" {
 		textRenderer = observation.NewTextRendererWithMode(colorMode, terminalColumns())
+		textRenderer.SetDetail(options.Detail)
+		diffMode, _ := observation.ParseDiffMode(options.Diff)
+		textRenderer.SetDiffMode(diffMode)
+		textRenderer.SetFilter(observation.EventFilter{
+			Tool: options.Tool, Status: options.Status, OperationID: options.Operation, Path: options.Path,
+		})
 	}
 	err = client.Run(ctx, observation.SubscribeRequest{
 		Type: "subscribe", Workspace: options.Workspace, HistoryLimit: options.History, Format: options.Format,
@@ -168,6 +193,12 @@ func printWorkspaceUsage(w io.Writer) {
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  -history int     recent events to replay (1-200, default 100)")
 	fmt.Fprintln(w, "  -format string   text or json (default text)")
+	fmt.Fprintln(w, "  -detail          show semantic purpose, operation IDs, and execution facts")
+	fmt.Fprintln(w, "  -diff string     summary, preview, or full (default preview)")
+	fmt.Fprintln(w, "  -tool string     filter by tool name")
+	fmt.Fprintln(w, "  -status string   filter by event status")
+	fmt.Fprintln(w, "  -operation string filter by operation ID")
+	fmt.Fprintln(w, "  -path string     filter by file path")
 }
 
 func stdoutIsTTY() bool {

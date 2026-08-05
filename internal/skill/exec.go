@@ -30,11 +30,12 @@ func Execute(ctx context.Context, sk Skill, workDir string, arguments any) (map[
 			return nil, fmt.Errorf("read skill doc: %w", err)
 		}
 		return map[string]any{
-			"name":        sk.Manifest.Name,
-			"runtime":     "markdown",
-			"description": sk.Manifest.Description,
-			"content":     string(body),
-			"path":        path,
+			"name":              sk.Manifest.Name,
+			"runtime":           "markdown",
+			"description":       sk.Manifest.Description,
+			"content":           string(body),
+			"path":              path,
+			"working_directory": workDir,
 		}, nil
 	}
 	var cmd string
@@ -54,11 +55,13 @@ func Execute(ctx context.Context, sk Skill, workDir string, arguments any) (map[
 		ExtraEnv: []string{"MCPX_SKILL_ARGS=" + string(argsJSON)},
 	})
 	out := map[string]any{
-		"name":        sk.Manifest.Name,
-		"exit_code":   res.ExitCode,
-		"stdout":      res.Stdout,
-		"stderr":      res.Stderr,
-		"duration_ms": res.DurationMs,
+		"name":              sk.Manifest.Name,
+		"command":           cmd,
+		"working_directory": workDir,
+		"exit_code":         res.ExitCode,
+		"stdout":            res.Stdout,
+		"stderr":            res.Stderr,
+		"duration_ms":       res.DurationMs,
 	}
 	if err != nil && res.ExitCode == -1 {
 		return out, err

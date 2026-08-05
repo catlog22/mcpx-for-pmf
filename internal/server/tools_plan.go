@@ -18,7 +18,7 @@ func planTaskInputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"task_id":     stringSchema("建议提供的唯一语义稳定 Plan Task ID；后续操作必须使用 create/get 返回的精确值"),
+			"task_id":     stringSchema("可选的局部依赖引用（本计划内唯一即可）；服务端会生成最终 task_id，后续操作必须使用 plan_create 返回的精确值"),
 			"title":       stringSchema("任务标题"),
 			"description": stringSchema("任务描述"),
 			"depends_on":  arraySchema(map[string]any{"type": "string"}, "必须先完成的任务 ID"),

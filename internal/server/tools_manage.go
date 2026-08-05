@@ -34,9 +34,11 @@ func (r *Runtime) invalidAction(ctx context.Context, req mcp.CallToolRequest, to
 	if fail != nil {
 		return fail, nil
 	}
+	publicToolName, publicArguments := normalizePublicAction(tool, map[string]any{"action": action})
 	response := envelope.Fail(envelope.StatusError, envReq.RequestID, envReq.Workspace, map[string]any{
-		"tool": tool,
-	}, "INVALID_ACTION", fmt.Sprintf("%s does not support action %q", tool, action))
+		"tool":      publicToolName,
+		"arguments": publicArguments,
+	}, "INVALID_ACTION", fmt.Sprintf("%s does not support view or operation %q", publicToolName, action))
 	return r.resultJSON(response)
 }
 
@@ -69,6 +71,8 @@ func (r *Runtime) toolChangeManage(ctx context.Context, req mcp.CallToolRequest)
 		return r.toolChangeDiff(ctx, req)
 	case "history":
 		return r.toolChangeHistory(ctx, req)
+	case "discard":
+		return r.toolChangeDiscard(ctx, req)
 	default:
 		return r.invalidAction(ctx, req, "change_manage", toolAction(req))
 	}

@@ -60,8 +60,21 @@ func TestProjectTaskAndArtifactRemoteSessionFlow(t *testing.T) {
 	started := callEnvelope(t, runtime.toolCommandExecute, ctx, map[string]any{"remote_session_id": remoteSessionID, "task": "test", "purpose": "run the project test task", "scope": "workspace", "yield_time_ms": 1})
 	data, _ := started["data"].(map[string]any)
 	taskID, _ := data["task_id"].(string)
-	if started["status"] != "ok" || taskID == "" {
+	if started["status"] != "accepted" || taskID == "" {
 		t.Fatalf("task start=%+v", started)
+	}
+	firstList := callEnvelope(t, runtime.toolTaskManage, ctx, map[string]any{"remote_session_id": remoteSessionID, "action": "list", "limit": 5})
+	firstListData, _ := firstList["data"].(map[string]any)
+	taskDigest, _ := firstListData["task_list_digest"].(string)
+	if taskDigest == "" {
+		t.Fatalf("task list digest missing: %+v", firstList)
+	}
+	unchangedList := callEnvelope(t, runtime.toolTaskManage, ctx, map[string]any{
+		"remote_session_id": remoteSessionID, "action": "list", "limit": 5, "known_task_digest": taskDigest,
+	})
+	unchangedListData, _ := unchangedList["data"].(map[string]any)
+	if unchangedListData["not_modified"] != true || len(unchangedListData["tasks"].([]any)) != 0 {
+		t.Fatalf("unchanged task list=%+v", unchangedList)
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -206,7 +219,7 @@ func TestCommandExecuteTruncatedOutputStaysInline(t *testing.T) {
 	if !strings.Contains(content.Text, "Output truncated") {
 		t.Fatalf("truncation must be stated in the text: %q", content.Text)
 	}
-	if !strings.Contains(content.Text, "task_manage") {
-		t.Fatalf("truncation notice must point to task_manage: %q", content.Text)
+	if !strings.Contains(content.Text, "task_control") && !strings.Contains(content.Text, "task_read") {
+		t.Fatalf("truncation notice must point to task_control or task_read: %q", content.Text)
 	}
 }

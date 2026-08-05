@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"image/png"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -21,13 +22,19 @@ func TestSourceReadDisplayIncludesMarkdownSourceBlock(t *testing.T) {
 		"path":        "src/Supplier.vue",
 		"content":     "<template>\n  <div />\n</template>\n",
 		"sha256":      "sha256:test-revision",
+		"line_ending": "CRLF",
+		"format": map[string]any{
+			"charset": "utf-8", "bom": "none", "line_ending": "CRLF",
+			"line_ending_counts": map[string]any{"lf": 0, "crlf": 2, "cr": 0},
+			"final_newline":      true,
+		},
 		"offset":      4,
 		"limit":       3,
 		"total_lines": 10,
 	}
 
 	display := sourceReadDisplay(data, "Read src/Supplier.vue (10 lines).")
-	for _, want := range []string{"Read src/Supplier.vue", "Revision: `sha256:test-revision`", "### `src/Supplier.vue` (lines 5-7 of 10)", "```vue", "<template>"} {
+	for _, want := range []string{"Read src/Supplier.vue", "Revision: `sha256:test-revision`", "换行：`CRLF`", "字符集 `utf-8`", "BOM `none`", "末尾换行 `是`", "### `src/Supplier.vue` (lines 5-7 of 10)", "```vue", "<template>"} {
 		if !strings.Contains(display, want) {
 			t.Fatalf("source display missing %q: %s", want, display)
 		}
@@ -146,5 +153,61 @@ func TestFileReadFullReturnsHTMLAndDirectImageContent(t *testing.T) {
 	}
 	if _, ok := wrapped.Content[1].(mcp.ImageContent); !ok {
 		t.Fatalf("ARC dropped direct image content: %T", wrapped.Content[1])
+	}
+}
+
+func TestSourceReadWindowAndBatchExposeSameFormat(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	created := callEnvelope(t, rt.toolSessionOpen, context.Background(), map[string]any{"workspace": "demo"})
+	remoteSessionID, _ := created["remote_session_id"].(string)
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	content := []byte("one\r\ntwo\r\n")
+	if err := os.WriteFile(registered.Path+"/format.txt", content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	read := func(arguments map[string]any) map[string]any {
+		t.Helper()
+		request := mcp.CallToolRequest{}
+		request.Params.Arguments = arguments
+		result, err := rt.toolFileReadUnified(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, ok := result.StructuredContent.(map[string]any)
+		if !ok {
+			t.Fatalf("structured data=%T", result.StructuredContent)
+		}
+		return data
+	}
+	base := map[string]any{"remote_session_id": remoteSessionID, "path": "format.txt", "mode": "window", "limit": 10}
+	window := read(base)
+	windowFormat, ok := window["format"].(map[string]any)
+	if !ok {
+		t.Fatalf("window format=%T %+v", window["format"], window)
+	}
+	if windowFormat["line_ending"] != "CRLF" || windowFormat["charset"] != "utf-8" {
+		t.Fatalf("window format=%+v", windowFormat)
+	}
+
+	batch := read(map[string]any{
+		"remote_session_id": remoteSessionID,
+		"mode":              "window",
+		"items":             []any{map[string]any{"path": "format.txt", "limit": 10}},
+	})
+	results, ok := batch["results"].([]map[string]any)
+	if !ok || len(results) != 1 {
+		t.Fatalf("batch results=%T %+v", batch["results"], batch)
+	}
+	if !reflect.DeepEqual(windowFormat, results[0]["format"]) {
+		t.Fatalf("window/batch format mismatch: window=%+v batch=%+v", windowFormat, results[0]["format"])
+	}
+
+	full := read(map[string]any{"remote_session_id": remoteSessionID, "path": "format.txt", "mode": "full"})
+	if !reflect.DeepEqual(windowFormat, full["format"]) {
+		t.Fatalf("window/full format mismatch: window=%+v full=%+v", windowFormat, full["format"])
 	}
 }

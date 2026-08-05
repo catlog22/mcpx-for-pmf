@@ -32,14 +32,22 @@ func RenderToolContent(tool, resultType, renderer, summary string, data any) (st
 		return renderWorkspaceList(summary, asMap)
 	case "session_open":
 		return renderSessionOpen(summary, asMap)
-	case "context_query":
+	case "context_query", "source_read":
 		return renderContextQuery(summary, asMap)
-	case "plan_manage":
+	case "plan_manage", "plan_create", "plan_read", "plan_transition":
 		if text, ok := renderPlanData(summary, asMap); ok {
 			return text, true
 		}
-	case "artifact_manage":
+	case "artifact_manage", "artifact_read":
 		if text, ok := renderArtifactRead(summary, asMap); ok {
+			return text, true
+		}
+	case "command_run", "command_execute":
+		if text, ok := renderCommandConfirmation(summary, asMap); ok {
+			return text, true
+		}
+	case "operation_manage", "operation_batch":
+		if text, ok := renderOperationConfirmation(summary, asMap); ok {
 			return text, true
 		}
 	}
@@ -50,7 +58,7 @@ func RenderToolContent(tool, resultType, renderer, summary string, data any) (st
 	if text, ok := renderKnownCollection(summary, asMap); ok {
 		return text, true
 	}
-	if tool == "session_manage" || tool == "remote_session_get" {
+	if tool == "session_manage" || tool == "session_read" || tool == "remote_session_get" {
 		if text, ok := renderSessionSummary(summary, asMap); ok {
 			return text, true
 		}
@@ -59,6 +67,72 @@ func RenderToolContent(tool, resultType, renderer, summary string, data any) (st
 		return text, true
 	}
 	return summary, false
+}
+
+// renderCommandConfirmation puts the confirmation_token into the model-facing
+// text itself. Host UIs collapse the ARC metadata into an object card, and a
+// token only reachable through metadata is easily lost or truncated.
+func renderCommandConfirmation(summary string, data map[string]any) (string, bool) {
+	if data["confirmation_required"] != true {
+		return summary, false
+	}
+	command := humanField(data, "command")
+	token := humanField(data, "confirmation_token")
+	if command == "" && token == "" {
+		return summary, false
+	}
+	var builder strings.Builder
+	builder.WriteString("命令等待语义确认：请向用户展示命令及用途，获得明确确认后，使用相同 command 和 confirmation_token 原样重试。")
+	if command != "" {
+		fmt.Fprintf(&builder, "\n- command: %s", inlineCode(command))
+	}
+	if token != "" {
+		fmt.Fprintf(&builder, "\n- confirmation_token: %s", inlineCode(token))
+	}
+	if purpose := compactHuman(humanField(data, "purpose")); purpose != "" {
+		fmt.Fprintf(&builder, "\n- purpose: %s", purpose)
+	}
+	return strings.TrimSpace(builder.String()), true
+}
+
+// renderOperationConfirmation exposes the waiting operation id and step
+// confirmation tokens in the model-facing text; operation_manage resumes
+// require both and neither is otherwise visible when a host collapses metadata.
+func renderOperationConfirmation(summary string, data map[string]any) (string, bool) {
+	if data["confirmation_required"] != true && data["status"] != "waiting_confirmation" {
+		return summary, false
+	}
+	operationID := humanField(data, "operation_id")
+	steps := humanMaps(data["steps"])
+	items := humanMaps(data["items"])
+	if operationID == "" && len(steps) == 0 && len(items) == 0 {
+		return summary, false
+	}
+	var builder strings.Builder
+	builder.WriteString("异步操作等待语义确认：请向用户展示操作摘要，确认后使用 operation_manage action=resume 恢复。")
+	if operationID != "" {
+		fmt.Fprintf(&builder, "\n- operation_id: %s", inlineCode(operationID))
+	}
+	for _, step := range steps {
+		token := humanField(step, "confirmation_token")
+		if token == "" {
+			continue
+		}
+		fmt.Fprintf(&builder, "\n- step_id: %s", inlineCode(humanField(step, "id")))
+		fmt.Fprintf(&builder, "\n- confirmation_token: %s", inlineCode(token))
+	}
+	for _, item := range items {
+		if itemID := humanField(item, "operation_id"); itemID != "" {
+			fmt.Fprintf(&builder, "\n- operation_id: %s", inlineCode(itemID))
+		}
+		for _, step := range humanMaps(item["steps"]) {
+			if token := humanField(step, "confirmation_token"); token != "" {
+				fmt.Fprintf(&builder, "\n- step_id: %s", inlineCode(humanField(step, "id")))
+				fmt.Fprintf(&builder, "\n- confirmation_token: %s", inlineCode(token))
+			}
+		}
+	}
+	return strings.TrimSpace(builder.String()), true
 }
 
 func renderWorkspaceList(summary string, data map[string]any) (string, bool) {
@@ -526,7 +600,7 @@ func isBlockField(key string) bool {
 
 func isGenericSummary(summary string) bool {
 	summary = strings.TrimSpace(summary)
-	if summary == "" || strings.EqualFold(summary, "ok") || strings.EqualFold(summary, "result") {
+	if summary == "" || strings.EqualFold(summary, "ok") || strings.EqualFold(summary, "succeeded") || strings.EqualFold(summary, "accepted") || strings.EqualFold(summary, "result") {
 		return true
 	}
 	var value any
@@ -684,7 +758,7 @@ func appendInstructions(builder *strings.Builder, value any) {
 
 func writeHumanSummary(builder *strings.Builder, summary string) {
 	summary = strings.TrimSpace(summary)
-	if summary == "" || strings.EqualFold(summary, "ok") || strings.EqualFold(summary, "result") {
+	if summary == "" || strings.EqualFold(summary, "ok") || strings.EqualFold(summary, "succeeded") || strings.EqualFold(summary, "accepted") || strings.EqualFold(summary, "result") {
 		return
 	}
 	builder.WriteString(summary)

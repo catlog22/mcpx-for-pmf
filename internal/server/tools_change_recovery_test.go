@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +15,278 @@ import (
 	"mcpx/internal/changeset"
 	"mcpx/internal/remotesession"
 )
+
+func TestChangesetDigestIsVisibleInPrepareAndReadToolText(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := mcp.CallToolRequest{}
+	request.Params.Arguments = map[string]any{
+		"intent":            "prepare a visible digest test",
+		"remote_session_id": created.Session.ID,
+		"summary":           "visible digest",
+		"operations": []any{map[string]any{
+			"operation": "create", "path": "visible-digest.txt", "content": "digest\n",
+		}},
+	}
+	prepared, err := rt.toolHandlers["change_prepare"](context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedText := prepared.Content[0].(mcp.TextContent).Text
+	preparedEnvelope := decodeARCEnvelope(t, prepared)
+	preparedData := preparedEnvelope["mcpx"].(map[string]any)["result"].(map[string]any)["data"].(map[string]any)
+	digest, _ := preparedData["digest"].(string)
+	if digest == "" || preparedData["expected_digest"] != digest {
+		t.Fatalf("prepared digest fields=%+v", preparedData)
+	}
+	if !strings.Contains(preparedText, "`expected_digest`: `"+digest+"`") || !strings.Contains(preparedText, "必须原样复制") {
+		t.Fatalf("model-facing prepare text missing exact digest: %s", preparedText)
+	}
+
+	changesetID, _ := preparedData["changeset_id"].(string)
+	readRequest := mcp.CallToolRequest{}
+	readRequest.Params.Arguments = map[string]any{
+		"remote_session_id": created.Session.ID,
+		"view":              "diff",
+		"changeset_id":      changesetID,
+	}
+	read, err := rt.toolHandlers["change_read"](context.Background(), readRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readText := read.Content[0].(mcp.TextContent).Text
+	readEnvelope := decodeARCEnvelope(t, read)
+	readData := readEnvelope["mcpx"].(map[string]any)["result"].(map[string]any)["data"].(map[string]any)
+	if readData["digest"] != digest || readData["expected_digest"] != digest {
+		t.Fatalf("read digest fields=%+v want=%q", readData, digest)
+	}
+	if !strings.Contains(readText, "`expected_digest`: `"+digest+"`") {
+		t.Fatalf("model-facing read text missing exact digest: %s", readText)
+	}
+
+	encoded, err := json.Marshal(preparedData)
+	if err != nil || !strings.Contains(string(encoded), digest) {
+		t.Fatalf("structured prepare payload lost digest: err=%v payload=%s", err, encoded)
+	}
+
+	conflictRequest := mcp.CallToolRequest{}
+	conflictRequest.Params.Arguments = map[string]any{
+		"intent":            "verify digest recovery visibility",
+		"remote_session_id": created.Session.ID,
+		"changeset_id":      changesetID,
+		"expected_digest":   "sha256:wrong",
+	}
+	conflict, err := rt.toolHandlers["change_apply"](context.Background(), conflictRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflictText := conflict.Content[0].(mcp.TextContent).Text
+	if !strings.Contains(conflictText, digest) {
+		t.Fatalf("model-facing conflict text missing exact expected digest %q: %s", digest, conflictText)
+	}
+}
+
+func TestPublicChangePrepareCanApplyInOneCall(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := mcp.CallToolRequest{}
+	request.Params.Arguments = map[string]any{
+		"intent":            "apply a one-call change",
+		"remote_session_id": created.Session.ID,
+		"summary":           "one-call change",
+		"apply":             true,
+		"operations": []any{map[string]any{
+			"operation": "create", "path": "one-call.txt", "content": "applied\n",
+		}},
+	}
+	result, err := rt.toolHandlers["change_prepare"](context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := decodeARCEnvelope(t, result)
+	data := envelope["mcpx"].(map[string]any)["result"].(map[string]any)["data"].(map[string]any)
+	if data["applied"] != true {
+		t.Fatalf("one-call change data = %+v", data)
+	}
+	if _, err := os.Stat(filepath.Join(registered.Path, "one-call.txt")); err != nil {
+		t.Fatalf("one-call change was not applied: %v", err)
+	}
+}
+
+func TestChangeHistoryExposesDraftRecoveryActions(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepare := mcp.CallToolRequest{}
+	prepare.Params.Arguments = map[string]any{
+		"intent":            "prepare a discardable change",
+		"remote_session_id": created.Session.ID,
+		"summary":           "discardable change",
+		"operations": []any{map[string]any{
+			"operation": "create", "path": "discardable.txt", "content": "draft\n",
+		}},
+	}
+	prepared, err := rt.toolHandlers["change_prepare"](context.Background(), prepare)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedEnvelope := decodeARCEnvelope(t, prepared)
+	preparedData := preparedEnvelope["mcpx"].(map[string]any)["result"].(map[string]any)["data"].(map[string]any)
+	changesetID, _ := preparedData["changeset_id"].(string)
+	if changesetID == "" {
+		t.Fatalf("prepared data = %+v", preparedData)
+	}
+
+	history := mcp.CallToolRequest{}
+	history.Params.Arguments = map[string]any{
+		"remote_session_id": created.Session.ID, "view": "history", "limit": 5,
+	}
+	historyResult, err := rt.toolHandlers["change_read"](context.Background(), history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyEnvelope := decodeARCEnvelope(t, historyResult)
+	historyData := historyEnvelope["mcpx"].(map[string]any)["result"].(map[string]any)["data"].(map[string]any)
+	summary := historyData["summary"].(map[string]any)
+	if summary["draft_count"] != float64(1) {
+		t.Fatalf("history summary = %+v", summary)
+	}
+	drafts := summary["active_drafts"].([]any)
+	actions := drafts[0].(map[string]any)["next_actions"].([]any)
+	if actions[0].(map[string]any)["tool"] != "change_apply" || actions[1].(map[string]any)["tool"] != "change_discard" {
+		t.Fatalf("draft actions = %+v", actions)
+	}
+	historyDigest, _ := historyData["history_digest"].(string)
+	if historyDigest == "" {
+		t.Fatalf("history digest missing: %+v", historyData)
+	}
+	unchanged := mcp.CallToolRequest{}
+	unchanged.Params.Arguments = map[string]any{
+		"remote_session_id": created.Session.ID, "view": "history", "limit": 5,
+		"known_history_digest": historyDigest,
+	}
+	unchangedResult, err := rt.toolHandlers["change_read"](context.Background(), unchanged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unchangedEnvelope := decodeARCEnvelope(t, unchangedResult)
+	unchangedData := unchangedEnvelope["mcpx"].(map[string]any)["result"].(map[string]any)["data"].(map[string]any)
+	if unchangedData["not_modified"] != true || len(unchangedData["changesets"].([]any)) != 0 {
+		t.Fatalf("unchanged history response = %+v", unchangedData)
+	}
+
+	discard := mcp.CallToolRequest{}
+	discard.Params.Arguments = map[string]any{
+		"intent":            "discard the obsolete draft",
+		"remote_session_id": created.Session.ID,
+		"changeset_id":      changesetID,
+	}
+	if _, err := rt.toolHandlers["change_discard"](context.Background(), discard); err != nil {
+		t.Fatal(err)
+	}
+	historyResult, err = rt.toolHandlers["change_read"](context.Background(), history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyEnvelope = decodeARCEnvelope(t, historyResult)
+	historyData = historyEnvelope["mcpx"].(map[string]any)["result"].(map[string]any)["data"].(map[string]any)
+	summary = historyData["summary"].(map[string]any)
+	if summary["draft_count"] != float64(0) {
+		t.Fatalf("history after discard = %+v", summary)
+	}
+}
+
+func TestPatchConflictExplainsLineEndingRecovery(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	content := []byte("class Demo {\r\n    int value = 1;\r\n}\r\n")
+	if err := os.WriteFile(filepath.Join(registered.Path, "Demo.java"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := sha256.Sum256(content)
+	request := mcp.CallToolRequest{}
+	request.Params.Arguments = map[string]any{
+		"intent":            "verify line ending patch recovery",
+		"remote_session_id": created.Session.ID,
+		"summary":           "overlapping Java patch",
+		"operations": []any{map[string]any{
+			"operation": "update", "path": "Demo.java", "base_sha256": fmt.Sprintf("sha256:%x", base[:]),
+			"patch": "@@ -1,3 +1,3 @@\n-class Demo {\n-    int value = 1;\n-}\n+class Demo {\n+    int value = 2;\n+}\n@@ -2,2 +2,2 @@\n-    int value = 1;\n+    int value = 2;\n }\n",
+		}},
+	}
+	result, err := rt.toolHandlers["change_prepare"](context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := result.Content[0].(mcp.TextContent).Text
+	for _, want := range []string{"line_ending", "保留目标文件原有换行格式", "replace_exact", "base_sha256"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("patch recovery text missing %q: %s", want, text)
+		}
+	}
+	arcEnvelope := decodeARCEnvelope(t, result)
+	resultData := arcEnvelope["mcpx"].(map[string]any)["result"].(map[string]any)
+	data, _ := resultData["data"].(map[string]any)
+	errorBody, _ := data["error"].(map[string]any)
+	if errorBody["code"] != "PATCH_HUNKS_OVERLAP" {
+		t.Fatalf("unexpected structured patch error: %+v", errorBody)
+	}
+	details, _ := errorBody["details"].(map[string]any)
+	if !strings.Contains(fmt.Sprint(details["patch_guidance"]), "保留目标文件原有换行格式") {
+		t.Fatalf("structured patch guidance missing: %+v", details)
+	}
+}
 
 func TestChangeExecuteDoesNotWriteDiffFileToWorkspace(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
@@ -86,7 +360,7 @@ func TestChangeExecuteDeletesNonGitFileAfterSemanticConfirmation(t *testing.T) {
 		t.Fatal(err)
 	}
 	pending := decodeToolResult(t, deleteResult)
-	if pending["status"] != "need_confirmation" {
+	if pending["status"] != "waiting_confirmation" {
 		t.Fatalf("delete should wait for semantic confirmation: %+v", pending)
 	}
 	pendingData, _ := pending["data"].(map[string]any)
@@ -98,7 +372,7 @@ func TestChangeExecuteDeletesNonGitFileAfterSemanticConfirmation(t *testing.T) {
 	confirmRequest.Params.Arguments = map[string]any{
 		"intent":            "用户已确认删除该文件",
 		"remote_session_id": created.Session.ID, "changeset_id": pendingData["changeset_id"],
-		"expected_digest": pendingData["digest"], "user_confirmed": true,
+		"expected_digest": pendingData["digest"], "confirmation_token": pendingData["confirmation_token"],
 	}
 	confirmedResult, err := rt.toolChangeExecute(context.Background(), confirmRequest)
 	if err != nil {
@@ -145,7 +419,6 @@ func TestChangeExecuteDeletesDirectoryWithInitialSemanticConfirmation(t *testing
 		"intent":            "清空旧项目目录",
 		"remote_session_id": created.Session.ID,
 		"summary":           "删除旧项目目录",
-		"user_confirmed":    true,
 		"operations":        []map[string]any{{"operation": "delete", "path": "old-project"}},
 	}
 	result, err := rt.toolChangeExecute(context.Background(), request)
@@ -153,8 +426,23 @@ func TestChangeExecuteDeletesDirectoryWithInitialSemanticConfirmation(t *testing
 		t.Fatal(err)
 	}
 	response := decodeToolResult(t, result)
+	if response["status"] != "waiting_confirmation" {
+		t.Fatalf("directory delete must wait for semantic confirmation: %+v", response)
+	}
+	pendingData, _ := response["data"].(map[string]any)
+	confirm := mcp.CallToolRequest{}
+	confirm.Params.Arguments = map[string]any{
+		"intent": "用户已确认删除旧项目目录", "remote_session_id": created.Session.ID,
+		"changeset_id": pendingData["changeset_id"], "expected_digest": pendingData["digest"],
+		"confirmation_token": pendingData["confirmation_token"],
+	}
+	confirmedResult, err := rt.toolChangeExecute(context.Background(), confirm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = decodeToolResult(t, confirmedResult)
 	if response["status"] != "ok" {
-		t.Fatalf("initial semantic confirmation did not apply directory delete: %+v", response)
+		t.Fatalf("confirmed directory delete did not apply: %+v", response)
 	}
 	if _, err := os.Stat(directory); !os.IsNotExist(err) {
 		t.Fatalf("directory was not removed: %v", err)
@@ -200,6 +488,95 @@ func TestChangeSummaryIncludesPerFileDiffPreview(t *testing.T) {
 	diff, _ := files[0]["diff"].(string)
 	if !strings.Contains(diff, "-旧消息链路") || !strings.Contains(diff, "+新消息链路") {
 		t.Fatalf("per-file diff preview must include concrete changes: %q", diff)
+	}
+}
+
+func TestChangeSummaryIncludesExactExpectedDigestRecovery(t *testing.T) {
+	item := changeset.Changeset{
+		ID:              "chg_digest",
+		RemoteSessionID: "session_digest",
+		Status:          "draft",
+		Digest:          "sha256:expected",
+		Summary:         "digest recovery",
+	}
+	dto := changeSummaryDTO(item)
+	if dto["digest"] != item.Digest || dto["expected_digest"] != item.Digest {
+		t.Fatalf("digest fields must be identical: %+v", dto)
+	}
+	nextAction, _ := dto["next_action"].(map[string]any)
+	if nextAction["tool"] != "change_apply" {
+		t.Fatalf("missing change_apply recovery: %+v", dto)
+	}
+	arguments, _ := nextAction["arguments"].(map[string]any)
+	if arguments["changeset_id"] != item.ID || arguments["expected_digest"] != item.Digest {
+		t.Fatalf("recovery arguments must copy the exact digest: %+v", nextAction)
+	}
+}
+
+func TestChangeApplyDigestConflictIncludesExactRecovery(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepare := mcp.CallToolRequest{}
+	prepare.Params.Arguments = map[string]any{
+		"intent":            "prepare a digest recovery test",
+		"remote_session_id": created.Session.ID,
+		"summary":           "digest recovery",
+		"apply":             false,
+		"operations": []map[string]any{
+			{"operation": "create", "path": "digest-recovery.txt", "content": "content\n"},
+		},
+	}
+	preparedResult, err := rt.toolChangeExecute(context.Background(), prepare)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared := decodeToolResult(t, preparedResult)
+	data, _ := prepared["data"].(map[string]any)
+	changesetID, _ := data["changeset_id"].(string)
+	digest, _ := data["digest"].(string)
+	if changesetID == "" || digest == "" {
+		t.Fatalf("prepared response missing digest contract: %+v", prepared)
+	}
+	apply := mcp.CallToolRequest{}
+	apply.Params.Arguments = map[string]any{
+		"intent":            "apply with an intentionally invalid digest",
+		"remote_session_id": created.Session.ID,
+		"changeset_id":      changesetID,
+		"expected_digest":   "+211 −0",
+	}
+	conflictResult, err := rt.toolChangeExecute(context.Background(), apply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflict := decodeToolResult(t, conflictResult)
+	errorBody, _ := conflict["error"].(map[string]any)
+	if errorBody["code"] != "PATCH_CONFLICT" {
+		t.Fatalf("unexpected digest conflict: %+v", conflict)
+	}
+	details, _ := errorBody["details"].(map[string]any)
+	if details["changeset_id"] != changesetID || details["expected_digest"] != digest {
+		t.Fatalf("digest recovery details=%+v, want id=%q digest=%q", details, changesetID, digest)
+	}
+	recovery, _ := errorBody["recovery"].(map[string]any)
+	arguments, _ := recovery["arguments"].(map[string]any)
+	if recovery["tool"] != "change_apply" || arguments["changeset_id"] != changesetID || arguments["expected_digest"] != digest {
+		t.Fatalf("digest recovery action=%+v", recovery)
+	}
+	if _, err := os.Stat(filepath.Join(registered.Path, "digest-recovery.txt")); !os.IsNotExist(err) {
+		t.Fatalf("digest conflict must not write the file: %v", err)
 	}
 }
 
@@ -252,7 +629,7 @@ func TestChangeExecutePatchTooLargeHasRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	response := decodeToolResult(t, result)
-	if response["status"] != "denied" {
+	if response["status"] != "failed" {
 		t.Fatalf("oversized patch was not denied: %+v", response)
 	}
 	errorBody, _ := response["error"].(map[string]any)
@@ -299,6 +676,7 @@ func TestChangeExecuteMissingRevisionHasRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Logf("change_prepare raw result: %+v", result)
 	response := decodeToolResult(t, result)
 	errorBody, _ := response["error"].(map[string]any)
 	if errorBody["code"] != "REVISION_REQUIRED" {
@@ -306,11 +684,11 @@ func TestChangeExecuteMissingRevisionHasRecovery(t *testing.T) {
 	}
 	details, _ := errorBody["details"].(map[string]any)
 	nextAction, _ := details["next_action"].(map[string]any)
-	if nextAction["tool"] != "file_read" {
-		t.Fatalf("REVISION_REQUIRED must carry a file_read recovery action: %+v", details)
+	if nextAction["tool"] != "source_read" {
+		t.Fatalf("REVISION_REQUIRED must carry a source_read recovery action: %+v", details)
 	}
 	arguments, _ := nextAction["arguments"].(map[string]any)
-	if arguments["remote_session_id"] != created.Session.ID {
+	if arguments["session_id"] != created.Session.ID {
 		t.Fatalf("recovery action must preserve the session: %+v", arguments)
 	}
 }
@@ -352,7 +730,7 @@ func TestUpdateMissingRevisionSuggestsTargetFileRead(t *testing.T) {
 	details, _ := errorBody["details"].(map[string]any)
 	nextAction, _ := details["next_action"].(map[string]any)
 	arguments, _ := nextAction["arguments"].(map[string]any)
-	if nextAction["tool"] != "file_read" || arguments["path"] != "update-me.txt" {
+	if nextAction["tool"] != "source_read" || arguments["path"] != "update-me.txt" {
 		t.Fatalf("update recovery must target the missing revision file: %+v", details)
 	}
 }
@@ -396,8 +774,169 @@ func TestChangePrepareDuplicatePathHasRecovery(t *testing.T) {
 	}
 	details, _ := errorBody["details"].(map[string]any)
 	action, _ := details["next_action"].(map[string]any)
-	if action["tool"] != "change_manage" {
-		t.Fatalf("duplicate path must suggest change_manage: %+v", details)
+	if action["tool"] != "change_prepare" {
+		t.Fatalf("duplicate path must suggest change_prepare: %+v", details)
+	}
+}
+
+func TestChangePrepareChainsExactEditsForSamePath(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	original := []byte("one\ntwo\nthree\n")
+	if err := os.WriteFile(filepath.Join(registered.Path, "multi.txt"), original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"intent":            "prepare chained exact edits",
+		"remote_session_id": created.Session.ID,
+		"summary":           "chained exact edits",
+		"operations": []any{
+			map[string]any{
+				"operation": "replace_exact", "path": "multi.txt",
+				"base_sha256": fmt.Sprintf("sha256:%x", sha256.Sum256(original)),
+				"match":       "one", "replacement": "ONE",
+			},
+			map[string]any{
+				"operation": "replace_exact", "path": "multi.txt",
+				"base_sha256": fmt.Sprintf("sha256:%x", sha256.Sum256(original)),
+				"match":       "three", "replacement": "THREE",
+			},
+		},
+	}
+	result, err := rt.toolHandlers["change_prepare"](context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arcEnvelope := decodeARCEnvelope(t, result)
+	resultData := arcEnvelope["mcpx"].(map[string]any)["result"].(map[string]any)
+	data, _ := resultData["data"].(map[string]any)
+	if data["changeset_id"] == nil {
+		t.Fatalf("chained exact edits must prepare successfully: %+v", data)
+	}
+}
+
+func TestChangePreparePatchFormatErrorExplainsUnifiedDiff(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	if err := os.WriteFile(filepath.Join(registered.Path, "demo.txt"), []byte("line one\nline two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"intent":            "prepare an apply_patch style update",
+		"remote_session_id": created.Session.ID,
+		"summary":           "patch format",
+		"operations": []any{map[string]any{
+			"operation":   "update",
+			"path":        "demo.txt",
+			"base_sha256": fmt.Sprintf("sha256:%x", sha256.Sum256([]byte("line one\nline two\n"))),
+			"patch":       "*** Begin Patch\n*** Update File: demo.txt\n@@\n line one\n+line three\n*** End Patch",
+		}},
+	}
+	result, err := rt.toolHandlers["change_prepare"](context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arcEnvelope := decodeARCEnvelope(t, result)
+	resultData := arcEnvelope["mcpx"].(map[string]any)["result"].(map[string]any)
+	data, _ := resultData["data"].(map[string]any)
+	errorBody, _ := data["error"].(map[string]any)
+	if errorBody["code"] != "PATCH_HUNKS_OVERLAP" {
+		t.Fatalf("unexpected error code: %v", errorBody["code"])
+	}
+	message, _ := errorBody["message"].(string)
+	for _, phrase := range []string{"unified diff", "*** Begin Patch", "replace_exact"} {
+		if !strings.Contains(message, phrase) {
+			t.Fatalf("patch format error must explain %q: %s", phrase, message)
+		}
+	}
+	details, _ := errorBody["details"].(map[string]any)
+	if details["patch_format_guidance"] == nil || details["patch_guidance"] == nil {
+		t.Fatalf("patch format details missing guidance: %+v", details)
+	}
+}
+
+func TestChangePrepareHunkCountErrorExplainsHeaderCounts(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	if err := os.WriteFile(filepath.Join(registered.Path, "demo.txt"), []byte("line one\nline two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"intent":            "prepare a hunk with wrong counts",
+		"remote_session_id": created.Session.ID,
+		"summary":           "hunk counts",
+		"operations": []any{map[string]any{
+			"operation":   "update",
+			"path":        "demo.txt",
+			"base_sha256": fmt.Sprintf("sha256:%x", sha256.Sum256([]byte("line one\nline two\n"))),
+			"patch":       "@@ -1,2 +1,3 @@\n line one\n+line three\n",
+		}},
+	}
+	result, err := rt.toolHandlers["change_prepare"](context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arcEnvelope := decodeARCEnvelope(t, result)
+	resultData := arcEnvelope["mcpx"].(map[string]any)["result"].(map[string]any)
+	data, _ := resultData["data"].(map[string]any)
+	errorBody, _ := data["error"].(map[string]any)
+	if errorBody["code"] != "PATCH_HUNKS_OVERLAP" {
+		t.Fatalf("unexpected error code: %v", errorBody["code"])
+	}
+	message, _ := errorBody["message"].(string)
+	for _, phrase := range []string{"hunk 头", "必须与实际", "replace_exact"} {
+		if !strings.Contains(message, phrase) {
+			t.Fatalf("hunk count error must explain %q: %s", phrase, message)
+		}
+	}
+	details, _ := errorBody["details"].(map[string]any)
+	if details["patch_format_guidance"] == nil {
+		t.Fatalf("hunk count details missing format guidance: %+v", details)
 	}
 }
 

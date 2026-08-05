@@ -204,6 +204,61 @@ func TestRetentionDeletesExpiredEphemeralRecords(t *testing.T) {
 	}
 }
 
+func TestRetentionDeletesExpiredOperationsOnlyForClosedSessions(t *testing.T) {
+	db, service, now := newRetentionTestService(t, "")
+	insertRetentionPrincipal(t, db, "principal")
+	insertRetentionSession(t, db, "closed", "demo", "closed", "principal")
+	insertRetentionSession(t, db, "active", "demo", "active", "principal")
+	old := now.Add(-2 * time.Hour).UnixMilli()
+	recent := now.Add(-10 * time.Minute).UnixMilli()
+	future := now.Add(time.Hour).UnixMilli()
+	_, err := db.Exec(`INSERT INTO operations
+		(id, remote_session_id, workspace_name, request_id, purpose, state, result_json, error_json, created_at, expires_at)
+		VALUES
+		('expired', 'closed', 'demo', 'request', 'old', 'succeeded', '{}', '{}', ?, ?),
+		('active-session', 'active', 'demo', 'request', 'old', 'succeeded', '{}', '{}', ?, ?),
+		('recent', 'closed', 'demo', 'request', 'recent', 'succeeded', '{}', '{}', ?, ?),
+		('running', 'closed', 'demo', 'request', 'running', 'running', '{}', '{}', ?, ?)`,
+		old, old, old, old, recent, future, old, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO operation_steps
+		(operation_id, step_id, tool_name, state, request_id, created_at, result_json, error_json)
+		VALUES ('expired', 'step', 'source_read', 'succeeded', 'request', ?, '{}', '{}')`, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := service.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.DeletedOperations != 1 {
+		t.Fatalf("deleted operations=%d, want 1; report=%+v", report.DeletedOperations, report)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM operations WHERE id = 'expired'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("expired closed-session operation remains")
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM operation_steps WHERE operation_id = 'expired'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("operation child step was not cascaded")
+	}
+	for _, id := range []string{"active-session", "recent", "running"} {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM operations WHERE id = ?`, id).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("operation %q was deleted unexpectedly", id)
+		}
+	}
+}
+
 func TestRetentionTaskLogFailureKeepsRow(t *testing.T) {
 	logDir := t.TempDir()
 	db, service, now := newRetentionTestService(t, logDir)

@@ -32,6 +32,7 @@ type RetentionReport struct {
 	DeletedFileSnapshots     int
 	DeletedEnvironmentSnaps  int
 	DeletedEphemeralRecords  int
+	DeletedOperations        int
 	Vacuumed                 bool
 	Errors                   []string
 }
@@ -99,6 +100,12 @@ func (s *RetentionService) RunOnce(ctx context.Context) (RetentionReport, error)
 	report.DeletedTerminalTasks += deleted
 	report.Errors = append(report.Errors, cleanupErrors...)
 
+	deleted, err = s.deleteExpiredOperations(ctx, now.UnixMilli())
+	if err != nil {
+		return report, err
+	}
+	report.DeletedOperations += deleted
+
 	snapshotCounts, err := s.deleteClosedSessionSnapshots(ctx, now.Add(-snapshotTTL))
 	if err != nil {
 		return report, err
@@ -130,7 +137,29 @@ func (s *RetentionService) checkpoint(ctx context.Context) (bool, error) {
 
 // TotalDeleted returns the number of rows removed in this pass.
 func (r RetentionReport) TotalDeleted() int {
-	return r.DeletedObservationEvents + r.DeletedTerminalTasks + r.DeletedFileSnapshots + r.DeletedEnvironmentSnaps + r.DeletedEphemeralRecords
+	return r.DeletedObservationEvents + r.DeletedTerminalTasks + r.DeletedFileSnapshots + r.DeletedEnvironmentSnaps + r.DeletedEphemeralRecords + r.DeletedOperations
+}
+
+func (s *RetentionService) deleteExpiredOperations(ctx context.Context, now int64) (int, error) {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM operations
+		WHERE rowid IN (
+			SELECT operations.rowid
+			FROM operations
+			LEFT JOIN remote_sessions ON remote_sessions.id = operations.remote_session_id
+			WHERE operations.state IN ('succeeded', 'failed', 'interrupted', 'cancelled')
+			  AND operations.expires_at <= ?
+			  AND (remote_sessions.id IS NULL OR remote_sessions.status IN ('closed', 'archived'))
+			ORDER BY operations.expires_at ASC, operations.id ASC
+			LIMIT ?
+		)`, now, retentionBatchSize)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired operations: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(count), nil
 }
 
 func (s *RetentionService) deleteObservationBatch(ctx context.Context, category string, cutoff time.Time, maxRows int) (int, error) {
