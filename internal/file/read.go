@@ -2,6 +2,7 @@ package file
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -23,6 +24,23 @@ type ReadOptions struct {
 	MaxBytes      int64
 }
 
+// LineEndingCounts records line terminators in the original bytes.
+type LineEndingCounts struct {
+	LF   int `json:"lf"`
+	CRLF int `json:"crlf"`
+	CR   int `json:"cr"`
+}
+
+// Format describes the source bytes that a client may edit. It is separate
+// from the transport encoding used by the MCP response.
+type Format struct {
+	Charset          string           `json:"charset"`
+	BOM              string           `json:"bom"`
+	LineEnding       string           `json:"line_ending"`
+	LineEndingCounts LineEndingCounts `json:"line_ending_counts"`
+	FinalNewline     *bool            `json:"final_newline"`
+}
+
 // ReadResult is file.read data.
 type ReadResult struct {
 	Path       string `json:"path"`
@@ -32,6 +50,7 @@ type ReadResult struct {
 	Limit      int    `json:"limit"`
 	Truncated  bool   `json:"truncated"`
 	LineEnding string `json:"line_ending,omitempty"`
+	Format     Format `json:"format"`
 	SHA256     string `json:"-"`
 }
 
@@ -52,6 +71,7 @@ type FullReadResult struct {
 	Size       int64  `json:"size_bytes"`
 	MIMEType   string `json:"mime_type"`
 	LineEnding string `json:"line_ending,omitempty"`
+	Format     Format `json:"format"`
 	SHA256     string `json:"sha256"`
 }
 
@@ -92,10 +112,15 @@ func Read(opts ReadOptions) (ReadResult, error) {
 	}
 	defer f.Close()
 	endsWithNewline := false
+	prefix := make([]byte, 4)
+	prefixSize := 0
+	if st.Size() > 0 {
+		prefixSize, _ = f.ReadAt(prefix, 0)
+	}
 	if st.Size() > 0 {
 		var last [1]byte
 		if _, err := f.ReadAt(last[:], st.Size()-1); err == nil {
-			endsWithNewline = last[0] == '\n'
+			endsWithNewline = last[0] == '\n' || last[0] == '\r'
 		}
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			return ReadResult{}, err
@@ -146,6 +171,7 @@ func Read(opts ReadOptions) (ReadResult, error) {
 		truncated = true
 	}
 	digest := hasher.Sum(nil)
+	format := formatFromReadStats(prefix[:prefixSize], crlfCount, lfCount, crCount, endsWithNewline)
 	return ReadResult{
 		Path:       opts.Path,
 		Content:    chunk,
@@ -153,7 +179,8 @@ func Read(opts ReadOptions) (ReadResult, error) {
 		Offset:     start,
 		Limit:      opts.Limit,
 		Truncated:  truncated,
-		LineEnding: lineEndingName(crlfCount, lfCount, crCount),
+		LineEnding: format.LineEnding,
+		Format:     format,
 		SHA256:     "sha256:" + hex.EncodeToString(digest),
 	}, nil
 }
@@ -196,11 +223,72 @@ func ReadFull(opts FullReadOptions) (FullReadResult, error) {
 		return FullReadResult{}, fmt.Errorf("file too large for full read")
 	}
 	digest := sha256.Sum256(content)
+	format := detectFormat(content)
 	return FullReadResult{
 		Path: opts.Path, Content: content, Size: int64(len(content)),
-		MIMEType: detectMIME(opts.Path, content), LineEnding: detectLineEnding(content),
+		MIMEType: detectMIME(opts.Path, content), LineEnding: format.LineEnding, Format: format,
 		SHA256: "sha256:" + hex.EncodeToString(digest[:]),
 	}, nil
+}
+
+func detectFormat(content []byte) Format {
+	charset, bom := detectCharset(content)
+	format := Format{Charset: charset, BOM: bom, LineEnding: "none"}
+	if charset != "utf-8" {
+		return format
+	}
+	crlfCount, lfCount, crCount := 0, 0, 0
+	observeLineEndings(content, &crlfCount, &lfCount, &crCount)
+	format.LineEndingCounts = LineEndingCounts{LF: lfCount, CRLF: crlfCount, CR: crCount}
+	format.LineEnding = lineEndingName(crlfCount, lfCount, crCount)
+	format.FinalNewline = boolPointer(hasFinalLineEnding(content))
+	return format
+}
+
+// DetectFormat classifies source bytes without reading from the workspace.
+// Changeset preparation uses the same classifier as file.read so clients see
+// one consistent charset and line-ending contract across read and edit tools.
+func DetectFormat(content []byte) Format { return detectFormat(content) }
+
+func formatFromReadStats(prefix []byte, crlfCount, lfCount, crCount int, finalNewline bool) Format {
+	charset, bom := detectCharset(prefix)
+	if charset == "unknown" {
+		// Read validates every returned line as UTF-8, so a non-empty successful
+		// window is still editable UTF-8 even when the prefix is shorter than a
+		// complete BOM sequence.
+		charset = "utf-8"
+	}
+	return Format{
+		Charset: charset, BOM: bom,
+		LineEnding:       lineEndingName(crlfCount, lfCount, crCount),
+		LineEndingCounts: LineEndingCounts{LF: lfCount, CRLF: crlfCount, CR: crCount},
+		FinalNewline:     boolPointer(finalNewline),
+	}
+}
+
+func detectCharset(content []byte) (charset, bom string) {
+	switch {
+	case bytes.HasPrefix(content, []byte{0xef, 0xbb, 0xbf}):
+		return "utf-8", "utf-8"
+	case bytes.HasPrefix(content, []byte{0xff, 0xfe}):
+		return "utf-16le", "utf-16le"
+	case bytes.HasPrefix(content, []byte{0xfe, 0xff}):
+		return "utf-16be", "utf-16be"
+	case utf8.Valid(content):
+		return "utf-8", "none"
+	default:
+		return "unknown", "unknown"
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }
+
+func hasFinalLineEnding(content []byte) bool {
+	if len(content) == 0 {
+		return false
+	}
+	last := content[len(content)-1]
+	return last == '\n' || last == '\r'
 }
 
 func detectLineEnding(content []byte) string {
@@ -252,10 +340,27 @@ func lineEndingName(crlfCount, lfCount, crCount int) string {
 }
 
 func detectMIME(path string, content []byte) string {
-	if detected := mime.TypeByExtension(filepath.Ext(path)); detected != "" {
+	extension := strings.ToLower(filepath.Ext(path))
+	if detected, ok := sourceMIMEByExtension[extension]; ok {
+		return detected
+	}
+	if detected := mime.TypeByExtension(extension); detected != "" {
 		return normalizeMIME(detected)
 	}
 	return normalizeMIME(http.DetectContentType(content))
+}
+
+// sourceMIMEByExtension overrides platform MIME tables for source formats
+// whose extensions are also used by binary containers. macOS commonly maps
+// .ts to video/mp2t, which makes a TypeScript file look like binary content to
+// an MCP client and causes an unnecessary base64/encoding recovery round trip.
+var sourceMIMEByExtension = map[string]string{
+	".ts":     "text/typescript",
+	".tsx":    "text/typescript",
+	".mts":    "text/typescript",
+	".cts":    "text/typescript",
+	".vue":    "text/plain",
+	".svelte": "text/plain",
 }
 
 func normalizeMIME(detected string) string {

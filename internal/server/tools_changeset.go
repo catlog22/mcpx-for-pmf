@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 	"mcpx/internal/auth"
 	"mcpx/internal/changeset"
 	"mcpx/internal/envelope"
+	"mcpx/internal/file"
 	"mcpx/internal/remotesession"
 	"mcpx/internal/security"
 )
@@ -80,11 +83,121 @@ func (r *Runtime) toolChangeHistory(ctx context.Context, req mcp.CallToolRequest
 	if fail != nil {
 		return fail, nil
 	}
-	history, err := r.changesets.History(ctx, session.ID, intPayload(envReq.Payload, "limit"))
+	limit := intPayload(envReq.Payload, "limit")
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	history, err := r.changesets.History(ctx, session.ID, limit)
 	if err != nil {
 		return r.changeError(envReq, session.ID, session.WorkspaceName, err)
 	}
-	return r.remoteResult(envReq, session.ID, session.WorkspaceName, map[string]any{"changesets": history})
+	digest := changeHistoryDigest(history)
+	knownDigest := strings.TrimSpace(stringPayload(envReq.Payload, "known_history_digest"))
+	notModified := knownDigest != "" && knownDigest == digest
+	data := map[string]any{
+		"history_digest": digest,
+		"history_limit":  limit,
+		"not_modified":   notModified,
+		"summary":        changeHistorySummary(session.ID, history),
+	}
+	if notModified {
+		data["changesets"] = []changeset.Changeset{}
+		data["message"] = "Changeset history unchanged; reuse the previously returned history."
+	} else {
+		data["changesets"] = history
+	}
+	return r.remoteResult(envReq, session.ID, session.WorkspaceName, data)
+}
+
+type changeHistoryDigestItem struct {
+	ID                string `json:"id"`
+	Status            string `json:"status"`
+	Summary           string `json:"summary"`
+	Digest            string `json:"digest"`
+	SourceChangesetID string `json:"source_changeset_id,omitempty"`
+	CreatedAt         int64  `json:"created_at"`
+	AppliedAt         int64  `json:"applied_at,omitempty"`
+	DiscardedAt       int64  `json:"discarded_at,omitempty"`
+}
+
+func changeHistoryDigest(history []changeset.Changeset) string {
+	items := make([]changeHistoryDigestItem, 0, len(history))
+	for _, item := range history {
+		digestItem := changeHistoryDigestItem{
+			ID: item.ID, Status: item.Status, Summary: item.Summary, Digest: item.Digest,
+			SourceChangesetID: item.SourceChangesetID, CreatedAt: item.CreatedAt.UnixMilli(),
+		}
+		if item.AppliedAt != nil {
+			digestItem.AppliedAt = item.AppliedAt.UnixMilli()
+		}
+		if item.DiscardedAt != nil {
+			digestItem.DiscardedAt = item.DiscardedAt.UnixMilli()
+		}
+		items = append(items, digestItem)
+	}
+	encoded, _ := json.Marshal(items)
+	digest := sha256.Sum256(encoded)
+	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+func changeHistorySummary(remoteSessionID string, history []changeset.Changeset) map[string]any {
+	drafts := make([]map[string]any, 0)
+	for _, item := range history {
+		if item.Status != "draft" {
+			continue
+		}
+		paths := make([]string, 0, len(item.Files))
+		for _, file := range item.Files {
+			path := file.Path
+			if file.NewPath != "" && file.NewPath != file.Path {
+				path += " -> " + file.NewPath
+			}
+			paths = append(paths, path)
+		}
+		drafts = append(drafts, map[string]any{
+			"changeset_id": item.ID,
+			"digest":       item.Digest,
+			"summary":      item.Summary,
+			"files":        paths,
+			"next_actions": []map[string]any{
+				nextActionWithReason("change_apply", "继续应用该草稿时复制 changeset_id 和 digest", map[string]any{
+					"remote_session_id": remoteSessionID,
+					"changeset_id":      item.ID,
+					"expected_digest":   item.Digest,
+				}),
+				nextActionWithReason("change_discard", "该草稿不再需要时一次丢弃，避免继续占用交付状态", map[string]any{
+					"remote_session_id": remoteSessionID,
+					"changeset_id":      item.ID,
+				}),
+			},
+		})
+	}
+	return map[string]any{
+		"total":         len(history),
+		"active_drafts": drafts,
+		"draft_count":   len(drafts),
+	}
+}
+
+func (r *Runtime) toolChangeDiscard(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	envReq, principal, session, fail := r.changeRequest(ctx, req, true)
+	if fail != nil {
+		return fail, nil
+	}
+	changesetID, _ := envReq.Payload["changeset_id"].(string)
+	item, err := r.changesets.Get(ctx, changesetID)
+	if err != nil || item.RemoteSessionID != session.ID {
+		if err == nil {
+			err = changeset.ErrNotFound
+		}
+		return r.changeError(envReq, session.ID, session.WorkspaceName, err)
+	}
+	discarded, err := r.changesets.Discard(ctx, item.ID)
+	if err != nil {
+		return r.changeError(envReq, session.ID, session.WorkspaceName, err)
+	}
+	_ = r.remote.AddEvent(ctx, principal, remotesession.Event{RemoteSessionID: session.ID, Type: "changeset.discarded", OperationID: item.ID, Summary: item.Summary})
+	return changeDiffResult(discarded), nil
 }
 
 func (r *Runtime) toolChangeRevert(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -207,6 +320,18 @@ func changeSummaryDTO(item changeset.Changeset) map[string]any {
 			"original_sha256": f.OriginalSHA256, "proposed_sha256": f.ProposedSHA256,
 			"expected_sha256": f.ExpectedSHA256,
 		}
+		if !changeset.IsDirectoryChange(f) {
+			switch f.Operation {
+			case "update", "rename":
+				file["original_format"] = formatDTO(f.OriginalFormat)
+				file["proposed_format"] = formatDTO(f.ProposedFormat)
+			case "create":
+				file["proposed_format"] = formatDTO(f.ProposedFormat)
+			case "delete":
+				file["original_format"] = formatDTO(f.OriginalFormat)
+			}
+		}
+		file["format_preserved"] = f.FormatPreserved
 		if changeset.IsDirectoryChange(f) {
 			file["is_directory"] = true
 			file["rollback"] = "retained_backup"
@@ -248,6 +373,9 @@ func changeSummaryDTO(item changeset.Changeset) map[string]any {
 		"files": files, "diff": diff, "created_at": item.CreatedAt,
 		"source_changeset_id": item.SourceChangesetID,
 	}
+	if item.DiscardedAt != nil {
+		dto["discarded_at"] = item.DiscardedAt
+	}
 	if strings.TrimSpace(item.Digest) != "" {
 		dto["expected_digest"] = item.Digest
 		if item.Status == "draft" {
@@ -273,6 +401,21 @@ func changeSummaryDTO(item changeset.Changeset) map[string]any {
 		dto["delete_summary"] = deleteSummary
 	}
 	return dto
+}
+
+func formatDTO(format file.Format) map[string]any {
+	result := map[string]any{
+		"charset":            format.Charset,
+		"bom":                format.BOM,
+		"line_ending":        format.LineEnding,
+		"line_ending_counts": map[string]int{"lf": format.LineEndingCounts.LF, "crlf": format.LineEndingCounts.CRLF, "cr": format.LineEndingCounts.CR},
+	}
+	if format.FinalNewline == nil {
+		result["final_newline"] = nil
+	} else {
+		result["final_newline"] = *format.FinalNewline
+	}
+	return result
 }
 
 func deleteSummaryDTO(files []changeset.FileChange) map[string]any {
@@ -471,6 +614,10 @@ func (r *Runtime) changeError(envReq envelope.Request, remoteSessionID, workspac
 		code = "PATCH_ROLLBACK_FAILED"
 	case errors.Is(err, changeset.ErrStaleRevision):
 		code = "STALE_REVISION"
+	case errors.Is(err, changeset.ErrFormatChanged):
+		code = "FORMAT_CHANGED"
+	case errors.Is(err, changeset.ErrDiscarded):
+		code = "CHANGESET_DISCARDED"
 	case errors.Is(err, changeset.ErrConflict):
 		code = "PATCH_CONFLICT"
 	case strings.Contains(message, "digest mismatch"):
@@ -488,7 +635,7 @@ func (r *Runtime) changeError(envReq envelope.Request, remoteSessionID, workspac
 	case strings.Contains(message, "new_path required"):
 		code = "MISSING_ARGUMENT"
 	}
-	patchGuidance := "先用 source_read(view=full) 获取当前内容、sha256 和 line_ending；重新生成补丁时必须保留目标文件原有换行格式，不要让换行格式差异把局部修改扩大为整文件换行变更。为保持最小 diff，使用带当前 base_sha256 的 replace_exact/insert_before/insert_after，并按当前换行格式组织 match 和 replacement；只有生成并核对局部 hunk 后才使用 update.patch。"
+	patchGuidance := "先用 source_read(view=full) 获取当前内容、sha256 和 format（含 line_ending）；重新生成补丁时必须保留目标文件原有换行格式，并保留字符集、BOM、换行和末尾换行状态，不要让格式差异把局部修改扩大为整文件格式变更。为保持最小 diff，使用带当前 base_sha256 的 replace_exact/insert_before/insert_after，并按当前 format 组织 match 和 replacement；只有生成并核对局部 hunk 后才使用 update.patch。"
 	patchFormatGuidance := ""
 	if code == "PATCH_HUNKS_OVERLAP" && strings.Contains(message, "expected Unified Diff hunk header") {
 		patchFormatGuidance = "patch 必须是标准 unified diff：以 --- a/<path> 和 @@ -起始行,行数 +起始行,行数 @@ 开头；不接受 apply_patch 的 *** Begin Patch / *** Update File 格式。若难以生成局部 hunk，改用 replace_exact/insert_before/insert_after。"
@@ -500,6 +647,12 @@ func (r *Runtime) changeError(envReq envelope.Request, remoteSessionID, workspac
 	}
 	if code == "STALE_REVISION" {
 		message += "；patch 上下文与实际文件不一致（通常来自旧版本或生成错误）。仅需重试失败的这个文件操作，其他文件操作可保持 base_sha256 不变；先 source_read(view=full) 获取当前内容，按实际行内容重新生成 hunk，或改用 replace_exact/insert_before/insert_after。"
+	}
+	if code == "FORMAT_CHANGED" {
+		message += "；普通变更必须保留目标文件的字符集、BOM、换行格式和末尾换行状态；先读取当前文件的 format，再按该格式生成内容。只有明确要求格式化时才使用 change_execute(format=true)。"
+	}
+	if code == "CHANGESET_DISCARDED" {
+		message += "；该草稿已明确丢弃，不能继续应用；请重新准备新的 Changeset。"
 	}
 	if code == "PATCH_HUNKS_OVERLAP" || code == "STALE_REVISION" {
 		message += "；" + patchGuidance
@@ -527,13 +680,21 @@ func (r *Runtime) changeError(envReq envelope.Request, remoteSessionID, workspac
 		}
 		addRecoveryAction(&response, "file_read", "read the current revision of the target file, then retry the operation with its base_sha256", arguments)
 	}
+	if code == "FORMAT_CHANGED" {
+		path := changesetErrorPath(message)
+		arguments := map[string]any{"remote_session_id": remoteSessionID}
+		if path != "" {
+			arguments["path"] = path
+		}
+		addRecoveryAction(&response, "file_read", "读取目标文件的完整 format 后，保持字符集、BOM、换行和末尾换行状态重新准备 Changeset", arguments)
+	}
 	if code == "PATCH_DUPLICATE_PATH" {
 		addRecoveryAction(&response, "change_manage", "merge operations for the same path into a single operation", map[string]any{
 			"remote_session_id": remoteSessionID,
 			"action":            "prepare",
 		})
 	}
-	if code == "PATCH_HUNKS_OVERLAP" || code == "STALE_REVISION" {
+	if code == "PATCH_HUNKS_OVERLAP" || code == "STALE_REVISION" || code == "FORMAT_CHANGED" {
 		if response.Error != nil {
 			if response.Error.Details == nil {
 				response.Error.Details = map[string]any{}
@@ -560,7 +721,7 @@ func (r *Runtime) changeError(envReq envelope.Request, remoteSessionID, workspac
 }
 
 func changesetErrorPath(message string) string {
-	for _, marker := range []string{"file revision is stale:", "digest mismatch for ", "apply ", "patch context did not match in ", "base_sha256 (expected_sha256 alias) required for ", "expected_sha256 required for "} {
+	for _, marker := range []string{"file revision is stale:", "file format changed:", "digest mismatch for ", "apply ", "patch context did not match in ", "base_sha256 (expected_sha256 alias) required for ", "expected_sha256 required for "} {
 		index := strings.LastIndex(strings.ToLower(message), marker)
 		if index < 0 {
 			continue

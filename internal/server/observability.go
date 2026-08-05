@@ -114,8 +114,9 @@ func (r *Runtime) instrumentTool(name string, handler mcpserver.ToolHandlerFunc)
 		}
 		callCtx = withRuntimeContext(callCtx, runtime)
 		callCtx = withToolInvocationName(callCtx, name)
+		internalOperationStep := isOperationChild(callCtx)
 		observationRequest, observationParseErr := r.parseEnv(callCtx, req)
-		if observationParseErr == nil && r.observation != nil {
+		if !internalOperationStep && observationParseErr == nil && r.observation != nil {
 			_ = r.observation.RecordToolStarted(callCtx, name, observationRequest, req.GetArguments())
 		}
 
@@ -133,7 +134,7 @@ func (r *Runtime) instrumentTool(name string, handler mcpserver.ToolHandlerFunc)
 		if err != nil || result == nil || result.IsError {
 			status = "error"
 		}
-		if observationParseErr == nil && r.observation != nil {
+		if !internalOperationStep && observationParseErr == nil && r.observation != nil {
 			_ = r.observation.RecordToolCompleted(callCtx, name, observationRequest, req.GetArguments(), result, err, timing)
 		}
 		if err != nil {
@@ -151,7 +152,9 @@ func (r *Runtime) instrumentTool(name string, handler mcpserver.ToolHandlerFunc)
 				ProcessingMs: timing.ProcessingMs, ServerElapsedMs: timing.ServerElapsedMs,
 			},
 		}, result)
-		logToolCall(name, runtime, status, timing)
+		if !internalOperationStep {
+			logToolCall(name, runtime, status, timing)
+		}
 		return result, err
 	}
 }

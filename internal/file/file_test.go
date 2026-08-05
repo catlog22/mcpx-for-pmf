@@ -3,6 +3,7 @@ package file
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -76,6 +77,12 @@ func TestReadReportsLineEnding(t *testing.T) {
 	if read.LineEnding != "CRLF" {
 		t.Fatalf("line ending = %q, want CRLF", read.LineEnding)
 	}
+	if read.Format.Charset != "utf-8" || read.Format.BOM != "none" || read.Format.LineEnding != "CRLF" {
+		t.Fatalf("window format = %+v", read.Format)
+	}
+	if read.Format.LineEndingCounts != (LineEndingCounts{CRLF: 2}) || read.Format.FinalNewline == nil || !*read.Format.FinalNewline {
+		t.Fatalf("window format details = %+v", read.Format)
+	}
 
 	full, err := ReadFull(FullReadOptions{WorkspaceRoot: root, Path: "crlf.java", MaxBytes: 1 << 20})
 	if err != nil {
@@ -84,7 +91,52 @@ func TestReadReportsLineEnding(t *testing.T) {
 	if full.LineEnding != "CRLF" {
 		t.Fatalf("full line ending = %q, want CRLF", full.LineEnding)
 	}
+	if !reflect.DeepEqual(read.Format, full.Format) {
+		t.Fatalf("window/full format mismatch: window=%+v full=%+v", read.Format, full.Format)
+	}
 }
+
+func TestReadFullReportsCharsetBOMAndFinalNewline(t *testing.T) {
+	root := t.TempDir()
+	cases := []struct {
+		name       string
+		content    []byte
+		charset    string
+		bom        string
+		lineEnding string
+		final      *bool
+	}{
+		{name: "utf8 bom", content: append([]byte{0xef, 0xbb, 0xbf}, []byte("one\n")...), charset: "utf-8", bom: "utf-8", lineEnding: "LF", final: boolPointerForTest(true)},
+		{name: "utf8 no final newline", content: []byte("one\r\ntwo"), charset: "utf-8", bom: "none", lineEnding: "CRLF", final: boolPointerForTest(false)},
+		{name: "cr final newline", content: []byte("one\rtwo\r"), charset: "utf-8", bom: "none", lineEnding: "CR", final: boolPointerForTest(true)},
+		{name: "mixed", content: []byte("one\r\ntwo\nthree\rfour"), charset: "utf-8", bom: "none", lineEnding: "mixed", final: boolPointerForTest(false)},
+		{name: "utf16le", content: []byte{0xff, 0xfe, 'o', 0, 'k', 0}, charset: "utf-16le", bom: "utf-16le", lineEnding: "none"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(root, tc.name+".txt")
+			if err := os.WriteFile(path, tc.content, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			result, err := ReadFull(FullReadOptions{WorkspaceRoot: root, Path: tc.name + ".txt", MaxBytes: 1 << 20})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Format.Charset != tc.charset || result.Format.BOM != tc.bom || result.Format.LineEnding != tc.lineEnding {
+				t.Fatalf("format = %+v", result.Format)
+			}
+			if tc.final == nil {
+				if result.Format.FinalNewline != nil {
+					t.Fatalf("final_newline = %v, want null", result.Format.FinalNewline)
+				}
+			} else if result.Format.FinalNewline == nil || *result.Format.FinalNewline != *tc.final {
+				t.Fatalf("final_newline = %v, want %v", result.Format.FinalNewline, *tc.final)
+			}
+		})
+	}
+}
+
+func boolPointerForTest(value bool) *bool { return &value }
 
 func TestReadFullReturnsWholeTextAndMIME(t *testing.T) {
 	root := t.TempDir()
@@ -102,6 +154,22 @@ func TestReadFullReturnsWholeTextAndMIME(t *testing.T) {
 	}
 	if !strings.HasPrefix(result.SHA256, "sha256:") {
 		t.Fatalf("missing full-file hash: %q", result.SHA256)
+	}
+}
+
+func TestReadFullTreatsTypeScriptAsSourceText(t *testing.T) {
+	root := t.TempDir()
+	content := []byte("const answer: number = 42;\n")
+	if err := os.WriteFile(filepath.Join(root, "engine.ts"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := ReadFull(FullReadOptions{WorkspaceRoot: root, Path: "engine.ts", MaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MIMEType != "text/typescript" || result.Format.Charset != "utf-8" || string(result.Content) != string(content) {
+		t.Fatalf("TypeScript full read=%+v", result)
 	}
 }
 

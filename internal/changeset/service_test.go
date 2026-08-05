@@ -88,6 +88,34 @@ func TestPrepareApplyHistoryAndRevert(t *testing.T) {
 	}
 }
 
+func TestDiscardDraftLeavesAuditableNonApplyingHistory(t *testing.T) {
+	workspace, store, remoteID, principal := newChangesetFixture(t, nil)
+	service := NewService(store.DB())
+	prepared, err := service.Prepare(context.Background(), remoteID, principal.ID, workspace, "abandoned edit", []Operation{{
+		Operation: "create", Path: "abandoned.txt", Content: "draft\n",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	discarded, err := service.Discard(context.Background(), prepared.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if discarded.Status != "discarded" || discarded.DiscardedAt == nil {
+		t.Fatalf("discarded changeset = %+v", discarded)
+	}
+	if _, err := service.Apply(context.Background(), prepared.ID, workspace); !errors.Is(err, ErrDiscarded) {
+		t.Fatalf("discarded changeset apply error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "abandoned.txt")); !os.IsNotExist(err) {
+		t.Fatalf("discard must not write workspace file: %v", err)
+	}
+	history, err := service.History(context.Background(), remoteID, 10)
+	if err != nil || len(history) != 1 || history[0].Status != "discarded" {
+		t.Fatalf("discarded history = %+v, err=%v", history, err)
+	}
+}
+
 func TestPrepareAppliesChainedExactEditsForSamePath(t *testing.T) {
 	workspace, store, remoteID, principal := newChangesetFixture(t, nil)
 	original := []byte("one\ntwo\nthree\n")
@@ -373,6 +401,26 @@ func TestPrepareUpdateNormalizesCRLFContent(t *testing.T) {
 	}
 }
 
+func TestPrepareAcceptsCRLFLineCountChange(t *testing.T) {
+	workspace, store, remoteID, principal := newChangesetFixture(t, map[string]string{
+		"crlf.txt": "line one\r\nline two\r\n",
+	})
+	service := NewService(store.DB())
+	original := []byte("line one\r\nline two\r\n")
+	prepared, err := service.Prepare(context.Background(), remoteID, principal.ID, workspace, "add a line", []Operation{{
+		Operation: "update", Path: "crlf.txt", ExpectedSHA256: hashBytes(original), Content: "line one\nline TWO\nline three\n",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prepared.Files) != 1 || !prepared.Files[0].FormatPreserved {
+		t.Fatalf("format metadata = %+v", prepared.Files)
+	}
+	if got, want := string(prepared.Files[0].Proposed), "line one\r\nline TWO\r\nline three\r\n"; got != want {
+		t.Fatalf("proposed content = %q, want %q", got, want)
+	}
+}
+
 func TestPrepareUpdateNormalizesMixedContentToLF(t *testing.T) {
 	workspace := t.TempDir()
 	original := "line one\nline two\nline three\n"
@@ -389,6 +437,49 @@ func TestPrepareUpdateNormalizesMixedContentToLF(t *testing.T) {
 	}
 	if got, want := string(prepared.Proposed), "line one\nline TWO\nline three\n"; got != want {
 		t.Fatalf("update did not reduce CRLF content to LF: got %q, want %q", got, want)
+	}
+}
+
+func TestPrepareRejectsUnexpectedFormatChange(t *testing.T) {
+	workspace, store, remoteID, principal := newChangesetFixture(t, map[string]string{
+		"crlf.txt": "line one\r\nline two\r\n",
+	})
+	service := NewService(store.DB())
+	original := []byte("line one\r\nline two\r\n")
+	_, err := service.PrepareWithOptions(context.Background(), remoteID, principal.ID, workspace, "change content", []Operation{{
+		Operation: "update", Path: "crlf.txt", ExpectedSHA256: hashBytes(original), Content: "line one\nline TWO\n",
+	}}, PrepareOptions{
+		Transform: func(_ string, content []byte) ([]byte, error) {
+			return []byte(strings.ReplaceAll(string(content), "\r\n", "\n")), nil
+		},
+	})
+	if !errors.Is(err, ErrFormatChanged) {
+		t.Fatalf("expected format change error, got %v", err)
+	}
+}
+
+func TestPrepareReportsFormatChangeWhenExplicitlyAllowed(t *testing.T) {
+	workspace, store, remoteID, principal := newChangesetFixture(t, map[string]string{
+		"crlf.txt": "line one\r\nline two\r\n",
+	})
+	service := NewService(store.DB())
+	original := []byte("line one\r\nline two\r\n")
+	prepared, err := service.PrepareWithOptions(context.Background(), remoteID, principal.ID, workspace, "format content", []Operation{{
+		Operation: "update", Path: "crlf.txt", ExpectedSHA256: hashBytes(original), Content: "line one\nline TWO\n",
+	}}, PrepareOptions{
+		AllowFormatChange: true,
+		Transform: func(_ string, content []byte) ([]byte, error) {
+			return []byte(strings.ReplaceAll(string(content), "\r\n", "\n")), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prepared.Files) != 1 || prepared.Files[0].FormatPreserved {
+		t.Fatalf("format metadata=%+v", prepared.Files)
+	}
+	if prepared.Files[0].OriginalFormat.LineEnding != "CRLF" || prepared.Files[0].ProposedFormat.LineEnding != "LF" {
+		t.Fatalf("format metadata=%+v", prepared.Files[0])
 	}
 }
 

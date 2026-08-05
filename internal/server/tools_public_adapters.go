@@ -183,11 +183,18 @@ func (r *Runtime) toolSourceRead(ctx context.Context, req mcp.CallToolRequest) (
 }
 
 func (r *Runtime) toolChangePreparePublic(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if apply, _ := req.GetArguments()["apply"].(bool); apply {
+		return r.toolChangeExecute(ctx, req)
+	}
 	return r.toolChangeManage(ctx, publicDispatch(req, "action", "prepare"))
 }
 
 func (r *Runtime) toolChangeRead(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolChangeManage(ctx, publicDispatch(req, "action", publicSelector(req, "view")))
+}
+
+func (r *Runtime) toolChangeDiscardPublic(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return r.toolChangeManage(ctx, publicDispatch(req, "action", "discard"))
 }
 
 func (r *Runtime) toolChangeApply(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

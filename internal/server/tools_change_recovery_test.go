@@ -99,6 +99,141 @@ func TestChangesetDigestIsVisibleInPrepareAndReadToolText(t *testing.T) {
 	}
 }
 
+func TestPublicChangePrepareCanApplyInOneCall(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := mcp.CallToolRequest{}
+	request.Params.Arguments = map[string]any{
+		"intent":            "apply a one-call change",
+		"remote_session_id": created.Session.ID,
+		"summary":           "one-call change",
+		"apply":             true,
+		"operations": []any{map[string]any{
+			"operation": "create", "path": "one-call.txt", "content": "applied\n",
+		}},
+	}
+	result, err := rt.toolHandlers["change_prepare"](context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := decodeARCEnvelope(t, result)
+	data := envelope["mcpx"].(map[string]any)["result"].(map[string]any)["data"].(map[string]any)
+	if data["applied"] != true {
+		t.Fatalf("one-call change data = %+v", data)
+	}
+	if _, err := os.Stat(filepath.Join(registered.Path, "one-call.txt")); err != nil {
+		t.Fatalf("one-call change was not applied: %v", err)
+	}
+}
+
+func TestChangeHistoryExposesDraftRecoveryActions(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepare := mcp.CallToolRequest{}
+	prepare.Params.Arguments = map[string]any{
+		"intent":            "prepare a discardable change",
+		"remote_session_id": created.Session.ID,
+		"summary":           "discardable change",
+		"operations": []any{map[string]any{
+			"operation": "create", "path": "discardable.txt", "content": "draft\n",
+		}},
+	}
+	prepared, err := rt.toolHandlers["change_prepare"](context.Background(), prepare)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedEnvelope := decodeARCEnvelope(t, prepared)
+	preparedData := preparedEnvelope["mcpx"].(map[string]any)["result"].(map[string]any)["data"].(map[string]any)
+	changesetID, _ := preparedData["changeset_id"].(string)
+	if changesetID == "" {
+		t.Fatalf("prepared data = %+v", preparedData)
+	}
+
+	history := mcp.CallToolRequest{}
+	history.Params.Arguments = map[string]any{
+		"remote_session_id": created.Session.ID, "view": "history", "limit": 5,
+	}
+	historyResult, err := rt.toolHandlers["change_read"](context.Background(), history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyEnvelope := decodeARCEnvelope(t, historyResult)
+	historyData := historyEnvelope["mcpx"].(map[string]any)["result"].(map[string]any)["data"].(map[string]any)
+	summary := historyData["summary"].(map[string]any)
+	if summary["draft_count"] != float64(1) {
+		t.Fatalf("history summary = %+v", summary)
+	}
+	drafts := summary["active_drafts"].([]any)
+	actions := drafts[0].(map[string]any)["next_actions"].([]any)
+	if actions[0].(map[string]any)["tool"] != "change_apply" || actions[1].(map[string]any)["tool"] != "change_discard" {
+		t.Fatalf("draft actions = %+v", actions)
+	}
+	historyDigest, _ := historyData["history_digest"].(string)
+	if historyDigest == "" {
+		t.Fatalf("history digest missing: %+v", historyData)
+	}
+	unchanged := mcp.CallToolRequest{}
+	unchanged.Params.Arguments = map[string]any{
+		"remote_session_id": created.Session.ID, "view": "history", "limit": 5,
+		"known_history_digest": historyDigest,
+	}
+	unchangedResult, err := rt.toolHandlers["change_read"](context.Background(), unchanged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unchangedEnvelope := decodeARCEnvelope(t, unchangedResult)
+	unchangedData := unchangedEnvelope["mcpx"].(map[string]any)["result"].(map[string]any)["data"].(map[string]any)
+	if unchangedData["not_modified"] != true || len(unchangedData["changesets"].([]any)) != 0 {
+		t.Fatalf("unchanged history response = %+v", unchangedData)
+	}
+
+	discard := mcp.CallToolRequest{}
+	discard.Params.Arguments = map[string]any{
+		"intent":            "discard the obsolete draft",
+		"remote_session_id": created.Session.ID,
+		"changeset_id":      changesetID,
+	}
+	if _, err := rt.toolHandlers["change_discard"](context.Background(), discard); err != nil {
+		t.Fatal(err)
+	}
+	historyResult, err = rt.toolHandlers["change_read"](context.Background(), history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyEnvelope = decodeARCEnvelope(t, historyResult)
+	historyData = historyEnvelope["mcpx"].(map[string]any)["result"].(map[string]any)["data"].(map[string]any)
+	summary = historyData["summary"].(map[string]any)
+	if summary["draft_count"] != float64(0) {
+		t.Fatalf("history after discard = %+v", summary)
+	}
+}
+
 func TestPatchConflictExplainsLineEndingRecovery(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	principal, err := rt.principalFromContext(context.Background())

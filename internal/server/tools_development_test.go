@@ -63,6 +63,19 @@ func TestProjectTaskAndArtifactRemoteSessionFlow(t *testing.T) {
 	if started["status"] != "accepted" || taskID == "" {
 		t.Fatalf("task start=%+v", started)
 	}
+	firstList := callEnvelope(t, runtime.toolTaskManage, ctx, map[string]any{"remote_session_id": remoteSessionID, "action": "list", "limit": 5})
+	firstListData, _ := firstList["data"].(map[string]any)
+	taskDigest, _ := firstListData["task_list_digest"].(string)
+	if taskDigest == "" {
+		t.Fatalf("task list digest missing: %+v", firstList)
+	}
+	unchangedList := callEnvelope(t, runtime.toolTaskManage, ctx, map[string]any{
+		"remote_session_id": remoteSessionID, "action": "list", "limit": 5, "known_task_digest": taskDigest,
+	})
+	unchangedListData, _ := unchangedList["data"].(map[string]any)
+	if unchangedListData["not_modified"] != true || len(unchangedListData["tasks"].([]any)) != 0 {
+		t.Fatalf("unchanged task list=%+v", unchangedList)
+	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		status := callEnvelope(t, runtime.toolTaskManage, ctx, map[string]any{"remote_session_id": remoteSessionID, "action": "status", "task_id": taskID})

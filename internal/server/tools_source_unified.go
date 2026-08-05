@@ -63,6 +63,7 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req mcp.CallToolReque
 		for _, item := range batch.Results {
 			entry := map[string]any{
 				"path": item.Path, "ok": item.OK, "content": item.Content, "sha256": item.SHA256, "line_ending": item.LineEnding,
+				"format": formatMap(item.Format),
 				"offset": item.Offset, "limit": item.Limit, "total_lines": item.TotalLines, "truncated": item.Truncated,
 			}
 			if item.Truncated {
@@ -127,6 +128,7 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req mcp.CallToolReque
 	}
 	data := map[string]any{
 		"path": read.Path, "content": read.Content, "sha256": read.SHA256, "line_ending": read.LineEnding,
+		"format": formatMap(read.Format),
 		"offset": read.Offset, "limit": read.Limit, "total_lines": read.TotalLines, "truncated": read.Truncated,
 	}
 	if read.Truncated {
@@ -175,6 +177,7 @@ func fullFileReadData(read file.FullReadResult) map[string]any {
 		"mime_type":   read.MIMEType,
 		"size_bytes":  read.Size,
 		"line_ending": read.LineEnding,
+		"format":      formatMap(read.Format),
 		"sha256":      read.SHA256,
 	}
 	if strings.HasPrefix(read.MIMEType, "image/") && read.MIMEType != "image/svg+xml" {
@@ -215,6 +218,20 @@ func fullReadLineCount(content string) int {
 	return lines
 }
 
+func formatMap(format file.Format) map[string]any {
+	return map[string]any{
+		"charset":     format.Charset,
+		"bom":         format.BOM,
+		"line_ending": format.LineEnding,
+		"line_ending_counts": map[string]any{
+			"lf":   format.LineEndingCounts.LF,
+			"crlf": format.LineEndingCounts.CRLF,
+			"cr":   format.LineEndingCounts.CR,
+		},
+		"final_newline": format.FinalNewline,
+	}
+}
+
 func fullFileReadDisplay(read file.FullReadResult, data map[string]any, summary string) string {
 	if read.MIMEType == "text/html" && utf8.Valid(read.Content) {
 		content := string(read.Content)
@@ -229,6 +246,7 @@ func fullFileReadDisplay(read file.FullReadResult, data map[string]any, summary 
 		if read.LineEnding != "" && read.LineEnding != "none" {
 			display += "\n\n换行：`" + read.LineEnding + "`"
 		}
+		display += formatDisplay(data)
 		return display
 	}
 	return sourceReadDisplay(data, summary)
@@ -287,8 +305,38 @@ func sourceReadDisplay(data map[string]any, summary string) string {
 		if lineEnding, _ := item["line_ending"].(string); lineEnding != "" && lineEnding != "none" {
 			fmt.Fprintf(&builder, "\n\n换行：`%s`", lineEnding)
 		}
+		builder.WriteString(formatDisplay(item))
 	}
 	return builder.String()
+}
+
+func formatDisplay(item map[string]any) string {
+	format, ok := item["format"].(map[string]any)
+	if !ok || len(format) == 0 {
+		return ""
+	}
+	charset, _ := format["charset"].(string)
+	bom, _ := format["bom"].(string)
+	lineEnding, _ := format["line_ending"].(string)
+	finalNewline := "未知"
+	switch value := format["final_newline"].(type) {
+	case bool:
+		if value {
+			finalNewline = "是"
+		} else {
+			finalNewline = "否"
+		}
+	}
+	if charset == "" {
+		charset = "unknown"
+	}
+	if bom == "" {
+		bom = "unknown"
+	}
+	if lineEnding == "" {
+		lineEnding = "none"
+	}
+	return fmt.Sprintf("\n\n格式：字符集 `%s`；BOM `%s`；换行 `%s`；末尾换行 `%s`", charset, bom, lineEnding, finalNewline)
 }
 
 func sourceReadItems(data map[string]any) []map[string]any {

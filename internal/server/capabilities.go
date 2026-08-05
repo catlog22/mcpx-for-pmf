@@ -33,6 +33,7 @@ var toolCapabilityDefinitions = []toolCapabilityDefinition{
 	{Name: "source_read", Domain: "source", RequiresRemoteSession: true},
 	{Name: "change_prepare", Domain: "change", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "change_read", Domain: "change", RequiresRemoteSession: true},
+	{Name: "change_discard", Domain: "change", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "change_apply", Domain: "change", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "change_revert", Domain: "change", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "command_run", Domain: "command", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "terminal"},

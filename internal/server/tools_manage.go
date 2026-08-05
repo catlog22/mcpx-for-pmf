@@ -71,6 +71,8 @@ func (r *Runtime) toolChangeManage(ctx context.Context, req mcp.CallToolRequest)
 		return r.toolChangeDiff(ctx, req)
 	case "history":
 		return r.toolChangeHistory(ctx, req)
+	case "discard":
+		return r.toolChangeDiscard(ctx, req)
 	default:
 		return r.invalidAction(ctx, req, "change_manage", toolAction(req))
 	}

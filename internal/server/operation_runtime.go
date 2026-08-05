@@ -10,8 +10,10 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"mcpx/internal/arc"
 	"mcpx/internal/envelope"
 	"mcpx/internal/operation"
+	"mcpx/internal/terminal"
 )
 
 func executionMode(req mcp.CallToolRequest) string {
@@ -80,7 +82,84 @@ func (r *Runtime) executeOperationStep(ctx context.Context, input operation.Exec
 	request.Params.Arguments = arguments
 	childCtx := r.operationChildContext(ctx, input)
 	result, callErr := handler(childCtx, request)
+	if callErr == nil && (input.Tool == "command_run" || input.Tool == "command_execute") {
+		result, callErr = r.waitForOperationTask(childCtx, input, result)
+	}
 	return operationResult(result, callErr)
+}
+
+func (r *Runtime) waitForOperationTask(ctx context.Context, input operation.ExecuteInput, result *mcp.CallToolResult) (*mcp.CallToolResult, error) {
+	taskID := resultTaskID(result)
+	if taskID == "" {
+		return result, nil
+	}
+	if r.tasks == nil {
+		return nil, errors.New("terminal task service is unavailable")
+	}
+	task, err := r.tasks.Get(input.RemoteSessionID, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("wait for task %s: %w", taskID, err)
+	}
+	if !task.Wait(ctx) {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("task %s did not reach a terminal state", taskID)
+	}
+
+	data := r.taskResultData(task, 0, 0)
+	data["task_id"] = task.ID
+	data["command"] = task.Command
+	data["purpose"] = input.Purpose
+	data["completed_in_call"] = true
+	data["operation_waited"] = true
+	capTaskExecutionOutput(data, 256<<10)
+	exitCode, hasExitCode := data["exit_code"].(int)
+	if task.Status != terminal.TaskExited || !hasExitCode || exitCode != 0 {
+		response := envelope.Fail(envelope.StatusError, input.RequestID, input.WorkspaceName, data, "COMMAND_FAILED", fmt.Sprintf("命令 Task %s 以状态 %s 结束，退出码为 %d", task.ID, task.Status, exitCode))
+		response.RemoteSessionID = input.RemoteSessionID
+		return r.resultJSON(response)
+	}
+	response := envelope.OK(input.RequestID, input.WorkspaceName, data)
+	response.RemoteSessionID = input.RemoteSessionID
+	return r.resultJSON(response)
+}
+
+func resultTaskID(result *mcp.CallToolResult) string {
+	if result == nil {
+		return ""
+	}
+	if result.Meta != nil {
+		if metadata, ok := result.Meta.AdditionalFields[arc.ResultMetadataKey]; ok {
+			switch typed := metadata.(type) {
+			case arc.Envelope:
+				if taskID := strings.TrimSpace(findStringValue(typed.MCPX.Result.Data, "task_id")); strings.HasPrefix(taskID, "task_") {
+					return taskID
+				}
+			case *arc.Envelope:
+				if typed != nil {
+					if taskID := strings.TrimSpace(findStringValue(typed.MCPX.Result.Data, "task_id")); strings.HasPrefix(taskID, "task_") {
+						return taskID
+					}
+				}
+			}
+		}
+	}
+	for _, content := range result.Content {
+		textContent, ok := content.(mcp.TextContent)
+		if !ok {
+			continue
+		}
+		var value any
+		if json.Unmarshal([]byte(textContent.Text), &value) != nil {
+			continue
+		}
+		taskID := strings.TrimSpace(findStringValue(value, "task_id"))
+		if strings.HasPrefix(taskID, "task_") {
+			return taskID
+		}
+	}
+	return ""
 }
 
 func (r *Runtime) operationChildContext(ctx context.Context, input operation.ExecuteInput) context.Context {

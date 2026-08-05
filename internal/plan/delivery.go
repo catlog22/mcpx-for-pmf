@@ -146,7 +146,7 @@ func evidenceFailed(evidence Evidence) bool {
 }
 
 func queryUnappliedChangesets(ctx context.Context, tx *sql.Tx, remoteSessionID string) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM changesets WHERE remote_session_id = ? AND status = 'draft' ORDER BY id`, remoteSessionID)
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM changesets WHERE remote_session_id = ? AND status = 'draft' AND discarded_at IS NULL ORDER BY id`, remoteSessionID)
 	if err != nil {
 		return nil, err
 	}

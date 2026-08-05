@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -303,7 +304,16 @@ func (r *Runtime) toolTaskManage(ctx context.Context, req mcp.CallToolRequest) (
 		if err != nil {
 			return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "task_list_error", err.Error())
 		}
-		return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, map[string]any{"tasks": items})
+		digest := taskListDigest(items)
+		knownDigest := strings.TrimSpace(stringPayload(envReq.Payload, "known_task_digest"))
+		data := map[string]any{"task_list_digest": digest, "not_modified": knownDigest != "" && knownDigest == digest}
+		if data["not_modified"] == true {
+			data["tasks"] = []map[string]any{}
+			data["message"] = "Task list unchanged; reuse the previously returned Task IDs."
+		} else {
+			data["tasks"] = items
+		}
+		return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, data)
 	}
 	taskID, _ := envReq.Payload["task_id"].(string)
 	task, err := r.tasks.Get(remote.ID, taskID)
@@ -370,4 +380,20 @@ func (r *Runtime) taskResultData(task *terminal.Task, stdoutOffset, stderrOffset
 	data["stdout_next_offset"] = stdoutNext
 	data["stderr_next_offset"] = stderrNext
 	return data
+}
+
+func taskListDigest(items []map[string]any) string {
+	stableItems := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		stable := make(map[string]any, 7)
+		for _, key := range []string{"task_id", "status", "pid", "command", "exit_code", "log_truncated", "finished_at"} {
+			if value, ok := item[key]; ok {
+				stable[key] = value
+			}
+		}
+		stableItems = append(stableItems, stable)
+	}
+	encoded, _ := json.Marshal(stableItems)
+	digest := sha256.Sum256(encoded)
+	return "sha256:" + hex.EncodeToString(digest[:])
 }

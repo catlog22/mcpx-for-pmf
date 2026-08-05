@@ -7,7 +7,7 @@ import (
 	"mcpx/internal/envelope"
 )
 
-const agentGuidanceVersion = "1.16"
+const agentGuidanceVersion = "1.17"
 
 // agentGuidanceConfig centralizes all guidance rules as Go data structures.
 // This optimizes exposure rules by making them code-defined (easier to maintain,
@@ -46,13 +46,16 @@ var defaultAgentGuidance = agentGuidanceConfig{
 		"source_read 的 list 只返回普通文件，不能证明目录完整性或目录存在；不要从嵌套文件路径推断顶层目录清单。",
 		"workspace_observe 的 view 支持 changes、snapshot、diff、watch、memory；diff 和 watch 使用此前 snapshot 返回的 since。",
 		"创建 Plan 时，tasks 中的 task_id 仅作为本计划内局部依赖引用（可省略）；plan_create 返回的 plan_id 与 task_id 由服务端签发，plan_read/plan_transition 只能原样复制这些返回值，绝不猜测或复用历史 ID。",
-		"文件修改使用 change_prepare、change_apply、change_revert；修改或重命前に先用 source_read 获取目标文件的完整 sha256。删除与创建必须分成两次操作。",
+		"Skill 或 MCP 名称只能使用 extension_discover 返回的名称；Skill 调用使用 skill_call，上游工具调用使用 mcp_call，不要凭记忆猜测扩展名称或工具名称。",
+		"文件修改使用 change_prepare、change_apply、change_revert；用户请求已明确授权且希望减少往返时，change_prepare 可设置 apply=true 一次准备并应用；需要确认时按返回的 changeset_id、digest 和 confirmation_token 继续。放弃未应用草稿使用 change_discard，不要反复 change_read(history) 试图清理旧草稿。修改或重命名前先用 source_read 获取目标文件的完整 sha256。删除与创建必须分成两次操作。",
+		"change_read(view=history) 首次返回 history_digest 后应在客户端缓存；只有成功准备、应用、丢弃或回滚 Changeset 后才重新读取，重复查询时传 known_history_digest，返回 not_modified 就停止读取，不要继续轮询同一历史。",
 		"change_apply 的 changeset_id 和 expected_digest 必须原样复制 change_prepare/change_read 返回的值；不要填写 diff 统计、快照 ID、changeset_id 或空值。同一 path 的多次精确修改（replace_exact/insert_*/delete_exact/replace_range/update）可以放在同一次 operations 中按提交顺序依次应用；create/delete/rename 每个 path 仍只能出现一次。",
 		"change_prepare 的 update.patch 只接受标准 unified diff（--- a/<path> 与 @@ -l,c +l,c @@ 开头），不接受 apply_patch 的 *** Begin Patch / *** Update File 格式；patch 上下文必须来自 source_read 返回的当前内容，不确定时改用 replace_exact/insert_before/insert_after。",
-		"source_read 会返回 line_ending；生成 patch 或精确替换时必须保留目标文件原有的换行格式，不要把文件统一转换成另一种格式。为保持最小 diff，优先使用带当前 base_sha256 的 replace_exact/insert_before/insert_after，并按当前换行格式组织 match/replacement；只有生成并核对局部 hunk 后才使用 update.patch。",
+		"source_read 会返回 format（charset、BOM、line_ending、末尾换行）；生成 patch 或精确替换时必须保留这些格式，保留目标文件原有的换行格式，不要把文件统一转换成另一种格式。普通变更若格式改变会返回 FORMAT_CHANGED；只有明确要求格式化时才使用 change_execute(format=true)。为保持最小 diff，优先使用带当前 base_sha256 的 replace_exact/insert_before/insert_after，并按当前格式组织 match/replacement；只有生成并核对局部 hunk 后才使用 update.patch。",
 		"嵌套文件只提交文件操作；change_prepare 会自动创建缺失的父目录，不要把目录路径作为普通文件创建。",
 		"environment_read 用于获取主机、Python 和工具链等环境事实；environment_snapshot_create 用于保存快照。command_run 仅用于用户明确要求且符合命令策略的命令、测试或构建。",
 		"命令校验请使用简单命令逐条执行（如先 git fetch、再 git rev-parse、最后 git status），不要使用 $()、管道、重定向或命令替换组合——含这些 shell 特性的命令会被策略拒绝。",
+		"command_run 返回 task_id 后直接使用 task_read(view=status/logs) 或 task_control(operation=attach) 查询该 Task；不要为了确认已知 Task 再调用 task_read(view=list)。只有 task_id 丢失或服务端返回 not_found 时才 list，并缓存 task_list_digest。",
 		"变更成功或审阅 Changeset 后，最终回复必须用 Markdown ```diff 代码块展示每个文件的具体增加和删除，不能只列文件名。变更过大时展示有界预览并说明 Changeset 资源。",
 		"返回 waiting_confirmation 时，先用自然语言展示命令或文件变更摘要并等待明确确认；用户确认后，使用同一业务参数和 confirmation_token 重试。confirmation_token 只表达语义确认，不是认证凭据。",
 		"没有成功的工具结果时，不要声称文件已读取、修改或验证。",
@@ -115,16 +118,16 @@ var defaultAgentGuidance = agentGuidanceConfig{
 			"replace_range": "path + range_start + range_end + content + base_sha256（始终需要当前版本）",
 			"base_sha256":   "source_read 返回的文件版本；create 可省略，delete 可省略",
 		},
-		Alternatives: "change_apply 使用 changeset_id + expected_digest；change_revert 使用 changeset_id。",
+		Alternatives: "change_apply 使用 changeset_id + expected_digest；change_revert 使用 changeset_id；放弃未应用草稿使用 change_discard + changeset_id。",
 	},
 	ToolRouting: map[string][]string{
 		"select_workspace":      {"workspace_list"},
 		"open_session":          {"session_open"},
 		"inspect_files":         {"source_read"},
 		"inspect_git":           {"workspace_observe"},
-		"modify_files":          {"change_prepare", "change_apply", "change_revert"},
+		"modify_files":          {"change_prepare", "change_apply", "change_revert", "change_discard"},
 		"run_tests_or_build":    {"command_run"},
-		"manage_changesets":     {"change_prepare", "change_read", "change_apply", "change_revert"},
+		"manage_changesets":     {"change_prepare", "change_read", "change_apply", "change_revert", "change_discard"},
 		"handle_tasks":          {"task_read", "task_control"},
 		"ask_user_confirmation": {"progress_report"},
 	},

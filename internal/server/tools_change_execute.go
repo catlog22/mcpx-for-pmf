@@ -97,6 +97,7 @@ func (r *Runtime) toolChangeExecute(ctx context.Context, req mcp.CallToolRequest
 	formatResults := make([]map[string]any, 0, len(operations))
 	prepareOptions := changeset.PrepareOptions{}
 	if format {
+		prepareOptions.AllowFormatChange = true
 		prepareOptions.Transform = func(path string, content []byte) ([]byte, error) {
 			if !strings.HasSuffix(path, ".go") {
 				formatResults = append(formatResults, map[string]any{"path": path, "status": "skipped", "reason": "no_formatter"})
@@ -117,11 +118,7 @@ func (r *Runtime) toolChangeExecute(ctx context.Context, req mcp.CallToolRequest
 	}
 	var prepared changeset.Changeset
 	var replayed bool
-	if clientRequestID != "" {
-		prepared, replayed, err = r.changesets.PrepareIdempotentWithOptions(ctx, session.ID, principal.ID, clientRequestID, session.WorkspacePath, summary, operations, prepareOptions)
-	} else {
-		prepared, err = r.changesets.PrepareWithOptions(ctx, session.ID, principal.ID, session.WorkspacePath, summary, operations, prepareOptions)
-	}
+	prepared, replayed, err = r.changesets.PrepareIdempotentWithOptions(ctx, session.ID, principal.ID, clientRequestID, session.WorkspacePath, summary, operations, prepareOptions)
 	if err != nil {
 		return r.changeError(envReq, session.ID, session.WorkspaceName, err)
 	}

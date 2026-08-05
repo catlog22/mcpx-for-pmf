@@ -229,6 +229,9 @@ func TestServiceDeliveryBlocksDraftChangesetAndInvalidEvidence(t *testing.T) {
 	if _, err := store.DB().Exec(`UPDATE plan_task_evidence SET metadata_json = '{"status":"passed"}' WHERE kind = 'verification'`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.DB().Exec(`INSERT INTO changesets (id, remote_session_id, created_by, status, summary, digest, created_at, discarded_at) VALUES ('chg_discarded', ?, 'principal-test', 'draft', '', 'sha256:discarded', 2, 3)`, remoteSessionID); err != nil {
+		t.Fatal(err)
+	}
 	// The blocked plan is still deliverable after its external blockers clear.
 	ready, err := service.Deliver(ctx, remoteSessionID, created.ID, "principal-test")
 	if err != nil {

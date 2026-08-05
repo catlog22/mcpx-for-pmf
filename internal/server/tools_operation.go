@@ -374,14 +374,22 @@ func operationView(record operation.Record, includeResults bool) map[string]any 
 			view["confirmation_token"] = step.ConfirmationToken
 		}
 		if includeResults {
-			view["result"] = decodeJSONValue(step.Result)
+			view["result"] = operationResultValue(step.Result)
 			view["error"] = decodeJSONValue(step.Error)
 		}
 		steps = append(steps, view)
 	}
 	data["steps"] = steps
+	if record.State == operation.StateQueued || record.State == operation.StateRunning {
+		data["next_action"] = nextActionWithReason("operation_manage", "操作仍在执行；使用一次 wait 等待结果，不要重复轮询 status", map[string]any{
+			"session_id":   record.RemoteSessionID,
+			"operation_id": record.ID,
+			"action":       "wait",
+			"timeout_ms":   30000,
+		})
+	}
 	if includeResults {
-		data["result"] = decodeJSONValue(record.Result)
+		data["result"] = operationResultValue(record.Result)
 		data["error"] = decodeJSONValue(record.Error)
 	}
 	return data
@@ -410,33 +418,36 @@ func operationResultView(page operation.ResultPage) map[string]any {
 	return data
 }
 
-// operationResultValue unwraps one layer of the mcp.CallToolResult envelope
-// stored by an operation step. Real tool executions persist
-// {"result":{"available":true,"content":[{"text":"<JSON>"}]}}, which models
-// otherwise see as nested escaped text. Returning the inner text (parsed as
-// JSON when possible) makes batch results directly usable and avoids a second
-// serial source_read round trip.
+// operationResultValue unwraps the mcp.CallToolResult envelope stored by an
+// operation step. Depending on where the result was persisted, the value is
+// either the raw CallToolResult or a wrapper with a result field. Returning
+// the inner text (parsed as JSON when possible) keeps status/wait/result
+// responses directly usable and avoids a second serial parsing round trip.
 func operationResultValue(raw json.RawMessage) any {
 	value := decodeJSONValue(raw)
 	wrapper, ok := value.(map[string]any)
 	if !ok {
 		return value
 	}
-	result, ok := wrapper["result"].(map[string]any)
-	if !ok {
-		return value
+	result := wrapper
+	if nested, hasNested := wrapper["result"].(map[string]any); hasNested {
+		result = nested
 	}
+	return unwrapToolContent(result, value)
+}
+
+func unwrapToolContent(result map[string]any, fallback any) any {
 	content, ok := result["content"].([]any)
 	if !ok || len(content) == 0 {
-		return value
+		return fallback
 	}
 	first, ok := content[0].(map[string]any)
 	if !ok {
-		return value
+		return fallback
 	}
 	text, ok := first["text"].(string)
 	if !ok || strings.TrimSpace(text) == "" {
-		return value
+		return fallback
 	}
 	var decoded any
 	if err := json.Unmarshal([]byte(text), &decoded); err == nil {

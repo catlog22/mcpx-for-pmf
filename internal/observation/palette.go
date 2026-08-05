@@ -1,6 +1,9 @@
 package observation
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // ColorMode controls ANSI output for terminal text rendering.
 type ColorMode uint8
@@ -12,20 +15,24 @@ const (
 )
 
 const (
-	ansiReset   = "\033[0m"
-	ansiAmber   = "\033[33m"
-	ansiYellow  = "\033[33m"
-	ansiCyan    = "\033[36m"
-	ansiBlue    = "\033[34m"
-	ansiGreen   = "\033[32m"
-	ansiMagenta = "\033[35m"
-	ansiRed     = "\033[31m"
-	ansiGray    = "\033[90m"
+	ansiReset     = "\033[0m"
+	ansiBold      = "\033[1m"
+	ansiDim       = "\033[2m"
+	ansiUnderline = "\033[4m"
+	ansiAmber     = "\033[33m"
+	ansiYellow    = "\033[33m"
+	ansiCyan      = "\033[36m"
+	ansiBlue      = "\033[34m"
+	ansiGreen     = "\033[32m"
+	ansiMagenta   = "\033[35m"
+	ansiRed       = "\033[31m"
+	ansiGray      = "\033[90m"
 
 	ansiDiffAddedForeground   = "\033[38;2;103;232;160m"
 	ansiDiffAddedBackground   = "\033[48;2;24;58;42m"
 	ansiDiffRemovedForeground = "\033[38;2;255;143;143m"
 	ansiDiffRemovedBackground = "\033[48;2;59;32;37m"
+	ansiDiffHunkForeground    = "\033[38;2;121;192;255m"
 )
 
 const (
@@ -46,6 +53,10 @@ func actionColor(tool string, failed bool) string {
 		return ansiCyan
 	case "file_read":
 		return ansiBlue
+	case "change_read":
+		return ansiCyan
+	case "change_prepare":
+		return ansiYellow
 	case "change_execute", "change_apply", "change_revert", "file.changed":
 		return ansiGreen
 	case "session_open", "workspace_list", "session.lifecycle":
@@ -57,21 +68,76 @@ func actionColor(tool string, failed bool) string {
 	}
 }
 
+func eventStatus(event Event) string {
+	status := strings.ToLower(strings.TrimSpace(event.Status))
+	if eventFailed(event) {
+		return "failed"
+	}
+	if status == "" && event.Type == TypeToolCompleted {
+		var payload struct {
+			Status string `json:"status"`
+		}
+		if json.Unmarshal(event.Output, &payload) == nil {
+			status = strings.ToLower(strings.TrimSpace(payload.Status))
+		}
+	}
+	return status
+}
+
+func eventActionColor(event Event, fallback string) string {
+	switch eventStatus(event) {
+	case "failed", "error", "cancelled", "canceled", "interrupted":
+		return ansiRed
+	case "need_confirmation", "needs_confirmation", "waiting_confirmation", "blocked":
+		return ansiYellow
+	case "queued", "running", "accepted", "in_progress":
+		return ansiBlue
+	case "succeeded", "success", "ok", "applied":
+		return fallback
+	default:
+		if fallback != "" {
+			return fallback
+		}
+		return actionColor(event.toolOrType(), false)
+	}
+}
+
+func eventMarker(event Event) string {
+	switch eventStatus(event) {
+	case "failed", "error", "cancelled", "canceled", "interrupted":
+		return "!"
+	case "need_confirmation", "needs_confirmation", "waiting_confirmation":
+		return "?"
+	case "blocked":
+		return "x"
+	case "queued", "running", "accepted", "in_progress":
+		return "~"
+	default:
+		return "•"
+	}
+}
+
 func diffLineStyle(value string, mode ColorMode) string {
 	if mode == ColorModeNone {
 		return value
 	}
 	if strings.HasPrefix(value, "+++") {
-		return diffHeaderStyle(diffAddedForeground(mode), value)
+		return styleDiffLine(value, diffLineFileHeader, mode)
 	}
 	if strings.HasPrefix(value, "---") {
-		return diffHeaderStyle(diffRemovedForeground(mode), value)
+		return styleDiffLine(value, diffLineFileHeader, mode)
 	}
 	if strings.HasPrefix(value, "+") {
-		return diffContentStyle(value, mode, true)
+		return styleDiffLine(value, diffLineAdded, mode)
 	}
 	if strings.HasPrefix(value, "-") {
-		return diffContentStyle(value, mode, false)
+		return styleDiffLine(value, diffLineRemoved, mode)
+	}
+	if strings.HasPrefix(value, "@@") {
+		return styleDiffLine(value, diffLineHunkHeader, mode)
+	}
+	if strings.HasPrefix(value, `\ No newline at end of file`) {
+		return styleDiffLine(value, diffLineNoNewline, mode)
 	}
 	return value
 }
@@ -87,6 +153,53 @@ func formatDiffLine(value string, mode ColorMode, _ int) string {
 func isDiffContentLine(value string) bool {
 	return (strings.HasPrefix(value, "+") && !strings.HasPrefix(value, "+++")) ||
 		(strings.HasPrefix(value, "-") && !strings.HasPrefix(value, "---"))
+}
+
+func styleDiffLine(value, kind string, mode ColorMode) string {
+	if mode == ColorModeNone {
+		return value
+	}
+	switch kind {
+	case diffLineAdded:
+		return diffContentStyle(value, mode, true)
+	case diffLineRemoved:
+		return diffContentStyle(value, mode, false)
+	case diffLineFileHeader:
+		return ansiBold + diffHeaderForeground(value, mode) + value + ansiReset
+	case diffLineHunkHeader:
+		foreground := ansiCyan
+		if mode == ColorModeTrueColor {
+			foreground = ansiDiffHunkForeground
+		}
+		return ansiBold + foreground + value + ansiReset
+	case diffLineNoNewline:
+		return ansiUnderline + ansiYellow + value + ansiReset
+	case diffLineContext:
+		return ansiDim + value + ansiReset
+	default:
+		return ansiDim + value + ansiReset
+	}
+}
+
+func styleRenderedDiffLine(value, kind string, mode ColorMode) string {
+	if mode == ColorModeNone {
+		return value
+	}
+	if kind == diffLineFileHeader {
+		header := value
+		if separator := strings.Index(value, "| "); separator >= 0 {
+			header = value[separator+2:]
+		}
+		return ansiBold + diffHeaderForeground(header, mode) + value + ansiReset
+	}
+	if kind != diffLineAdded && kind != diffLineRemoved {
+		return styleDiffLine(value, kind, mode)
+	}
+	if separator := strings.Index(value, "| "); separator >= 0 {
+		prefixEnd := separator + 2
+		return value[:prefixEnd] + styleDiffLine(value[prefixEnd:], kind, mode)
+	}
+	return styleDiffLine(value, kind, mode)
 }
 
 func diffContentStyle(value string, mode ColorMode, added bool) string {
@@ -113,6 +226,13 @@ func diffContentStyle(value string, mode ColorMode, added bool) string {
 		}
 	}
 	return background + foreground + value + ansiReset
+}
+
+func diffHeaderForeground(value string, mode ColorMode) string {
+	if strings.HasPrefix(value, "+++") {
+		return diffAddedForeground(mode)
+	}
+	return diffRemovedForeground(mode)
 }
 
 func diffAddedForeground(mode ColorMode) string {

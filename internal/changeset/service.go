@@ -27,6 +27,8 @@ var (
 	ErrNotFound      = errors.New("changeset not found")
 	ErrConflict      = errors.New("changeset state conflict")
 	ErrStaleRevision = errors.New("file revision is stale")
+	ErrFormatChanged = errors.New("file format changed")
+	ErrDiscarded     = errors.New("changeset discarded")
 )
 
 type Service struct {
@@ -61,18 +63,21 @@ type Operation struct {
 }
 
 type FileChange struct {
-	Ordinal        int    `json:"ordinal"`
-	Operation      string `json:"operation"`
-	Path           string `json:"path"`
-	NewPath        string `json:"new_path,omitempty"`
-	ExpectedSHA256 string `json:"expected_sha256,omitempty"`
-	OriginalSHA256 string `json:"original_sha256,omitempty"`
-	ProposedSHA256 string `json:"proposed_sha256,omitempty"`
-	OriginalMode   uint32 `json:"-"`
-	Original       []byte `json:"-"`
-	Proposed       []byte `json:"-"`
-	DeletedFiles   int    `json:"deleted_files,omitempty"`
-	DeletedDirs    int    `json:"deleted_directories,omitempty"`
+	Ordinal         int         `json:"ordinal"`
+	Operation       string      `json:"operation"`
+	Path            string      `json:"path"`
+	NewPath         string      `json:"new_path,omitempty"`
+	ExpectedSHA256  string      `json:"expected_sha256,omitempty"`
+	OriginalSHA256  string      `json:"original_sha256,omitempty"`
+	ProposedSHA256  string      `json:"proposed_sha256,omitempty"`
+	OriginalMode    uint32      `json:"-"`
+	Original        []byte      `json:"-"`
+	Proposed        []byte      `json:"-"`
+	OriginalFormat  file.Format `json:"-"`
+	ProposedFormat  file.Format `json:"-"`
+	FormatPreserved bool        `json:"-"`
+	DeletedFiles    int         `json:"deleted_files,omitempty"`
+	DeletedDirs     int         `json:"deleted_directories,omitempty"`
 }
 
 type Changeset struct {
@@ -86,6 +91,7 @@ type Changeset struct {
 	UnifiedDiff       string       `json:"unified_diff,omitempty"`
 	CreatedAt         time.Time    `json:"created_at"`
 	AppliedAt         *time.Time   `json:"applied_at,omitempty"`
+	DiscardedAt       *time.Time   `json:"discarded_at,omitempty"`
 }
 
 type ApplyResult struct {
@@ -103,6 +109,9 @@ type PrepareOptions struct {
 	// must be pure with respect to the workspace; all filesystem writes remain
 	// inside Apply so formatting cannot bypass the Changeset journal.
 	Transform func(path string, content []byte) ([]byte, error)
+	// AllowFormatChange is reserved for an explicit formatter or another
+	// caller that intentionally changes charset/line-ending metadata.
+	AllowFormatChange bool
 }
 
 func (s *Service) Prepare(ctx context.Context, remoteSessionID, principalID, workspaceRoot, summary string, operations []Operation) (Changeset, error) {
@@ -122,11 +131,24 @@ func (s *Service) PrepareWithOptions(ctx context.Context, remoteSessionID, princ
 
 // PrepareIdempotentWithOptions atomically creates a Changeset and its request
 // record. A retry therefore cannot observe a missing idempotency record after
-// the Changeset has already been committed.
+// the Changeset has already been committed. When requestID is empty, an
+// equivalent active draft is reused by digest so clients that omit an
+// idempotency key do not accumulate duplicate drafts.
 func (s *Service) PrepareIdempotentWithOptions(ctx context.Context, remoteSessionID, principalID, requestID, workspaceRoot, summary string, operations []Operation, options PrepareOptions) (Changeset, bool, error) {
 	if requestID == "" {
-		changeset, err := s.PrepareWithOptions(ctx, remoteSessionID, principalID, workspaceRoot, summary, operations, options)
-		return changeset, false, err
+		changeset, err := s.buildChangeset(remoteSessionID, workspaceRoot, summary, operations, options)
+		if err != nil {
+			return Changeset{}, false, err
+		}
+		if existing, found, findErr := s.findEquivalentDraft(ctx, remoteSessionID, summary, changeset.Digest); findErr != nil {
+			return Changeset{}, false, findErr
+		} else if found {
+			return existing, true, nil
+		}
+		if err := s.insert(ctx, changeset, principalID); err != nil {
+			return Changeset{}, false, err
+		}
+		return changeset, false, nil
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -180,6 +202,25 @@ func (s *Service) PrepareIdempotentWithOptions(ctx context.Context, remoteSessio
 	return changeset, false, nil
 }
 
+func (s *Service) findEquivalentDraft(ctx context.Context, remoteSessionID, summary, digest string) (Changeset, bool, error) {
+	var changesetID string
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM changesets
+		WHERE remote_session_id = ? AND status = 'draft' AND discarded_at IS NULL
+		  AND summary = ? AND digest = ?
+		ORDER BY created_at DESC, id DESC LIMIT 1`, remoteSessionID, summary, digest).Scan(&changesetID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Changeset{}, false, nil
+	}
+	if err != nil {
+		return Changeset{}, false, err
+	}
+	item, err := s.Get(ctx, changesetID)
+	if err != nil {
+		return Changeset{}, false, err
+	}
+	return item, true, nil
+}
+
 func (s *Service) buildChangeset(remoteSessionID, workspaceRoot, summary string, operations []Operation, options PrepareOptions) (Changeset, error) {
 	if remoteSessionID == "" || len(operations) == 0 {
 		return Changeset{}, fmt.Errorf("remote_session_id and operations are required")
@@ -220,6 +261,10 @@ func (s *Service) buildChangeset(remoteSessionID, workspaceRoot, summary string,
 			prepared.Proposed = transformed
 			prepared.ProposedSHA256 = hashBytes(transformed)
 		}
+		enrichFileChangeFormat(&prepared)
+		if prepared.Operation == "update" && !prepared.FormatPreserved && !options.AllowFormatChange {
+			return Changeset{}, fmt.Errorf("operation %d: %w: %s", index, ErrFormatChanged, prepared.Path)
+		}
 		if !chainable || prepared.NewPath != "" {
 			for _, candidate := range []string{prepared.Path, prepared.NewPath} {
 				if candidate == "" {
@@ -243,6 +288,35 @@ func (s *Service) buildChangeset(remoteSessionID, workspaceRoot, summary string,
 	changeset := Changeset{ID: id, RemoteSessionID: remoteSessionID, Status: "draft", Summary: summary, Digest: digest, Files: files, CreatedAt: now}
 	changeset.UnifiedDiff = unifiedDiff(files)
 	return changeset, nil
+}
+
+func enrichFileChangeFormat(item *FileChange) {
+	switch item.Operation {
+	case "update":
+		item.OriginalFormat = file.DetectFormat(item.Original)
+		item.ProposedFormat = file.DetectFormat(item.Proposed)
+		item.FormatPreserved = sameFileFormat(item.OriginalFormat, item.ProposedFormat)
+	case "create":
+		item.ProposedFormat = file.DetectFormat(item.Proposed)
+		item.FormatPreserved = true
+	case "rename":
+		item.OriginalFormat = file.DetectFormat(item.Original)
+		item.ProposedFormat = item.OriginalFormat
+		item.FormatPreserved = true
+	case "delete":
+		item.OriginalFormat = file.DetectFormat(item.Original)
+		item.FormatPreserved = true
+	}
+}
+
+func sameFileFormat(left, right file.Format) bool {
+	if left.Charset != right.Charset || left.BOM != right.BOM || left.LineEnding != right.LineEnding {
+		return false
+	}
+	if left.FinalNewline == nil || right.FinalNewline == nil {
+		return left.FinalNewline == nil && right.FinalNewline == nil
+	}
+	return *left.FinalNewline == *right.FinalNewline
 }
 
 // chainableOperation reports whether multiple operations may target the same
@@ -813,10 +887,11 @@ func (s *Service) Get(ctx context.Context, changesetID string) (Changeset, error
 	var result Changeset
 	var createdAt int64
 	var appliedAt sql.NullInt64
+	var discardedAt sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `SELECT id, remote_session_id, status, summary, digest,
-        COALESCE(source_changeset_id,''), created_at, applied_at FROM changesets WHERE id = ?`, changesetID).Scan(
+		COALESCE(source_changeset_id,''), created_at, applied_at, discarded_at FROM changesets WHERE id = ?`, changesetID).Scan(
 		&result.ID, &result.RemoteSessionID, &result.Status, &result.Summary, &result.Digest,
-		&result.SourceChangesetID, &createdAt, &appliedAt,
+		&result.SourceChangesetID, &createdAt, &appliedAt, &discardedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Changeset{}, ErrNotFound
@@ -828,6 +903,11 @@ func (s *Service) Get(ctx context.Context, changesetID string) (Changeset, error
 	if appliedAt.Valid {
 		value := time.UnixMilli(appliedAt.Int64).UTC()
 		result.AppliedAt = &value
+	}
+	if discardedAt.Valid {
+		value := time.UnixMilli(discardedAt.Int64).UTC()
+		result.DiscardedAt = &value
+		result.Status = "discarded"
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT ordinal, operation, path, new_path, expected_sha256,
 		original_sha256, proposed_sha256, original_mode, original_content, proposed_content,
@@ -844,6 +924,7 @@ func (s *Service) Get(ctx context.Context, changesetID string) (Changeset, error
 			&item.DeletedFiles, &item.DeletedDirs); err != nil {
 			return Changeset{}, err
 		}
+		enrichFileChangeFormat(&item)
 		result.Files = append(result.Files, item)
 	}
 	result.UnifiedDiff = unifiedDiff(result.Files)
@@ -877,6 +958,9 @@ func (s *Service) Apply(ctx context.Context, changesetID, workspaceRoot string) 
 	changeset, err := s.Get(ctx, changesetID)
 	if err != nil {
 		return ApplyResult{}, err
+	}
+	if changeset.Status == "discarded" {
+		return ApplyResult{}, ErrDiscarded
 	}
 	if changeset.Status != "draft" {
 		return ApplyResult{}, ErrConflict
@@ -958,6 +1042,34 @@ func (s *Service) Apply(ctx context.Context, changesetID, workspaceRoot string) 
 		return ApplyResult{}, s.abortApply(ctx, journalID, changeset.ID, workspaceRoot, applied, createdDirs, err)
 	}
 	return ApplyResult{ChangesetID: changeset.ID, JournalID: journalID, Status: "applied", AppliedAt: now, Files: len(applied)}, nil
+}
+
+// Discard abandons an unapplied draft without touching workspace files. The
+// row remains in history so repeated model attempts stay auditable, while
+// delivery checks can distinguish it from an active draft.
+func (s *Service) Discard(ctx context.Context, changesetID string) (Changeset, error) {
+	now := s.now().UTC()
+	result, err := s.db.ExecContext(ctx, `UPDATE changesets
+		SET discarded_at = ?
+		WHERE id = ? AND status = 'draft' AND discarded_at IS NULL`, now.UnixMilli(), changesetID)
+	if err != nil {
+		return Changeset{}, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return Changeset{}, err
+	}
+	if rows != 1 {
+		item, getErr := s.Get(ctx, changesetID)
+		if getErr != nil {
+			return Changeset{}, getErr
+		}
+		if item.Status == "discarded" {
+			return item, nil
+		}
+		return Changeset{}, ErrConflict
+	}
+	return s.Get(ctx, changesetID)
 }
 
 func (s *Service) abortApply(ctx context.Context, journalID, changesetID, workspaceRoot string, applied []FileChange, createdDirs []string, cause error) error {
@@ -1248,8 +1360,8 @@ func (s *Service) History(ctx context.Context, remoteSessionID string, limit int
 		limit = 20
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id, status, summary, digest,
-        COALESCE(source_changeset_id,''), created_at, applied_at
-        FROM changesets WHERE remote_session_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`, remoteSessionID, limit)
+		COALESCE(source_changeset_id,''), created_at, applied_at, discarded_at
+		FROM changesets WHERE remote_session_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`, remoteSessionID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1259,8 +1371,8 @@ func (s *Service) History(ctx context.Context, remoteSessionID string, limit int
 	for rows.Next() {
 		var item Changeset
 		var createdAt int64
-		var appliedAt sql.NullInt64
-		if err := rows.Scan(&item.ID, &item.Status, &item.Summary, &item.Digest, &item.SourceChangesetID, &createdAt, &appliedAt); err != nil {
+		var appliedAt, discardedAt sql.NullInt64
+		if err := rows.Scan(&item.ID, &item.Status, &item.Summary, &item.Digest, &item.SourceChangesetID, &createdAt, &appliedAt, &discardedAt); err != nil {
 			return nil, err
 		}
 		item.RemoteSessionID = remoteSessionID
@@ -1268,6 +1380,11 @@ func (s *Service) History(ctx context.Context, remoteSessionID string, limit int
 		if appliedAt.Valid {
 			value := time.UnixMilli(appliedAt.Int64).UTC()
 			item.AppliedAt = &value
+		}
+		if discardedAt.Valid {
+			value := time.UnixMilli(discardedAt.Int64).UTC()
+			item.DiscardedAt = &value
+			item.Status = "discarded"
 		}
 		result = append(result, item)
 		ids = append(ids, item.ID)

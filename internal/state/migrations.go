@@ -393,6 +393,7 @@ var migrations = []string{
 	CREATE INDEX IF NOT EXISTS idx_operations_retention
 		ON operations(state, expires_at, remote_session_id);`,
 	`ALTER TABLE observation_events ADD COLUMN step_id TEXT NOT NULL DEFAULT '';`,
+	`ALTER TABLE changesets ADD COLUMN discarded_at INTEGER;`,
 }
 
 func applyMigrations(ctx context.Context, db *sql.DB) error {

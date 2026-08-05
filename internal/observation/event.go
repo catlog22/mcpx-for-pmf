@@ -62,6 +62,15 @@ type Event struct {
 	CreatedAt         time.Time       `json:"created_at"`
 }
 
+// EventFilter narrows a text observer without changing the durable event
+// stream. Empty fields do not constrain matching.
+type EventFilter struct {
+	Tool        string
+	Status      string
+	OperationID string
+	Path        string
+}
+
 func (e *Event) setEventID() {
 	if e != nil && e.Sequence > 0 && e.EventID == "" {
 		e.EventID = strconv.FormatInt(e.Sequence, 10)

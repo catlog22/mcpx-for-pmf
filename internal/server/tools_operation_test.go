@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -108,6 +109,89 @@ func TestAsyncToolReturnsOperationAndWaitsForResult(t *testing.T) {
 	})
 	if completed["status"] != "succeeded" {
 		t.Fatalf("completed response=%+v", completed)
+	}
+}
+
+func TestAsyncCommandOperationWaitsForTerminalTask(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	session := operationTestSession(t, rt, "demo")
+	accepted := callOperationTool(t, rt, "command_run", map[string]any{
+		"session_id": session.ID, "purpose": "验证异步命令完成语义", "execution_mode": "async",
+		"command": "sleep 0.2", "yield_time_ms": 1,
+	})
+	if accepted["status"] != "accepted" {
+		t.Fatalf("accepted response=%+v", accepted)
+	}
+	acceptedData, _ := accepted["data"].(map[string]any)
+	operationID, _ := acceptedData["operation_id"].(string)
+	if operationID == "" {
+		t.Fatalf("missing operation id: %+v", accepted)
+	}
+
+	completed := callOperationTool(t, rt, "operation_manage", map[string]any{
+		"session_id": session.ID, "operation_id": operationID, "action": "wait", "timeout_ms": 5000,
+	})
+	if completed["status"] != "succeeded" {
+		t.Fatalf("completed response=%+v", completed)
+	}
+	completedData, _ := completed["data"].(map[string]any)
+	completedResult, _ := completedData["result"].(map[string]any)
+	if completedResult["status"] != "succeeded" {
+		t.Fatalf("wait result must expose the machine-readable operation result: %+v", completed)
+	}
+	record, err := rt.operations.Get(context.Background(), operationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resultValue any
+	if err := json.Unmarshal(record.Result, &resultValue); err != nil {
+		t.Fatal(err)
+	}
+	taskID := findStringValue(resultValue, "task_id")
+	if taskID == "" {
+		if wrapper, ok := resultValue.(map[string]any); ok {
+			if content, ok := wrapper["content"].([]any); ok {
+				for _, item := range content {
+					contentItem, ok := item.(map[string]any)
+					if !ok {
+						continue
+					}
+					text, _ := contentItem["text"].(string)
+					var nested any
+					if json.Unmarshal([]byte(text), &nested) == nil {
+						taskID = findStringValue(nested, "task_id")
+						if taskID != "" {
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	if taskID == "" {
+		t.Fatalf("operation result did not retain terminal task id: %s", record.Result)
+	}
+	task, err := rt.tasks.Get(session.ID, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskStatus := task.StatusView()
+	if fmt.Sprint(taskStatus["status"]) != "exited" || taskStatus["exit_code"] != 0 {
+		t.Fatalf("task was not terminal-success: %+v", taskStatus)
+	}
+	finishedAt, _ := taskStatus["finished_at"].(time.Time)
+	if record.CompletedAt == nil || finishedAt.IsZero() || record.CompletedAt.Before(finishedAt) {
+		t.Fatalf("operation completed before task: operation=%v task=%v", record.CompletedAt, finishedAt)
+	}
+
+	events, err := rt.observation.store.History(context.Background(), "demo", 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.ParentOperationID == operationID && (event.Type == "tool.started" || event.Type == "tool.completed") {
+			t.Fatalf("internal operation step leaked duplicate tool event: %+v", event)
+		}
 	}
 }
 
