@@ -398,11 +398,16 @@ func (r *Runtime) Start() error {
 	// DNS-rebinding protection: rejects non-loopback Host when TCP is on loopback.
 	// Public IP / reverse-proxy access needs this disabled (see server.disable_localhost_protection).
 	disableHostGuard := r.cfg.Server.DisableLocalhostProtection || shouldAutoDisableHostGuard(addr, r.cfg.Server.Host)
+	// Stateless is required for MCP 2026-07-28 (SEP-2575): go-sdk only advertises
+	// that protocol version when Stateless=true. ChatGPT Connector discovers via
+	// server/discover and rejects servers that return inconsistent/unsupported
+	// version sets (MCP_ACTION_DISCOVERY_FAILED / "discover response was inconsistent").
 	streamable := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return s
 	}, &mcp.StreamableHTTPOptions{
 		DisableLocalhostProtection: disableHostGuard,
 		SessionTimeout:             config.TransportSessionIdleTTL(r.cfg.Transport),
+		Stateless:                  true,
 	})
 	gw := NewGateway(r.cfg, r.oauth, streamable)
 

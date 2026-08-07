@@ -184,7 +184,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	runtime.registerTools(protocol)
 	streamable := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return protocol
-	}, &mcp.StreamableHTTPOptions{DisableLocalhostProtection: true})
+	}, &mcp.StreamableHTTPOptions{DisableLocalhostProtection: true, Stateless: true})
 	gw := NewGateway(cfg, nil, streamable)
 	ts := httptest.NewServer(gw.Handler())
 	t.Cleanup(ts.Close)

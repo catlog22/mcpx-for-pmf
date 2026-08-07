@@ -70,7 +70,7 @@ func TestGatewayStreamableActionDiscovery(t *testing.T) {
 		return mcpresult.NewText("ok"), nil
 	})
 
-	streamable := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return protocol }, &mcp.StreamableHTTPOptions{DisableLocalhostProtection: true})
+	streamable := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return protocol }, &mcp.StreamableHTTPOptions{DisableLocalhostProtection: true, Stateless: true})
 	gw := NewGateway(cfg, nil, streamable)
 	ts := httptest.NewServer(gw.Handler())
 	defer ts.Close()
@@ -87,6 +87,52 @@ func TestGatewayStreamableActionDiscovery(t *testing.T) {
 	listed, err := session.ListTools(ctx, nil)
 	if err != nil || len(listed.Tools) != 2 {
 		t.Fatalf("tools/list result=%+v err=%v", listed, err)
+	}
+	for _, tool := range listed.Tools {
+		if tool.OutputSchema != nil {
+			t.Fatalf("tools/list must not ship bloated OutputSchema for ChatGPT discovery: %s", tool.Name)
+		}
+	}
+}
+
+func TestStreamableDiscoverIncludes20260728WhenStateless(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Auth.Mode = "bearer"
+	cfg.Auth.Token = "static-secret"
+	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
+	streamable := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return protocol }, &mcp.StreamableHTTPOptions{
+		DisableLocalhostProtection: true,
+		Stateless:                  true,
+	})
+	ts := httptest.NewServer(NewGateway(cfg, nil, streamable).Handler())
+	defer ts.Close()
+
+	body := `{"jsonrpc":"2.0","id":"d1","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"probe","version":"0.1"},"io.modelcontextprotocol/clientCapabilities":{}}}}`
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/mcp", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer static-secret")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("MCP-Protocol-Version", "2026-07-28")
+	req.Header.Set("Mcp-Method", "server/discover")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status %d body %s", res.StatusCode, raw)
+	}
+	// SSE or JSON
+	text := string(raw)
+	if !strings.Contains(text, "2026-07-28") {
+		t.Fatalf("discover must advertise 2026-07-28 when Stateless: %s", text)
+	}
+	if !strings.Contains(text, `"resultType"`) && !strings.Contains(text, "supportedVersions") {
+		t.Fatalf("discover missing supportedVersions: %s", text)
 	}
 }
 

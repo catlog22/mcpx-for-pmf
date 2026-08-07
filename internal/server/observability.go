@@ -18,7 +18,10 @@ import (
 
 func (r *Runtime) addTool(s *mcp.Server, tool mcp.Tool, handler mcp.ToolHandler) {
 	tool = requireIntentSchema(tool)
-	tool.OutputSchema = json.RawMessage(arc.OutputSchema())
+	// Intentionally omit OutputSchema: the full ARC envelope is ~5KB per tool and
+	// inflates tools/list past what ChatGPT Connector discovery accepts
+	// (invalid_response / "discover response was inconsistent"). Runtime still
+	// returns structuredContent via arc.WrapToolResult.
 	instrumented := r.instrumentTool(tool.Name, handler)
 	if r.toolHandlers == nil {
 		r.toolHandlers = map[string]mcp.ToolHandler{}
