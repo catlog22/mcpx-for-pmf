@@ -252,8 +252,22 @@ auth:
     server_url: "https://mcp.example.com"
 ```
 
-然后将 `https://mcp.example.com/mcp` 添加到客户端。需要 ChatGPT Connector
-回调注册时执行：
+然后将 `https://mcp.example.com/mcp` 添加到客户端（ChatGPT / Codex Remote MCP）。
+
+OAuth 对齐 [OpenAI MCP 鉴权约定](https://developers.openai.com/plugins/build/auth) 与
+MCP Authorization（OAuth 2.1 + PKCE）：
+
+- 资源元数据：`/.well-known/oauth-protected-resource`（及 `/mcp` 路径形态）
+- 授权服务器元数据：`/.well-known/oauth-authorization-server`（含
+  `client_id_metadata_document_supported: true`，优先 CIMD）
+- DCR：`POST /mcp/oauth/register`（CIMD 不可用时仍可用）
+- 授权 / 换票：`/mcp/oauth/authorize`、`/mcp/oauth/token`（`resource` 参数 + S256）
+
+ChatGPT 使用 **CIMD**（`client_id` 为 `https://chatgpt.com/oauth/...` 文档 URL）时，
+服务端会拉取并校验元数据，并接受
+`https://chatgpt.com/connector/oauth/{callback_id}` 与旧回调
+`https://chatgpt.com/connector_platform_oauth_redirect`。
+仍可用手动 DCR 预注册：
 
 ```bash
 ./bin/mcpx-server oauth-register 'https://chatgpt.com/connector/oauth/...'

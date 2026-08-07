@@ -81,6 +81,8 @@ func (h *Handler) HandleAuthorizationServerMetadata(w http.ResponseWriter, r *ht
 		"scopes_supported":                      []string{DefaultScope},
 		// Explicit capability flag some clients check before attempting DCR.
 		"registration_endpoint_auth_methods_supported": []string{"none"},
+		// OpenAI ChatGPT / MCP clients prefer CIMD when advertised (client_id is an HTTPS URL).
+		"client_id_metadata_document_supported": true,
 	}
 	writeJSON(w, http.StatusOK, body)
 }
@@ -157,7 +159,7 @@ func (h *Handler) authorizeGet(w http.ResponseWriter, r *http.Request) {
 		"redirect_uri", redirectURI, "has_state", state != "",
 		"state_len", len(state), "resource", resource,
 		"scope", scope, "ok", true)
-	c, _ := h.S.Registry.Get(clientID)
+	c, _ := h.S.ResolveClient(clientID)
 	name := clientID
 	if c != nil && c.ClientName != "" {
 		name = c.ClientName
@@ -254,7 +256,7 @@ func (h *Handler) validateAuthorizeParams(clientID, redirectURI, challenge, meth
 	if method != "" && method != "S256" {
 		return fmt.Errorf("code_challenge_method must be S256")
 	}
-	if !h.S.Registry.AcceptsRedirect(clientID, redirectURI) {
+	if !h.S.AcceptsClientRedirect(clientID, redirectURI) {
 		return fmt.Errorf("unknown client or redirect_uri")
 	}
 	if !ValidChallenge(challenge) {
@@ -285,17 +287,17 @@ func (h *Handler) HandleToken(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "missing client_id")
 		return
 	}
-	if !h.S.Registry.Authenticates(clientID, clientSecret, authMethod) {
-		// try alternate methods if basic failed
-		c, ok := h.S.Registry.Get(clientID)
-		if !ok {
+	if !h.S.AuthenticatesClient(clientID, clientSecret, authMethod) {
+		// try registered method from DCR/CIMD when basic/post mismatch
+		c, err := h.S.ResolveClient(clientID)
+		if err != nil || c == nil {
 			logging.L().Info("oauth token",
 				"component", "oauth", "client_id", clientID,
 				"auth_method", authMethod, "error", "unknown client")
 			writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "unknown client")
 			return
 		}
-		if !h.S.Registry.Authenticates(clientID, clientSecret, c.TokenEndpointAuthMethod) {
+		if !h.S.AuthenticatesClient(clientID, clientSecret, c.TokenEndpointAuthMethod) {
 			logging.L().Info("oauth token",
 				"component", "oauth", "client_id", clientID,
 				"auth_method", authMethod, "error", "client authentication failed")

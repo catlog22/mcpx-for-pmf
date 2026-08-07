@@ -3,6 +3,7 @@ package oauth
 import (
 	"crypto/subtle"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,7 @@ type Server struct {
 	TokenSecret []byte
 	TokenTTL    int // seconds
 	Registry    *Registry
+	CIMD        *CIMDResolver // Client ID Metadata Documents (ChatGPT / OpenAI)
 
 	mu      sync.Mutex
 	codes   map[string]*authCode
@@ -60,9 +62,99 @@ func NewServer(password, serverURL string, tokenSecret []byte, tokenTTL int) *Se
 		TokenSecret: tokenSecret,
 		TokenTTL:    tokenTTL,
 		Registry:    NewRegistry(),
+		CIMD:        NewCIMDResolver(),
 		codes:       map[string]*authCode{},
 		refresh:     map[string]*refreshGrant{},
 	}
+}
+
+// ResolveClient returns a DCR/preregistered client or a CIMD-backed client.
+func (s *Server) ResolveClient(clientID string) (*Client, error) {
+	if c, ok := s.Registry.Get(clientID); ok {
+		return c, nil
+	}
+	if s.CIMD != nil && IsClientIDMetadataURL(clientID) {
+		return s.CIMD.Resolve(clientID)
+	}
+	return nil, fmt.Errorf("unknown client")
+}
+
+// AcceptsClientRedirect checks redirect_uri for DCR or CIMD clients.
+func (s *Server) AcceptsClientRedirect(clientID, redirectURI string) bool {
+	if s.Registry.AcceptsRedirect(clientID, redirectURI) {
+		return true
+	}
+	if s.CIMD == nil || !IsClientIDMetadataURL(clientID) {
+		return false
+	}
+	c, err := s.CIMD.Resolve(clientID)
+	if err != nil || c == nil {
+		return false
+	}
+	for _, u := range c.RedirectURIs {
+		if u == redirectURI {
+			return true
+		}
+	}
+	// ChatGPT production callback is path-scoped: /connector/oauth/{id}.
+	// Public CIMD may only list the legacy redirect; also accept same-origin
+	// connector OAuth callbacks under chatgpt.com / chatgpt.openai.com.
+	if allowsChatGPTConnectorRedirect(c, redirectURI) {
+		return true
+	}
+	return false
+}
+
+// AuthenticatesClient validates token-endpoint client auth for DCR or CIMD.
+func (s *Server) AuthenticatesClient(clientID, clientSecret, authMethod string) bool {
+	if s.Registry.Authenticates(clientID, clientSecret, authMethod) {
+		return true
+	}
+	if s.CIMD == nil || !IsClientIDMetadataURL(clientID) {
+		return false
+	}
+	c, err := s.CIMD.Resolve(clientID)
+	if err != nil || c == nil {
+		return false
+	}
+	// Force public-client path for CIMD when method is none (AS policy).
+	if authMethod == "" {
+		authMethod = "none"
+	}
+	if c.TokenEndpointAuthMethod != authMethod {
+		// Allow none when CIMD prefers private_key_jwt but AS only offers none.
+		if authMethod == "none" && clientSecret == "" {
+			return true
+		}
+		return false
+	}
+	if c.TokenEndpointAuthMethod == "none" {
+		return clientSecret == ""
+	}
+	return false
+}
+
+func allowsChatGPTConnectorRedirect(c *Client, redirectURI string) bool {
+	if c == nil {
+		return false
+	}
+	u, err := url.Parse(redirectURI)
+	if err != nil || u.Scheme != "https" || u.Fragment != "" || u.User != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host != "chatgpt.com" && host != "www.chatgpt.com" && host != "chat.openai.com" {
+		return false
+	}
+	path := u.EscapedPath()
+	if path == "/connector_platform_oauth_redirect" {
+		return true
+	}
+	// /connector/oauth/{callback_id}
+	if strings.HasPrefix(path, "/connector/oauth/") && len(path) > len("/connector/oauth/") {
+		return true
+	}
+	return false
 }
 
 func trimSlash(s string) string {
@@ -80,7 +172,7 @@ func (s *Server) IssueCode(clientID, redirectURI, challenge, method, resource, s
 	if !ValidChallenge(challenge) {
 		return "", fmt.Errorf("invalid code_challenge")
 	}
-	if !s.Registry.AcceptsRedirect(clientID, redirectURI) {
+	if !s.AcceptsClientRedirect(clientID, redirectURI) {
 		return "", fmt.Errorf("invalid redirect_uri")
 	}
 	if scope == "" {
