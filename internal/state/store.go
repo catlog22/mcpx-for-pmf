@@ -45,7 +45,7 @@ func Open(path string) (*Store, error) {
 	for _, pragma := range []string{
 		"PRAGMA journal_mode = WAL",
 		"PRAGMA foreign_keys = ON",
-		"PRAGMA busy_timeout = 5000",
+		"PRAGMA busy_timeout = 3000",
 		"PRAGMA synchronous = NORMAL",
 	} {
 		if _, err := db.ExecContext(ctx, pragma); err != nil {

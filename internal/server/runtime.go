@@ -498,7 +498,23 @@ func (r *Runtime) startRetention() {
 	r.retentionDone = done
 	go func() {
 		defer close(done)
-		r.runRetention(ctx)
+		// Delay the first pass so ChatGPT OAuth/discover/tools are not contending
+		// with a long retention DELETE on the single SQLite connection at boot.
+		startupDelay := interval
+		if startupDelay > 2*time.Minute {
+			startupDelay = 2 * time.Minute
+		}
+		if startupDelay < 30*time.Second {
+			startupDelay = 30 * time.Second
+		}
+		timer := time.NewTimer(startupDelay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			r.runRetention(ctx)
+		}
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {

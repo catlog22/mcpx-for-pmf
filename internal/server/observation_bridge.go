@@ -23,10 +23,9 @@ import (
 
 const observationSummaryMaxBytes = 8 << 10
 
-// observationWriteTimeout bounds SQLite append only. Must not inherit the
-// tools/call request deadline (WithoutCancel still preserves deadlines), or
-// busy DB writes surface as "context deadline exceeded" after OAuth/session.
-const observationWriteTimeout = 10 * time.Second
+// observationWriteTimeout bounds SQLite append only. Keep short and fail soft:
+// observation is best-effort and must not sit behind multi-second retention work.
+const observationWriteTimeout = 3 * time.Second
 
 type observationTaskStreamKey struct {
 	taskID          string

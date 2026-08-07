@@ -117,13 +117,11 @@ func (s *RetentionService) RunOnce(ctx context.Context) (RetentionReport, error)
 	if err != nil {
 		report.Errors = append(report.Errors, fmt.Sprintf("wal checkpoint: %v", err))
 	}
-	if report.TotalDeleted() >= s.policy.VacuumThresholdRows && !busy {
-		if _, err := s.db.ExecContext(ctx, "VACUUM"); err != nil {
-			report.Errors = append(report.Errors, fmt.Sprintf("vacuum: %v", err))
-		} else {
-			report.Vacuumed = true
-		}
-	}
+	// Skip full VACUUM on the shared state DB: with MaxOpenConns(1) it exclusive-locks
+	// for tens of seconds on large files (~100MB+) and starves observation/tool writes
+	// (context deadline exceeded). PASSIVE checkpoint above is enough for WAL health.
+	// Operators can still vacuum offline if reclaiming disk is required.
+	_ = busy
 	return report, nil
 }
 
