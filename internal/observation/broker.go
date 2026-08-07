@@ -62,8 +62,12 @@ func (b *Broker) Publish(event Event) {
 		select {
 		case sub.events <- event:
 		default:
-			// The observer reconnects from its last sequence. Sending a gap is
-			// enough to recover every dropped event from the Store.
+			// Channel full: force a gap so the observer reloads instead of
+			// sitting forever on a stalled live stream with no new frames.
+			select {
+			case <-sub.gaps:
+			default:
+			}
 			select {
 			case sub.gaps <- Gap{FromSequence: event.Sequence, ToSequence: event.Sequence}:
 			default:

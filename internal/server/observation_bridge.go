@@ -47,9 +47,10 @@ type observationBridge struct {
 }
 
 func (b *observationBridge) Record(ctx context.Context, event observation.Event) error {
-	if b == nil || b.store == nil || b.broker == nil {
+	if b == nil || b.broker == nil {
 		return nil
 	}
+	_ = ctx
 	event.Workspace = strings.TrimSpace(event.Workspace)
 	event.Intent = observation.SanitizeIntent(event.Intent)
 	event.Purpose = observation.SanitizeIntent(event.Purpose)
@@ -65,18 +66,36 @@ func (b *observationBridge) Record(ctx context.Context, event observation.Event)
 		event.Output, truncated = observation.SanitizeJSON(event.Output, observation.MaxEventBytes)
 		event.Truncated = event.Truncated || truncated
 	}
-	// Always use an independent background budget so async/sync observation
-	// never fails because the HTTP request context already expired.
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+
+	// Live observers must never freeze when durable write is slow/fails.
+	// Publish first so `mcpx-server workspace` keeps moving; persist best-effort.
+	live := event
+	if live.Sequence == 0 {
+		live.Sequence = -time.Now().UnixNano()
+		if live.EventID == "" {
+			live.EventID = fmt.Sprintf("live-%d", -live.Sequence)
+		}
+	}
+	b.broker.Publish(live)
+
+	if b.store == nil {
+		return nil
+	}
 	writeCtx, cancel := context.WithTimeout(context.Background(), observationWriteTimeout)
 	defer cancel()
 	persisted, err := b.store.Append(writeCtx, event)
 	if err != nil {
 		logging.With("component", "workspace_observer").Error("persist event failed",
-			"workspace", event.Workspace, "type", event.Type, "err", err)
-		return err
+			"workspace", event.Workspace, "type", event.Type, "tool", event.Tool, "err", err)
+		// Soft-fail: live stream already published.
+		return nil
 	}
-	_ = ctx // retained for call-site symmetry; resolution uses observationContext elsewhere
-	b.broker.Publish(persisted)
+	if persisted.Sequence > 0 && persisted.Sequence != live.Sequence {
+		b.broker.Publish(persisted)
+	}
 	return nil
 }
 
@@ -84,8 +103,10 @@ func (b *observationBridge) target(ctx context.Context, request envelope.Request
 	workspace := strings.TrimSpace(request.Workspace)
 	remoteSessionID := remoteSessionID(request)
 	if workspace == "" && b != nil && b.resolve != nil {
-		workspace, remoteSessionID = b.resolve(observationContext(ctx), request)
+		// Never inherit tools/call deadline into workspace resolution.
+		workspace, remoteSessionID = b.resolve(context.Background(), request)
 	}
+	_ = ctx
 	return strings.TrimSpace(workspace), strings.TrimSpace(remoteSessionID)
 }
 

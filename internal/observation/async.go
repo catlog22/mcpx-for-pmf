@@ -65,11 +65,10 @@ func (a *AsyncRecorder) Enqueue(event Event) bool {
 func (a *AsyncRecorder) loop() {
 	defer a.wg.Done()
 	for event := range a.ch {
+		// Record is best-effort (publish + optional persist). Never let a slow
+		// SQLite write stall the whole observation pipeline for long.
 		ctx, cancel := context.WithTimeout(context.Background(), asyncWriteTimeout)
-		if err := a.record(ctx, event); err != nil {
-			logging.With("component", "workspace_observer").Error("async observation write failed",
-				"type", event.Type, "tool", event.Tool, "err", err)
-		}
+		_ = a.record(ctx, event)
 		cancel()
 	}
 }
