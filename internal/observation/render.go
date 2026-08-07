@@ -99,8 +99,9 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 			details = append(details, "failed: "+compactLine(message))
 		}
 	} else {
+		// Model-authored progress_summary must not be ellipsis-truncated for operators.
 		if event.ProgressSummary != "" && len(details) < 3 {
-			details = append(details, compactLine(event.ProgressSummary))
+			details = append(details, strings.TrimSpace(event.ProgressSummary))
 		}
 		if result, ok := payload["result"].(map[string]any); ok && len(details) < 3 {
 			if output := humanToolOutput(event.Tool, result); output != "" {
@@ -281,7 +282,8 @@ func formatViewSummary(format fileFormatView) string {
 }
 
 const (
-	maxToolSummaryRunes     = 240
+	// Labels (verb + path/query) may be long absolute paths; do not ellipsis early.
+	maxToolSummaryRunes     = 2048
 	maxChangedFiles         = 50
 	defaultDiffPreviewLines = 40
 )
@@ -299,6 +301,7 @@ func writeEventAction(w io.Writer, event Event, verb, label, fallbackColor strin
 	}
 	colorCode := eventActionColor(event, fallbackColor)
 	marker := eventMarker(event)
+	// Keep model-supplied path/query labels intact (still single-line for the action row).
 	_, err := fmt.Fprintf(w, "%s %s %s\n", paint(marker, colorCode, color), paint(verb, colorCode, color), compactLine(label))
 	return err
 }
@@ -326,8 +329,27 @@ func writeChildren(w io.Writer, values []string, color bool) error {
 }
 
 func writeChild(w io.Writer, value string, color bool) error {
-	_, err := fmt.Fprintf(w, "  %s %s\n", paint("↳", ansiBlue, color), compactLine(value))
-	return err
+	// Preserve full model-authored text (progress_summary / purpose notes).
+	// Only collapse to a single logical line when the value is already one line;
+	// multi-line notes keep every line (indented under the first ↳).
+	value = strings.TrimRight(value, "\r\n")
+	if value == "" {
+		return nil
+	}
+	lines := strings.Split(value, "\n")
+	for i, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		if i == 0 {
+			if _, err := fmt.Fprintf(w, "  %s %s\n", paint("↳", ansiBlue, color), line); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := fmt.Fprintf(w, "    %s\n", line); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func writeCodeChild(w io.Writer, value string, options renderOptions, width int) error {
@@ -528,7 +550,8 @@ func eventFactLine(event Event, detail bool) string {
 		parts = append(parts, "path="+event.Path)
 	}
 	if detail && event.Purpose != "" {
-		parts = append(parts, "purpose="+compactLine(event.Purpose))
+		// Purpose is model input; do not ellipsis-truncate.
+		parts = append(parts, "purpose="+strings.TrimSpace(event.Purpose))
 	}
 	if detail && event.OperationID != "" {
 		parts = append(parts, "operation="+event.OperationID)

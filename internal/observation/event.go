@@ -7,7 +7,9 @@ import (
 )
 
 const (
-	MaxIntentBytes = 512
+	// MaxIntentBytes bounds purpose / progress_summary / intent from the model.
+	// Keep generous so workspace observers see full model-authored notes.
+	MaxIntentBytes = 8 << 10
 	MaxEventBytes  = 64 << 10
 	DefaultHistory = 100
 	MaxHistory     = 200
