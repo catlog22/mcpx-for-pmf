@@ -237,10 +237,10 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		if err := json.Unmarshal(encoded, &listedTool); err != nil {
 			t.Fatalf("decode %s: %v", name, err)
 		}
-		outputSchema, ok := listedTool["outputSchema"].(map[string]any)
-		properties, propertiesOK := outputSchema["properties"].(map[string]any)
-		if !ok || !propertiesOK || properties["mcpx"] == nil {
-			t.Fatalf("%s missing ARC outputSchema: %+v", name, listedTool["outputSchema"])
+		// ChatGPT Connector discovery rejects bloated tools/list OutputSchema.
+		// Runtime still wraps structuredContent with ARC; catalog must stay lean.
+		if listedTool["outputSchema"] != nil {
+			t.Fatalf("%s must not expose OutputSchema in tools/list: %+v", name, listedTool["outputSchema"])
 		}
 		inputSchema, err := json.Marshal(tool.InputSchema)
 		if err != nil {
