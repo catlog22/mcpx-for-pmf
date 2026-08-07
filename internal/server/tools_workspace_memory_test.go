@@ -45,7 +45,7 @@ func TestWorkspaceStateMemoryReturnsBoundedFacts(t *testing.T) {
 		"intent": "查询项目记忆", "action": "memory", "remote_session_id": created.Session.ID,
 		"keyword": "核心文件", "latest": float64(10),
 	})
-	
+
 	result, err := rt.toolWorkspaceState(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +89,7 @@ func TestWorkspaceStateMemoryRejectsInvalidLatest(t *testing.T) {
 		"intent": "查询项目记忆", "action": "memory", "remote_session_id": created.Session.ID,
 		"latest": float64(51),
 	})
-	
+
 	result, err := rt.toolWorkspaceState(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)

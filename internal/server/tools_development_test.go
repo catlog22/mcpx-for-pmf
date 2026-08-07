@@ -94,7 +94,7 @@ func TestProjectTaskAndArtifactRemoteSessionFlow(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	logsRequest := mcpresult.Request(map[string]any{"intent": "read task logs", "remote_session_id": remoteSessionID, "action": "logs", "task_id": taskID, "stdout_offset": 0, "stderr_offset": 0})
-	
+
 	logsResult, err := runtime.toolTaskManage(ctx, logsRequest)
 	if err != nil || len(logsResult.Content) < 1 {
 		t.Fatalf("terminal logs result=%+v err=%v", logsResult, err)
@@ -115,7 +115,7 @@ func TestProjectTaskAndArtifactRemoteSessionFlow(t *testing.T) {
 		"intent":            "register the test report artifact",
 		"remote_session_id": remoteSessionID, "path": "report.txt", "kind": "test_report", "name": "Go test report",
 	})
-	
+
 	registeredResult, err := runtime.toolArtifactRegister(ctx, registerRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -161,7 +161,7 @@ func TestCommandExecuteInlinesSmallOutputWithoutLogLink(t *testing.T) {
 		"purpose":           "verify inline stdout rendering",
 		"scope":             "workspace",
 	})
-	
+
 	result, err := rt.toolCommandExecute(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -206,7 +206,7 @@ func TestCommandExecuteTruncatedOutputStaysInline(t *testing.T) {
 		"purpose":           "verify truncated output stays inline",
 		"scope":             "workspace",
 	})
-	
+
 	result, err := rt.toolCommandExecute(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)

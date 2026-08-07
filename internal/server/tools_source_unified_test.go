@@ -118,7 +118,7 @@ func TestFileReadFullReturnsHTMLAndDirectImageContent(t *testing.T) {
 			"path":              path,
 			"mode":              "full",
 		})
-		
+
 		result, err := rt.toolFileReadUnified(context.Background(), request)
 		if err != nil {
 			t.Fatal(err)

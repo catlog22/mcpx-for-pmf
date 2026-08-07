@@ -58,7 +58,7 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 	}
 	progressSummary := map[string]any{
 		"type":        "string",
-		"description": "上一工具调用后的可验证进度摘要、结果和下一步；没有下一次工具调用时请使用 progress_report",
+		"description": "上一工具调用后的可验证进度摘要、结果和下一步；没有下一次工具调用时请使用 progress_summary",
 	}
 	rawBytes := mcpresult.ToolSchemaJSON(tool)
 	var raw map[string]any

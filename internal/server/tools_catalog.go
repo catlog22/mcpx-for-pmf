@@ -11,6 +11,7 @@ import (
 	"mcpx/internal/envelope"
 	"mcpx/internal/environment"
 	"mcpx/internal/operation"
+	"mcpx/internal/server/prompts"
 )
 
 // registerTools is the sole public tool registration point. The legacy
@@ -355,22 +356,25 @@ func (r *Runtime) registerConsolidatedTools(s *mcp.Server) {
 // function above is retained as a source-level migration aid only; it is not
 // called by registerTools and therefore does not expand tools/list.
 func (r *Runtime) registerConsolidatedToolsV2(s *mcp.Server) {
+	toolDesc := prompts.MustDescriptions()
 	remoteSession := stringSchema("持久化的 Remote Session 标识")
 	workspace := stringSchema("已注册的 Workspace 名称")
 	path := stringSchema("工作区相对路径")
 	changeItems := arraySchema(changeOperationSchema(), "文件操作列表")
 
-	r.addTool(s, publicTool("workspace_list", "列出已注册的 Workspace。", map[string]any{}, nil, readOnlyToolAnnotation), r.toolWorkspaceList)
-	r.addTool(s, publicTool("workspace_observe", "读取工作区变更、快照、差异、监听结果或工作区记忆；view 明确决定返回类型。", map[string]any{
-		"remote_session_id": remoteSession, "view": enumSchema("读取视图", "changes", "snapshot", "diff", "watch", "memory"), "include_diff": booleanSchema("差异视图是否包含 Unified Diff"), "since": stringSchema("由 snapshot 返回的快照 ID"),
-		"keyword": stringSchema("记忆关键词"), "id": stringSchema("记忆 ID 或范围"), "time": stringSchema("记忆日期或日期范围"), "latest": numberSchema("最新记忆条数"),
-	}, []string{"remote_session_id", "view"}, readOnlyToolAnnotation), r.toolWorkspaceObserve)
-	r.addTool(s, publicTool("workspace_history_read", "按 ID、时间、关键词、类型和状态查询工作区运行历史；多个字段同时提供时按 AND 过滤。", map[string]any{
-		"workspace": workspace, "remote_session_id": remoteSession, "session_id": stringSchema("Remote Session ID"),
-		"event_ids": arraySchema(map[string]any{"type": "string"}, "事件 ID"), "request_ids": arraySchema(map[string]any{"type": "string"}, "请求 ID"), "operation_ids": arraySchema(map[string]any{"type": "string"}, "操作 ID"), "task_ids": arraySchema(map[string]any{"type": "string"}, "Task ID"), "changeset_ids": arraySchema(map[string]any{"type": "string"}, "Changeset ID"),
-		"created_after": stringSchema("RFC3339 或毫秒时间戳"), "created_before": stringSchema("RFC3339 或毫秒时间戳"), "keyword": stringSchema("摘要、用途、工具、Skill、MCP、路径或错误关键词"),
-		"kinds": arraySchema(map[string]any{"type": "string"}, "事件类型"), "statuses": arraySchema(map[string]any{"type": "string"}, "事件状态"), "limit": numberSchema("返回数量"), "cursor": stringSchema("分页游标"),
-	}, nil, readOnlyToolAnnotation), r.toolWorkspaceHistoryRead)
+	r.addTool(s, publicTool("workspace_read", toolDesc["workspace_read"], map[string]any{
+		"remote_session_id": remoteSession, "workspace": workspace,
+		"view":         enumSchema("读取视图", "list", "changes", "snapshot", "diff", "watch", "memory", "history"),
+		"include_diff": booleanSchema("差异视图是否包含 Unified Diff"), "since": stringSchema("由 snapshot 返回的快照 ID"),
+		"keyword": stringSchema("记忆或历史关键词"), "id": stringSchema("记忆 ID 或范围"), "time": stringSchema("记忆日期或日期范围"), "latest": numberSchema("最新记忆条数"),
+		"session_id": stringSchema("历史过滤用 Session ID"),
+		"event_ids":  arraySchema(map[string]any{"type": "string"}, "事件 ID"), "request_ids": arraySchema(map[string]any{"type": "string"}, "请求 ID"),
+		"operation_ids": arraySchema(map[string]any{"type": "string"}, "操作 ID"), "task_ids": arraySchema(map[string]any{"type": "string"}, "Task ID"),
+		"changeset_ids": arraySchema(map[string]any{"type": "string"}, "Changeset ID"),
+		"created_after": stringSchema("RFC3339 或毫秒时间戳"), "created_before": stringSchema("RFC3339 或毫秒时间戳"),
+		"kinds": arraySchema(map[string]any{"type": "string"}, "事件类型"), "statuses": arraySchema(map[string]any{"type": "string"}, "事件状态"),
+		"limit": numberSchema("返回数量"), "cursor": stringSchema("分页游标"),
+	}, []string{"view"}, readOnlyToolAnnotation), r.toolWorkspaceRead)
 
 	operationSteps := arraySchema(map[string]any{
 		"type": "object", "additionalProperties": false,
@@ -382,13 +386,13 @@ func (r *Runtime) registerConsolidatedToolsV2(s *mcp.Server) {
 		},
 		"required": []string{"id", "tool", "arguments"},
 	}, "带依赖关系的公开工具操作")
-	r.addTool(s, publicTool("operation_batch", "提交多个公开工具操作；无依赖步骤并发执行，有依赖步骤按 DAG 顺序执行。", map[string]any{
+	r.addTool(s, publicTool("operation_batch", toolDesc["operation_batch"], map[string]any{
 		"remote_session_id": remoteSession, "operations": operationSteps, "purpose": stringSchema("本次调用的目的；必须由用户明确提供"),
 	}, []string{"remote_session_id", "purpose", "operations"}, mutatingToolAnnotation), r.toolOperationBatch)
 	operationIDsSchema := arraySchema(map[string]any{"type": "string"}, "批量查询的异步操作 ID；最多 32 个，不要把 operation_manage 嵌套进 operation_batch")
 	operationIDsSchema["minItems"] = 1
 	operationIDsSchema["maxItems"] = operation.MaxBatchQueries
-	operationManage := publicTool("operation_manage", "查询、等待、读取结果、取消或恢复异步操作。单操作传 operation_id；批量查询 status/result 直接传 operation_ids，不要嵌套进 operation_batch。", map[string]any{
+	operationManage := publicTool("operation_manage", toolDesc["operation_manage"], map[string]any{
 		"remote_session_id": remoteSession,
 		"operation_id":      stringSchema("单个异步操作 ID；与 operation_ids 二选一"), "operation_ids": operationIDsSchema,
 		"action":  enumSchema("操作动作；operation_ids 批量模式只支持 status、result", "status", "wait", "result", "cancel", "resume"),
@@ -419,51 +423,121 @@ func (r *Runtime) registerConsolidatedToolsV2(s *mcp.Server) {
 	operationManage.InputSchema = mustSchemaJSON(operationManageSchema)
 	r.addTool(s, operationManage, r.toolOperationManage)
 
-	r.addTool(s, publicTool("session_open", "创建或恢复 Remote Session，并返回启动上下文。", map[string]any{
-		"remote_session_id": remoteSession, "workspace": workspace, "label": stringSchema("会话标签"), "description": stringSchema("开发目标"), "client_request_id": stringSchema("客户端幂等键"),
+	r.addTool(s, publicTool("session", toolDesc["session"], map[string]any{
+		"remote_session_id": remoteSession, "workspace": workspace, "action": enumSchema("生命周期动作", "open", "update", "handoff", "attach", "close"),
+		"label": stringSchema("会话标签"), "description": stringSchema("开发目标或新描述"), "client_request_id": stringSchema("客户端幂等键"),
 		"include_instructions_content": booleanSchema("返回有界 AGENTS.md 内容"), "include_upstream_tools": booleanSchema("返回上游工具 schema"), "include_project_tasks": booleanSchema("返回项目任务"),
 		"known_revisions": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "客户端已知版本"},
-	}, nil, sessionToolAnnotation), r.toolSessionOpen)
-	r.addTool(s, publicTool("session_read", "读取 Remote Session 列表、摘要或事件；view 明确决定返回类型。", map[string]any{
-		"remote_session_id": remoteSession, "workspace": workspace, "view": enumSchema("读取视图", "list", "summary", "events"), "query": stringSchema("会话查询条件"), "status": stringSchema("会话状态"), "cursor": stringSchema("分页游标"), "limit": numberSchema("分页数量"), "after_sequence": numberSchema("事件起始序号"),
+		"status":          stringSchema("新状态"), "expected_version": numberSchema("乐观锁版本"), "role": stringSchema("接力角色"), "expires_in": numberSchema("接力有效秒数"),
+		"note": stringSchema("接力备注"), "handoff_token": stringSchema("一次性接力令牌"), "mode": stringSchema("closed 或 archived"),
+	}, []string{"action"}, sessionToolAnnotation), r.toolSession)
+	r.addTool(s, publicTool("session_read", toolDesc["session_read"], map[string]any{
+		"remote_session_id": remoteSession, "workspace": workspace, "view": enumSchema("读取视图", "list", "summary", "events"),
+		"query": stringSchema("会话查询条件"), "status": stringSchema("会话状态"), "cursor": stringSchema("分页游标"), "limit": numberSchema("分页数量"), "after_sequence": numberSchema("事件起始序号"),
 	}, []string{"view"}, readOnlyToolAnnotation), r.toolSessionRead)
-	r.addTool(s, publicTool("session_transition", "更新、接力、接入或关闭 Remote Session；operation 明确决定生命周期变化。", map[string]any{
-		"remote_session_id": remoteSession, "operation": enumSchema("生命周期操作", "update", "handoff", "attach", "close"), "label": stringSchema("新标签"), "description": stringSchema("新描述"), "status": stringSchema("新状态"), "expected_version": numberSchema("乐观锁版本"), "role": stringSchema("接力角色"), "expires_in": numberSchema("接力有效秒数"), "note": stringSchema("接力备注"), "handoff_token": stringSchema("一次性接力令牌"), "mode": stringSchema("closed 或 archived"),
-	}, []string{"remote_session_id", "operation"}, sessionToolAnnotation), r.toolSessionTransition)
 
-	r.addTool(s, publicTool("source_read", "读取文件、搜索内容、列举文件或组装有界上下文；view 明确决定读取语义。view=file 时响应含 path、content、sha256、format（line_ending 等）；修改文件前必须用返回的 sha256 原样填入 change_prepare.operations[].base_sha256。", map[string]any{
-		"remote_session_id": remoteSession, "view": enumSchema("读取视图", "file", "search", "list", "context"), "path": path, "mode": enumSchema("文件读取模式；改文件前推荐 mode=full 一次读完整文件并拿到 sha256；mode=full 一次仅一个 path，不能与 items 同用", "window", "full"), "offset": numberSchema("行偏移"), "limit": numberSchema("结果或行数限制"),
-		"items": arraySchema(map[string]any{"type": "object", "properties": map[string]any{"path": path, "offset": numberSchema("行偏移"), "limit": numberSchema("行数")}, "required": []string{"path"}}, "批量文件读取项；仅 window 模式使用"), "max_total_bytes": numberSchema("批量读取总预算"),
-		"query": stringSchema("搜索条件"), "search_mode": enumSchema("搜索模式", "smart", "exact", "token"), "parallel": booleanSchema("是否并行召回"), "paths": arraySchema(map[string]any{"type": "string"}, "搜索范围"), "include_glob": stringSchema("包含 glob"), "exclude_glob": stringSchema("排除 glob"), "cursor": stringSchema("分页游标"), "max_results": numberSchema("最多匹配文件数"), "max_bytes_per_file": numberSchema("单文件预算"), "regex": booleanSchema("按 RE2 正则解释"), "case_sensitive": booleanSchema("区分大小写"), "include_sha256": booleanSchema("list/search 是否附带 sha256；view=file 始终返回 sha256，无需猜字段名"), "include_instructions": booleanSchema("返回适用指令"), "context_before": numberSchema("匹配前上下文行数"), "context_after": numberSchema("匹配后上下文行数"),
+	r.addTool(s, publicTool("source_read", toolDesc["source_read"], map[string]any{
+		"remote_session_id": remoteSession, "view": enumSchema("读取视图", "file", "search", "list", "context"), "path": path,
+		"mode": enumSchema("文件读取模式；改文件前推荐 mode=full", "window", "full"), "offset": numberSchema("行偏移"), "limit": numberSchema("结果或行数限制"),
+		"items": arraySchema(map[string]any{"type": "object", "properties": map[string]any{"path": path, "offset": numberSchema("行偏移"), "limit": numberSchema("行数")}, "required": []string{"path"}}, "批量文件读取项；仅 window"), "max_total_bytes": numberSchema("批量读取总预算"),
+		"query": stringSchema("搜索条件"), "search_mode": enumSchema("搜索模式", "smart", "exact", "token"), "parallel": booleanSchema("是否并行召回"),
+		"paths": arraySchema(map[string]any{"type": "string"}, "搜索范围"), "include_glob": stringSchema("包含 glob"), "exclude_glob": stringSchema("排除 glob"),
+		"cursor": stringSchema("分页游标"), "max_results": numberSchema("最多匹配文件数"), "max_bytes_per_file": numberSchema("单文件预算"),
+		"regex": booleanSchema("按 RE2 正则解释"), "case_sensitive": booleanSchema("区分大小写"), "include_sha256": booleanSchema("list/search 是否附带 sha256"),
+		"include_instructions": booleanSchema("返回适用指令"), "context_before": numberSchema("匹配前上下文行数"), "context_after": numberSchema("匹配后上下文行数"),
 	}, []string{"remote_session_id", "view"}, readOnlyToolAnnotation), r.toolSourceRead)
 
-	r.addTool(s, publicTool("change_prepare", "校验文件操作并生成 Changeset 草稿。改已有文件：先 source_read 取 sha256→operations[].base_sha256（原样复制），再提交；默认不应用，apply=true 可同次应用。失败时看 error.code 与 details（failed_ordinal/path/field_map/next_action），勿猜测字段名。", map[string]any{"remote_session_id": remoteSession, "summary": stringSchema("变更摘要"), "operations": changeItems, "idempotency_key": stringSchema("业务幂等键"), "apply": booleanSchema("是否在准备成功后立即应用；默认 false，需要用户确认时仍返回 confirmation_token"), "format": booleanSchema("应用前格式化变更文件"), "verify": arraySchema(map[string]any{"type": "string"}, "应用后验证步骤"), "purpose": stringSchema("本次调用的目的；必须由用户明确提供")}, []string{"remote_session_id", "operations", "purpose"}, mutatingToolAnnotation), r.toolChangePreparePublic)
-	r.addTool(s, publicTool("change_read", "读取 Changeset 差异或历史记录；view 明确决定读取类型。history 返回 history_digest；后续仅在变更状态可能变化时复用该 digest 查询，已知 digest 相同时返回 not_modified。", map[string]any{"remote_session_id": remoteSession, "view": enumSchema("读取视图", "diff", "history"), "changeset_id": stringSchema("Changeset ID"), "limit": numberSchema("历史数量"), "known_history_digest": stringSchema("上一次 history 返回的 history_digest；相同则返回 not_modified")}, []string{"remote_session_id", "view"}, readOnlyToolAnnotation), r.toolChangeRead)
-	r.addTool(s, publicTool("change_discard", "丢弃尚未应用的 Changeset 草稿，不修改工作区文件；用于清理失败重试或已改方案的旧草稿。", map[string]any{"remote_session_id": remoteSession, "changeset_id": stringSchema("待丢弃的 draft Changeset ID"), "purpose": stringSchema("本次调用的目的；必须由用户明确提供")}, []string{"remote_session_id", "changeset_id", "purpose"}, mutatingToolAnnotation), r.toolChangeDiscardPublic)
-	r.addTool(s, publicTool("change_apply", "应用已准备的 Changeset；需要语义确认时使用返回的 confirmation_token 重试。", map[string]any{"remote_session_id": remoteSession, "changeset_id": stringSchema("已准备 Changeset ID；必须原样复制 change_prepare/change_read 返回的字段 changeset_id"), "expected_digest": stringSchema("必须原样复制 change_prepare/change_read 返回的字段 digest（或 expected_digest）；禁止填 diff 统计、tree_digest、snapshot ID、changeset_id 或空值"), "confirmation_token": stringSchema("仅表示用户已确认同一变更，不是认证凭据"), "format": booleanSchema("格式化变更文件"), "verify": arraySchema(map[string]any{"type": "string"}, "验证步骤"), "purpose": stringSchema("本次调用的目的；必须由用户明确提供")}, []string{"remote_session_id", "changeset_id", "expected_digest", "purpose"}, mutatingToolAnnotation), r.toolChangeApply)
-	r.addTool(s, publicTool("change_revert", "回滚已应用的 Changeset；需要语义确认时使用返回的 confirmation_token 重试。", map[string]any{"remote_session_id": remoteSession, "changeset_id": stringSchema("待回滚 Changeset ID；必须原样复制已应用 Changeset 的 ID"), "confirmation_token": stringSchema("仅表示用户已确认同一回滚，不是认证凭据"), "purpose": stringSchema("本次调用的目的；必须由用户明确提供")}, []string{"remote_session_id", "changeset_id", "purpose"}, mutatingToolAnnotation), r.toolChangeRevertPublic)
+	r.addTool(s, publicTool("change", toolDesc["change"], map[string]any{
+		"remote_session_id":  remoteSession,
+		"action":             enumSchema("变更动作", "prepare", "discard", "apply", "revert"),
+		"summary":            stringSchema("变更摘要"),
+		"operations":         changeItems,
+		"idempotency_key":    stringSchema("业务幂等键"),
+		"apply":              booleanSchema("prepare 时是否立即应用；默认 false"),
+		"format":             booleanSchema("格式化变更文件"),
+		"verify":             arraySchema(map[string]any{"type": "string"}, "验证步骤"),
+		"purpose":            stringSchema("本次调用的目的；必须由用户明确提供"),
+		"changeset_id":       stringSchema("Changeset ID；apply/discard/revert 必填；须原样复制返回值"),
+		"expected_digest":    stringSchema("apply 必填；必须原样复制 prepare/read 返回的 digest；禁止填 diff 统计、tree_digest、snapshot ID 或空值"),
+		"confirmation_token": stringSchema("仅表示用户已确认同一变更，不是认证凭据"),
+	}, []string{"remote_session_id", "action", "purpose"}, mutatingToolAnnotation), r.toolChange)
+	r.addTool(s, publicTool("change_read", toolDesc["change_read"], map[string]any{
+		"remote_session_id": remoteSession, "view": enumSchema("读取视图", "diff", "history"), "changeset_id": stringSchema("Changeset ID"),
+		"limit": numberSchema("历史数量"), "known_history_digest": stringSchema("上一次 history 返回的 history_digest"),
+	}, []string{"remote_session_id", "view"}, readOnlyToolAnnotation), r.toolChangeRead)
 
-	r.addTool(s, publicTool("command_run", "按工作区命令策略执行用户要求的命令或项目任务；长命令返回 Task ID。", map[string]any{"remote_session_id": remoteSession, "command": stringSchema("用户要求执行的 shell 命令"), "task": stringSchema("已发现的项目任务名称"), "purpose": stringSchema("用户要求执行此命令的原因"), "scope": enumSchema("执行范围", "workspace"), "confirmation_token": stringSchema("仅表示用户已确认同一命令，不是认证凭据"), "yield_time_ms": numberSchema("等待时长")}, []string{"remote_session_id", "purpose"}, commandExecutionToolAnnotation), r.toolCommandRun)
-	r.addTool(s, publicTool("task_read", "读取 Task 列表、状态、日志、端口或诊断信息；view 明确决定读取类型。已知 task_id 时直接查询 status/logs，不要先 list；list 返回 task_list_digest，带回相同摘要时返回 not_modified。", map[string]any{"remote_session_id": remoteSession, "view": enumSchema("读取视图", "list", "status", "logs", "ports", "diagnostics"), "task_id": stringSchema("Task ID"), "known_task_digest": stringSchema("上一次 Task 列表返回的 task_list_digest；相同则返回 not_modified"), "stdout_offset": numberSchema("stdout 偏移"), "stderr_offset": numberSchema("stderr 偏移"), "limit": numberSchema("数量限制"), "yield_time_ms": numberSchema("等待时长")}, []string{"remote_session_id", "view"}, readOnlyToolAnnotation), r.toolTaskRead)
-	r.addTool(s, publicTool("task_control", "接入、停止或向运行中的 Task 写入 stdin；operation 明确决定控制动作。", map[string]any{"remote_session_id": remoteSession, "operation": enumSchema("控制操作", "attach", "stop", "stdin"), "task_id": stringSchema("Task ID"), "stdout_offset": numberSchema("stdout 偏移"), "stderr_offset": numberSchema("stderr 偏移"), "yield_time_ms": numberSchema("等待时长"), "force": booleanSchema("强制终止"), "input": stringSchema("stdin 文本"), "confirmation_token": stringSchema("仅表示用户已确认控制动作"), "purpose": stringSchema("本次调用的目的；必须由用户明确提供")}, []string{"remote_session_id", "operation", "task_id", "purpose"}, mutatingToolAnnotation), r.toolTaskControl)
-	r.addTool(s, publicTool("progress_report", "记录模型可公开的阶段、当前动作、下一步和验证证据；不要写入隐藏思维链。", map[string]any{"remote_session_id": remoteSession, "phase": enumSchema("公开阶段", "planning", "executing", "verifying", "waiting", "blocked", "completed"), "current": stringSchema("当前已公开且可验证的动作"), "next": stringSchema("下一步或待用户回答的问题"), "evidence": arraySchema(map[string]any{"type": "string"}, "已获得的验证证据"), "status": enumSchema("进度状态", "in_progress", "completed", "waiting_for_user", "blocked"), "related_tool": stringSchema("关联工具")}, []string{"remote_session_id", "phase", "current"}, sessionToolAnnotation), r.toolProgressReportPublic)
+	r.addTool(s, publicTool("command_run", toolDesc["command_run"], map[string]any{
+		"remote_session_id": remoteSession, "command": stringSchema("shell 命令"), "task": stringSchema("项目任务名称"),
+		"purpose": stringSchema("执行原因"), "scope": enumSchema("执行范围", "workspace"),
+		"confirmation_token": stringSchema("仅表示用户已确认同一命令"), "yield_time_ms": numberSchema("等待时长"),
+	}, []string{"remote_session_id", "purpose"}, commandExecutionToolAnnotation), r.toolCommandRun)
+	r.addTool(s, publicTool("task_read", toolDesc["task_read"], map[string]any{
+		"remote_session_id": remoteSession, "view": enumSchema("读取视图", "list", "status", "logs", "ports", "diagnostics"),
+		"task_id": stringSchema("Task ID"), "known_task_digest": stringSchema("task_list_digest"), "stdout_offset": numberSchema("stdout 偏移"),
+		"stderr_offset": numberSchema("stderr 偏移"), "limit": numberSchema("数量限制"), "yield_time_ms": numberSchema("等待时长"),
+	}, []string{"remote_session_id", "view"}, readOnlyToolAnnotation), r.toolTaskRead)
+	r.addTool(s, publicTool("task", toolDesc["task"], map[string]any{
+		"remote_session_id": remoteSession, "action": enumSchema("控制动作", "attach", "stop", "stdin"), "task_id": stringSchema("Task ID"),
+		"stdout_offset": numberSchema("stdout 偏移"), "stderr_offset": numberSchema("stderr 偏移"), "yield_time_ms": numberSchema("等待时长"),
+		"force": booleanSchema("强制终止"), "input": stringSchema("stdin 文本"), "confirmation_token": stringSchema("语义确认"), "purpose": stringSchema("目的"),
+	}, []string{"remote_session_id", "action", "task_id", "purpose"}, mutatingToolAnnotation), r.toolTask)
 
-	r.addTool(s, publicTool("plan_create", "创建持久化开发计划；plan_id 与各任务的 task_id 由服务端生成并在返回值中原样提供。", map[string]any{"remote_session_id": remoteSession, "goal": stringSchema("计划目标"), "summary": stringSchema("计划摘要"), "tasks": arraySchema(planTaskInputSchema(), "有序计划任务；task_id 仅作局部依赖引用，最终 task_id 以返回值为准"), "purpose": stringSchema("本次调用的目的；必须由用户明确提供")}, []string{"remote_session_id", "goal", "tasks", "purpose"}, mutatingToolAnnotation), r.toolPlanCreatePublic)
-	r.addTool(s, publicTool("plan_read", "读取持久化开发计划及任务状态。", map[string]any{"remote_session_id": remoteSession, "plan_id": stringSchema("Plan ID")}, []string{"remote_session_id", "plan_id"}, readOnlyToolAnnotation), r.toolPlanReadPublic)
-	r.addTool(s, publicTool("plan_transition", "推进计划任务、重新规划或交付计划；transition 明确决定状态变化。", map[string]any{"remote_session_id": remoteSession, "transition": enumSchema("计划转移", "start_task", "complete_task", "block_task", "replan", "deliver"), "plan_id": stringSchema("Plan ID"), "task_id": stringSchema("计划任务 ID"), "evidence": arraySchema(planEvidenceSchema(), "完成或阻塞证据"), "reason": stringSchema("阻塞或重新规划原因"), "goal": stringSchema("更新后的目标"), "summary": stringSchema("更新后的摘要"), "operations": arraySchema(planOperationSchema(), "计划任务操作"), "purpose": stringSchema("本次调用的目的；必须由用户明确提供")}, []string{"remote_session_id", "transition", "plan_id", "purpose"}, mutatingToolAnnotation), r.toolPlanTransition)
+	r.addTool(s, publicTool("plan", toolDesc["plan"], map[string]any{
+		"remote_session_id": remoteSession, "action": enumSchema("计划动作", "create", "start_task", "complete_task", "block_task", "replan", "deliver"),
+		"goal": stringSchema("计划目标"), "summary": stringSchema("计划摘要"), "tasks": arraySchema(planTaskInputSchema(), "有序计划任务"),
+		"plan_id": stringSchema("Plan ID"), "task_id": stringSchema("计划任务 ID"), "evidence": arraySchema(planEvidenceSchema(), "证据"),
+		"reason": stringSchema("阻塞或重新规划原因"), "operations": arraySchema(planOperationSchema(), "计划任务操作"), "purpose": stringSchema("目的"),
+	}, []string{"remote_session_id", "action", "purpose"}, mutatingToolAnnotation), r.toolPlan)
+	r.addTool(s, publicTool("plan_read", toolDesc["plan_read"], map[string]any{
+		"remote_session_id": remoteSession, "plan_id": stringSchema("Plan ID"),
+	}, []string{"remote_session_id", "plan_id"}, readOnlyToolAnnotation), r.toolPlanReadPublic)
 
-	r.addTool(s, publicTool("runtime_read", "读取能力、项目摘要或适用指令；view 明确决定读取内容。", map[string]any{"remote_session_id": remoteSession, "workspace": workspace, "view": enumSchema("读取视图", "capabilities", "project", "instructions"), "include_tool_schemas": booleanSchema("返回工具 schema"), "include_skill_details": booleanSchema("返回 Skill 详情"), "known_revisions": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}}, "anchor_path": stringSchema("指令锚点路径"), "paths": arraySchema(map[string]any{"type": "string"}, "指令路径")}, []string{"view"}, readOnlyToolAnnotation), r.toolRuntimeRead)
-	r.addTool(s, publicTool("environment_read", "读取当前运行环境或与已有环境快照比较。", map[string]any{"remote_session_id": remoteSession, "workspace": workspace, "view": enumSchema("读取视图", "current", "compare"), "sections": arraySchema(map[string]any{"type": "string", "enum": environment.ValidSections}, "环境分区"), "snapshot_id": stringSchema("用于比较的环境快照 ID")}, []string{"view"}, readOnlyToolAnnotation), r.toolEnvironmentRead)
-	r.addTool(s, publicTool("environment_snapshot_create", "保存当前 Workspace 环境快照，供后续诊断和比较。", map[string]any{"remote_session_id": remoteSession, "sections": arraySchema(map[string]any{"type": "string", "enum": environment.ValidSections}, "环境分区")}, []string{"remote_session_id"}, sessionToolAnnotation), r.toolEnvironmentSnapshotCreate)
+	r.addTool(s, publicTool("runtime_read", toolDesc["runtime_read"], map[string]any{
+		"remote_session_id": remoteSession, "workspace": workspace, "view": enumSchema("读取视图", "capabilities", "project", "instructions"),
+		"include_tool_schemas": booleanSchema("返回工具 schema"), "include_skill_details": booleanSchema("返回 Skill 详情"),
+		"known_revisions": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
+		"anchor_path":     stringSchema("指令锚点路径"), "paths": arraySchema(map[string]any{"type": "string"}, "指令路径"),
+	}, []string{"view"}, readOnlyToolAnnotation), r.toolRuntimeRead)
+	r.addTool(s, publicTool("environment_read", toolDesc["environment_read"], map[string]any{
+		"remote_session_id": remoteSession, "workspace": workspace, "view": enumSchema("读取视图", "current", "compare"),
+		"sections": arraySchema(map[string]any{"type": "string", "enum": environment.ValidSections}, "环境分区"), "snapshot_id": stringSchema("比较用快照 ID"),
+	}, []string{"view"}, readOnlyToolAnnotation), r.toolEnvironmentRead)
+	r.addTool(s, publicTool("environment", toolDesc["environment"], map[string]any{
+		"remote_session_id": remoteSession, "action": enumSchema("环境写动作", "snapshot_create"),
+		"sections": arraySchema(map[string]any{"type": "string", "enum": environment.ValidSections}, "环境分区"),
+	}, []string{"remote_session_id", "action"}, sessionToolAnnotation), r.toolEnvironment)
 
-	r.addTool(s, publicTool("extension_discover", "发现或描述已配置的 Skill 与上游 MCP；kind、view 明确决定发现对象和结果类型。", map[string]any{"workspace": workspace, "remote_session_id": remoteSession, "kind": enumSchema("扩展类型", "skill", "mcp"), "view": enumSchema("发现视图", "list", "describe"), "query": stringSchema("名称或描述关键词"), "name": stringSchema("Skill 或 MCP 名称"), "server": stringSchema("MCP Server 名称"), "include_tools": booleanSchema("返回上游工具 schema")}, []string{"kind", "view"}, readOnlyToolAnnotation), r.toolExtensionDiscover)
-	r.addTool(s, publicTool("skill_call", "调用已发现的 Skill；Skill 名称必须来自 extension_discover。", map[string]any{"remote_session_id": remoteSession, "name": stringSchema("Skill 名称"), "arguments": map[string]any{"type": "object", "additionalProperties": true}, "confirmation_token": stringSchema("仅表示用户已确认同一 Skill 调用"), "purpose": stringSchema("本次调用的目的；必须由用户明确提供")}, []string{"remote_session_id", "name", "purpose"}, commandExecutionToolAnnotation), r.toolSkillCall)
-	r.addTool(s, publicTool("mcp_call", "调用已发现的上游 MCP 工具；Server 和工具必须来自 extension_discover。", map[string]any{"remote_session_id": remoteSession, "server": stringSchema("MCP Server 名称"), "tool": stringSchema("上游工具名称"), "arguments": map[string]any{"type": "object", "additionalProperties": true}, "confirmation_token": stringSchema("仅表示用户已确认同一 MCP 调用"), "purpose": stringSchema("本次调用的目的；必须由用户明确提供")}, []string{"remote_session_id", "server", "tool", "purpose"}, commandExecutionToolAnnotation), r.toolMCPCallPublic)
+	r.addTool(s, publicTool("extension_discover", toolDesc["extension_discover"], map[string]any{
+		"workspace": workspace, "remote_session_id": remoteSession, "kind": enumSchema("扩展类型", "skill", "mcp"),
+		"view": enumSchema("发现视图", "list", "describe"), "query": stringSchema("关键词"), "name": stringSchema("Skill 或 MCP 名称"),
+		"server": stringSchema("MCP Server 名称"), "include_tools": booleanSchema("返回上游工具 schema"),
+	}, []string{"kind", "view"}, readOnlyToolAnnotation), r.toolExtensionDiscover)
+	r.addTool(s, publicTool("skill_call", toolDesc["skill_call"], map[string]any{
+		"remote_session_id": remoteSession, "name": stringSchema("Skill 名称"),
+		"arguments": map[string]any{"type": "object", "additionalProperties": true}, "confirmation_token": stringSchema("语义确认"), "purpose": stringSchema("目的"),
+	}, []string{"remote_session_id", "name", "purpose"}, commandExecutionToolAnnotation), r.toolSkillCall)
+	r.addTool(s, publicTool("mcp_call", toolDesc["mcp_call"], map[string]any{
+		"remote_session_id": remoteSession, "server": stringSchema("MCP Server 名称"), "tool": stringSchema("上游工具名称"),
+		"arguments": map[string]any{"type": "object", "additionalProperties": true}, "confirmation_token": stringSchema("语义确认"), "purpose": stringSchema("目的"),
+	}, []string{"remote_session_id", "server", "tool", "purpose"}, commandExecutionToolAnnotation), r.toolMCPCallPublic)
 
-	r.addTool(s, publicTool("artifact_read", "读取 Remote Session 产物列表或内容；view 明确决定读取类型。", map[string]any{"remote_session_id": remoteSession, "view": enumSchema("读取视图", "list", "content"), "kind": stringSchema("产物类型"), "artifact_id": stringSchema("产物 ID"), "offset": numberSchema("字节偏移"), "limit": numberSchema("字节数量")}, []string{"remote_session_id", "view"}, readOnlyToolAnnotation), r.toolArtifactReadPublic)
-	r.addTool(s, publicTool("artifact_register", "登记工作区文件为 Remote Session 产物。", map[string]any{"remote_session_id": remoteSession, "path": path, "name": stringSchema("显示名称"), "kind": stringSchema("产物类型"), "mime_type": stringSchema("MIME 类型")}, []string{"remote_session_id", "path"}, mutatingToolAnnotation), r.toolArtifactRegister)
-	r.addTool(s, publicTool("screenshot_capture", "截取显示器或屏幕区域供视觉检查。", map[string]any{"remote_session_id": remoteSession, "mode": stringSchema("全屏或区域"), "display": numberSchema("显示器索引"), "x": numberSchema("区域 X"), "y": numberSchema("区域 Y"), "width": numberSchema("区域宽度"), "height": numberSchema("区域高度"), "compression": stringSchema("压缩模式"), "format": stringSchema("png 或 jpeg"), "quality": numberSchema("JPEG 质量"), "max_width": numberSchema("输出宽度上限"), "max_height": numberSchema("输出高度上限")}, []string{"remote_session_id"}, readOnlyToolAnnotation), r.toolScreenshotCapture)
-	r.addTool(s, publicTool("secret_provide", "提供仅驻留内存的 Secret 值或引用，不把 Secret 写入结果或日志。", map[string]any{"remote_session_id": remoteSession, "secret_id": stringSchema("待处理 Secret ID"), "values": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Secret 名称和值，仅驻留内存"}}, []string{"remote_session_id"}, secretToolAnnotation), r.toolSecretsProvide)
+	r.addTool(s, publicTool("artifact_read", toolDesc["artifact_read"], map[string]any{
+		"remote_session_id": remoteSession, "view": enumSchema("读取视图", "list", "content"), "kind": stringSchema("产物类型"),
+		"artifact_id": stringSchema("产物 ID"), "offset": numberSchema("字节偏移"), "limit": numberSchema("字节数量"),
+	}, []string{"remote_session_id", "view"}, readOnlyToolAnnotation), r.toolArtifactReadPublic)
+	r.addTool(s, publicTool("artifact", toolDesc["artifact"], map[string]any{
+		"remote_session_id": remoteSession, "path": path, "name": stringSchema("显示名称"), "kind": stringSchema("产物类型"), "mime_type": stringSchema("MIME 类型"),
+	}, []string{"remote_session_id", "path"}, mutatingToolAnnotation), r.toolArtifact)
+	r.addTool(s, publicTool("screenshot_capture", toolDesc["screenshot_capture"], map[string]any{
+		"remote_session_id": remoteSession, "mode": stringSchema("全屏或区域"), "display": numberSchema("显示器索引"),
+		"x": numberSchema("区域 X"), "y": numberSchema("区域 Y"), "width": numberSchema("宽度"), "height": numberSchema("高度"),
+		"compression": stringSchema("压缩模式"), "format": stringSchema("png 或 jpeg"), "quality": numberSchema("JPEG 质量"),
+		"max_width": numberSchema("输出宽度上限"), "max_height": numberSchema("输出高度上限"),
+	}, []string{"remote_session_id"}, readOnlyToolAnnotation), r.toolScreenshotCapture)
+	r.addTool(s, publicTool("secret_provide", toolDesc["secret_provide"], map[string]any{
+		"remote_session_id": remoteSession, "secret_id": stringSchema("Secret ID"),
+		"values": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Secret 名称和值"},
+	}, []string{"remote_session_id"}, secretToolAnnotation), r.toolSecretsProvide)
 
 	r.registerResources(s)
 }

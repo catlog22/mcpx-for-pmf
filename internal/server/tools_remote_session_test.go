@@ -201,7 +201,7 @@ func TestChangesetMCPDiffAndSemanticConfirmationSurviveTransportChange(t *testin
 		"height":            200,
 		"compression":       "small",
 	})
-	
+
 	screenshotResult, err := runtime.toolScreenshotCapture(contextFor(), screenshotRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -234,7 +234,7 @@ func TestChangesetMCPDiffAndSemanticConfirmationSurviveTransportChange(t *testin
 			"patch":       "@@ -1,3 +1,3 @@\n package demo\n \n-const Value = 1\n+const Value = 2\n",
 		}},
 	})
-	
+
 	preparedResult, err := runtime.toolChangePrepare(contextFor(), prepareRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -424,7 +424,7 @@ func TestSessionEventsIncludePendingConfirmations(t *testing.T) {
 		"remote_session_id": created.Session.ID,
 		"command":           "echo pending", "purpose": "inspect pending", "scope": "workspace",
 	})
-	
+
 	commandResult, err := rt.toolCommandExecute(context.Background(), command)
 	if err != nil {
 		t.Fatal(err)
@@ -440,7 +440,7 @@ func TestSessionEventsIncludePendingConfirmations(t *testing.T) {
 		"intent":            "recover pending confirmation from event log",
 		"remote_session_id": created.Session.ID, "view": "events", "limit": 5,
 	})
-	
+
 	eventsResult, err := rt.toolSessionRead(context.Background(), events)
 	if err != nil {
 		t.Fatal(err)
@@ -464,7 +464,7 @@ func TestRemoteSessionNotFoundExplainsExactCopy(t *testing.T) {
 		"remote_session_id": "rs-does-not-exist",
 		"view":              "summary",
 	})
-	
+
 	result, err := rt.toolSessionRead(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -475,7 +475,7 @@ func TestRemoteSessionNotFoundExplainsExactCopy(t *testing.T) {
 		t.Fatalf("missing session error = %+v", response)
 	}
 	message, _ := errorBody["message"].(string)
-	for _, phrase := range []string{"原样复制", "session_open"} {
+	for _, phrase := range []string{"原样复制", "session"} {
 		if !strings.Contains(message, phrase) {
 			t.Fatalf("missing session error must explain %q: %s", phrase, message)
 		}

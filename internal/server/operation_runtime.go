@@ -25,7 +25,7 @@ func executionMode(req *mcp.CallToolRequest) string {
 
 func asyncEligibleTool(name string) bool {
 	switch name {
-	case "workspace_list", "session_open", "operation_batch", "operation_manage":
+	case "workspace_read", "session", "operation_batch", "operation_manage":
 		return false
 	default:
 		return true

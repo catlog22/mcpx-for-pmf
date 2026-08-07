@@ -14,7 +14,7 @@ import (
 func TestRemoteRequestAllowsReadWithoutPurpose(t *testing.T) {
 	runtime := newWorkspaceRuntime(t, "demo")
 	request := mcpresult.Request(map[string]any{"workspace": "demo"})
-	
+
 	_, _, failure := runtime.remoteRequest(context.Background(), request)
 	if failure != nil {
 		t.Fatalf("read request should not require purpose: %+v", failure)
@@ -24,7 +24,7 @@ func TestRemoteRequestAllowsReadWithoutPurpose(t *testing.T) {
 func TestMutatingRequestRejectsOversizedPurpose(t *testing.T) {
 	runtime := newWorkspaceRuntime(t, "demo")
 	request := mcpresult.Request(map[string]any{"purpose": strings.Repeat("x", 513), "workspace": "demo"})
-	
+
 	_, _, _, failure := runtime.changeRequest(context.Background(), request, true)
 	if failure == nil {
 		t.Fatal("oversized purpose was accepted")

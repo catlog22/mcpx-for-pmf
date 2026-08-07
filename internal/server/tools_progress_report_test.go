@@ -42,7 +42,7 @@ func TestProgressReportRecordsPauseSummaryAndPreviousResult(t *testing.T) {
 		"next_step":         "请用户确认是否继续修改",
 		"related_tool":      "file_read",
 	})
-	
+
 	wrapped := rt.instrumentTool("progress_report", rt.toolProgressReport)
 	result, err := wrapped(context.Background(), request)
 	if err != nil {

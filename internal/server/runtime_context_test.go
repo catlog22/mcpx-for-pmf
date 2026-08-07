@@ -83,7 +83,7 @@ func TestInstrumentToolUsesRuntimeContextWithoutArgumentMetadata(t *testing.T) {
 		return mcpresult.NewStructured(map[string]any{"value": "ok"}, "ok"), nil
 	}
 	request := mcpresult.Request(map[string]any{"action": "list"})
-	
+
 	result, err := (&Runtime{}).instrumentTool("runtime_context_test", handler)(ctx, request)
 	if err != nil || !called {
 		t.Fatalf("instrumented call err=%v called=%v", err, called)

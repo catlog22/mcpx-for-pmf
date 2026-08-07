@@ -103,7 +103,7 @@ func TestTerminalExecRunsAfterSemanticConfirmation(t *testing.T) {
 		"purpose":           "run the command test",
 		"scope":             "workspace",
 	})
-	
+
 	out, err := rt.toolCommandExecute(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -121,7 +121,7 @@ func TestTerminalExecRunsAfterSemanticConfirmation(t *testing.T) {
 		"remote_session_id": created.Session.ID, "command": "echo approved-run",
 		"purpose": "run the command test", "scope": "workspace", "confirmation_token": data["confirmation_token"],
 	})
-	
+
 	approved, err := rt.toolCommandExecute(context.Background(), confirmReq)
 	if err != nil {
 		t.Fatal(err)
@@ -175,7 +175,7 @@ func TestTerminalStartUsesCommandPolicy(t *testing.T) {
 		"purpose":           "verify denied command policy",
 		"scope":             "workspace",
 	})
-	
+
 	out, err := rt.toolCommandExecute(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)

@@ -33,7 +33,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 	missingPurpose := mcpresult.Request(map[string]any{
 		"remote_session_id": created.Session.ID, "command": "printf context",
 	})
-	
+
 	missingResult, err := rt.toolCommandExecute(context.Background(), missingPurpose)
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +48,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 		"remote_session_id": created.Session.ID, "command": "printf context",
 		"purpose": "verify context binding", "scope": "host",
 	})
-	
+
 	invalidResult, err := rt.toolCommandExecute(context.Background(), invalidScope)
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +64,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 		"remote_session_id": created.Session.ID, "command": "echo confirmation",
 		"purpose": "verify confirmation context", "scope": "workspace",
 	})
-	
+
 	confirmationResult, err := rt.toolCommandExecute(context.Background(), confirmationRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +93,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 		"remote_session_id": created.Session.ID, "command": "echo confirmation",
 		"purpose": "verify confirmation context", "scope": "workspace", "confirmation_token": "ct_stale-token",
 	})
-	
+
 	invalidResult, retryErr := rt.toolCommandExecute(context.Background(), invalidRetry)
 	if retryErr != nil {
 		t.Fatal(retryErr)
@@ -112,7 +112,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 		"remote_session_id": created.Session.ID, "command": "echo confirmation",
 		"purpose": "verify confirmation context", "scope": "workspace", "confirmation_token": confirmationData["confirmation_token"],
 	})
-	
+
 	confirmed, err := rt.toolCommandExecute(context.Background(), confirmRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +129,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 		"remote_session_id": created.Session.ID, "command": "echo rephrase",
 		"purpose": "original intent", "scope": "workspace",
 	})
-	
+
 	rephrasePending, err := rt.toolCommandExecute(context.Background(), rephraseConfirm)
 	if err != nil {
 		t.Fatal(err)
@@ -142,7 +142,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 		"purpose": "rephrased intent after user confirmation", "scope": "workspace",
 		"confirmation_token": rephraseData["confirmation_token"],
 	})
-	
+
 	rephraseExecuted, err := rt.toolCommandExecute(context.Background(), rephraseRetry)
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +156,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 		"remote_session_id": created.Session.ID, "command": "printf context",
 		"purpose": "verify context binding", "scope": "workspace",
 	})
-	
+
 	validResult, err := rt.toolCommandExecute(context.Background(), valid)
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +194,7 @@ func TestCommandDeniedExplainsUnsafeShellFeatures(t *testing.T) {
 		"purpose":           "verify remote branch pointer",
 		"scope":             "workspace",
 	})
-	
+
 	result, err := rt.toolCommandExecute(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)

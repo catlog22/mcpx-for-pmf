@@ -13,9 +13,7 @@ import (
 	"mime"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
-	"unicode/utf8"
 
 	"mcpx/internal/file"
 )
@@ -44,12 +42,13 @@ type Artifact struct {
 }
 
 type ReadResult struct {
-	Artifact Artifact `json:"artifact"`
-	Offset   int64    `json:"offset"`
-	Next     int64    `json:"next_offset"`
-	EOF      bool     `json:"eof"`
-	Encoding string   `json:"encoding"`
-	Data     string   `json:"data"`
+	Artifact Artifact       `json:"artifact"`
+	Offset   int64          `json:"offset"`
+	Next     int64          `json:"next_offset"`
+	EOF      bool           `json:"eof"`
+	Encoding string         `json:"encoding"`
+	Data     string         `json:"data"`
+	Format   map[string]any `json:"format,omitempty"`
 }
 
 func NewService(db *sql.DB) *Service { return &Service{db: db, now: time.Now} }
@@ -172,12 +171,20 @@ func (s *Service) Read(ctx context.Context, remoteSessionID, artifactID, workspa
 		return ReadResult{}, readErr
 	}
 	buffer = buffer[:read]
-	encoding, data := "utf-8", string(buffer)
-	if !utf8.Valid(buffer) || !isText(artifact.MIMEType) {
-		encoding, data = "base64", base64.StdEncoding.EncodeToString(buffer)
+	window := AlignReadWindow(buffer)
+	pres := PresentText(artifact.Path, window, artifact.MIMEType)
+	formatMap := map[string]any{
+		"charset": pres.Format.Charset, "bom": pres.Format.BOM, "line_ending": pres.Format.LineEnding,
+	}
+	encoding, data := "base64", base64.StdEncoding.EncodeToString(buffer)
+	if pres.OK {
+		encoding, data = "utf-8", string(pres.UTF8)
 	}
 	next := offset + int64(read)
-	return ReadResult{Artifact: artifact, Offset: offset, Next: next, EOF: next >= artifact.Size, Encoding: encoding, Data: data}, nil
+	return ReadResult{
+		Artifact: artifact, Offset: offset, Next: next, EOF: next >= artifact.Size,
+		Encoding: encoding, Data: data, Format: formatMap,
+	}, nil
 }
 
 func (s *Service) ReadAll(ctx context.Context, remoteSessionID, artifactID, workspaceRoot string, maxBytes int64) (Artifact, []byte, error) {
@@ -224,8 +231,4 @@ func randomID() string {
 	var value [12]byte
 	_, _ = rand.Read(value[:])
 	return "art_" + hex.EncodeToString(value[:])
-}
-
-func isText(mimeType string) bool {
-	return strings.HasPrefix(mimeType, "text/") || strings.Contains(mimeType, "json") || strings.Contains(mimeType, "xml") || strings.Contains(mimeType, "yaml")
 }

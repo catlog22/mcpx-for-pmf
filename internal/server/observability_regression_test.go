@@ -60,7 +60,7 @@ func TestToolLogRecordsDuration(t *testing.T) {
 	}
 	instrumented := (&Runtime{}).instrumentTool("observability_test", handler)
 	request := mcpresult.Request(map[string]any{})
-	
+
 	result, err := instrumented(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)

@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-
 )
 
 func TestPublicCatalogIsExactlyTheV2Contract(t *testing.T) {
@@ -18,11 +17,11 @@ func TestPublicCatalogIsExactlyTheV2Contract(t *testing.T) {
 	runtime.registerTools(protocol)
 
 	want := []string{
-		"workspace_list", "workspace_observe", "workspace_history_read", "session_open", "session_read", "session_transition",
+		"workspace_read", "session", "session_read",
 		"operation_batch", "operation_manage",
-		"source_read", "change_prepare", "change_read", "change_discard", "change_apply", "change_revert", "command_run", "task_read", "task_control",
-		"progress_report", "plan_create", "plan_read", "plan_transition", "runtime_read", "environment_read", "environment_snapshot_create",
-		"extension_discover", "skill_call", "mcp_call", "artifact_read", "artifact_register", "screenshot_capture", "secret_provide",
+		"source_read", "change", "change_read", "command_run", "task_read", "task",
+		"plan", "plan_read", "runtime_read", "environment_read", "environment",
+		"extension_discover", "skill_call", "mcp_call", "artifact_read", "artifact", "screenshot_capture", "secret_provide",
 	}
 	got := make([]string, 0, len(runtime.listedToolMap()))
 	for name := range runtime.listedToolMap() {
@@ -57,7 +56,7 @@ func TestPublicCatalogIsExactlyTheV2Contract(t *testing.T) {
 			}
 		}
 	}
-	changeApply := runtime.listedToolMap()["change_apply"]
+	changeApply := runtime.listedToolMap()["change"]
 	var changeSchema map[string]any
 	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(changeApply), &changeSchema); err != nil {
 		t.Fatal(err)

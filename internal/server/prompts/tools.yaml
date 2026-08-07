@@ -1,0 +1,25 @@
+# Public tool short descriptions (list surface). Schema structure stays in Go.
+tools:
+  workspace_read: 读取 Workspace 列表、变更、快照、差异、监听、记忆或运行历史；view 决定类型。
+  session: 创建/恢复或更新、接力、接入、关闭 Remote Session；action 决定生命周期。
+  session_read: 读取 Remote Session 列表、摘要或事件；view 决定类型。
+  source_read: 读取文件、搜索、列举或组装上下文；view 决定语义。修改前将 sha256 写入 change action=prepare 的 base_sha256。
+  change: 准备、丢弃、应用或回滚 Changeset；action 决定动作。
+  change_read: 读取 Changeset diff 或 history；view 决定类型。
+  command_run: 按策略执行用户要求的命令或项目任务；长命令返回 Task ID。
+  task_read: 读取 Task 列表、状态、日志、端口或诊断；view 决定类型。
+  task: 接入、停止或向 Task 写 stdin；action 决定控制动作。
+  plan: 创建或推进持久化计划；action 决定 create/start_task/complete_task/block_task/replan/deliver。
+  plan_read: 读取持久化开发计划及任务状态。
+  operation_batch: 提交多个公开工具操作；无依赖步骤并发，有依赖按 DAG。
+  operation_manage: 查询、等待、读取结果、取消或恢复异步操作。
+  runtime_read: 读取能力、项目摘要或适用指令；view 决定内容。
+  environment_read: 读取当前运行环境或与快照比较；view=current|compare。
+  environment: 保存环境快照；action=snapshot_create。
+  extension_discover: 发现或描述 Skill 与上游 MCP；kind 与 view 决定对象。
+  skill_call: 调用已发现的 Skill；名称须来自 extension_discover。
+  mcp_call: 调用已发现的上游 MCP 工具。
+  artifact_read: 读取产物列表或内容；view=list|content。文本为 UTF-8 并返回 format。
+  artifact: 登记工作区文件为 Remote Session 产物。
+  screenshot_capture: 截取显示器或屏幕区域。
+  secret_provide: 提供仅驻留内存的 Secret，不写入结果或日志。

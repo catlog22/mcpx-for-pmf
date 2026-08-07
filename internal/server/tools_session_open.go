@@ -185,8 +185,8 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		"schema_source":         "tools/list",
 		"client_refresh":        clientRefreshPayload(envReq.Payload, revisions),
 		"recommended_workflows": map[string]any{
-			"bootstrap":     []string{"session_open"},
-			"source_change": []string{"source_read", "change_prepare", "change_apply", "command_run"},
+			"bootstrap":     []string{"session"},
+			"source_change": []string{"source_read", "change", "change", "command_run"},
 		},
 		"opened_at": time.Now().UTC().Format(time.RFC3339),
 	}
@@ -194,7 +194,7 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 
 	r.logAudit(audit.Event{
 		RequestID: envReq.RequestID, RemoteSessionID: session.ID, Workspace: session.WorkspaceName,
-		Tool: "session_open", Status: "ok",
+		Tool: "session", Status: "ok",
 	})
 	return compactToolResult(data, fmt.Sprintf("Session %s opened for workspace %s.", session.ID, session.WorkspaceName)), nil
 }
@@ -227,7 +227,7 @@ func clientRefreshPayload(payload map[string]any, revisions map[string]any) map[
 		"guidance_revision":    currentGuidance,
 	}
 	if changed {
-		result["actions"] = []string{"reconnect", "tools/list", "session_open"}
+		result["actions"] = []string{"reconnect", "tools/list", "session"}
 	} else {
 		result["actions"] = []string{}
 	}

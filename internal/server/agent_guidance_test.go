@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-
 	"mcpx/internal/envelope"
 )
 
@@ -33,7 +32,7 @@ func TestAgentGuidanceUsesDedicatedRoutingWithoutBusinessArguments(t *testing.T)
 	} else {
 		t.Fatalf("tool routing type = %T", guidance["tool_routing"])
 	}
-	if !containsAnyString(routing["inspect_files"], "source_read") || !containsAnyString(routing["modify_files"], "change_prepare") {
+	if !containsAnyString(routing["inspect_files"], "source_read") || !containsAnyString(routing["modify_files"], "change") {
 		t.Fatalf("guidance routing = %+v", routing)
 	}
 	for _, forbidden := range []string{"presentation", "renderer", "show_source", "density"} {
@@ -61,7 +60,7 @@ func TestAgentGuidanceRequiresUserVisibleResponseContract(t *testing.T) {
 	}
 	after, _ := contract["after_tool_call"].([]string)
 	joinedAfter := strings.Join(after, "\n")
-	if !strings.Contains(joinedAfter, "progress_summary") || !strings.Contains(joinedAfter, "progress_report") {
+	if !strings.Contains(joinedAfter, "progress_summary") || !strings.Contains(joinedAfter, "下一步") {
 		t.Fatalf("after-tool progress contract is incomplete: %+v", after)
 	}
 	evidence, _ := contract["evidence_rule"].(string)
@@ -134,12 +133,12 @@ func TestAgentGuidanceIncludesChangePayloadCheatSheet(t *testing.T) {
 		t.Fatalf("create hint must describe chunked appends: %+v", item["create"])
 	}
 	alternatives, _ := payload["alternatives"].(string)
-	if !strings.Contains(alternatives, "change_apply") || !strings.Contains(alternatives, "change_revert") {
+	if !strings.Contains(alternatives, "apply") || !strings.Contains(alternatives, "revert") {
 		t.Fatalf("alternatives must cover prepared and revert modes: %q", alternatives)
 	}
 	rules, _ := guidance["rules"].([]string)
 	joined := strings.Join(rules, "\n")
-	if !strings.Contains(joined, "session_open 成功后") || !strings.Contains(joined, "完整 session_id") {
+	if !strings.Contains(joined, "session（action=open） 成功后") || !strings.Contains(joined, "完整 session_id") {
 		t.Fatalf("rules must require showing the session ID to the user: %s", joined)
 	}
 	if !strings.Contains(joined, "一次提交完整参数") || !strings.Contains(joined, "最多新增 300 行") {
@@ -179,7 +178,7 @@ func TestAgentGuidanceIncludesChangePayloadCheatSheet(t *testing.T) {
 		t.Fatalf("rules must explain extension inventory filtering: %s", joined)
 	}
 	instructions := agentGuidanceInstructions()
-	if !strings.Contains(instructions, "用户可见响应契约") || !strings.Contains(instructions, "change_prepare 参数速查") || !strings.Contains(instructions, "insert_after") {
+	if !strings.Contains(instructions, "用户可见响应契约") || !strings.Contains(instructions, "change") || !strings.Contains(instructions, "insert_after") {
 		t.Fatalf("instructions must render the cheat-sheet: %s", instructions)
 	}
 }
@@ -188,26 +187,26 @@ func TestChangeSchemasAreSelfDescribingAndFlat(t *testing.T) {
 	runtime := &Runtime{}
 	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
 	runtime.registerTools(protocol)
-	registered := runtime.listedToolMap()["change_prepare"]
+	registered := runtime.listedToolMap()["change"]
 	if len(mcpresult.ToolSchemaJSON(registered)) == 0 {
-		t.Fatal("change_prepare must expose a raw schema")
+		t.Fatal("change must expose a raw schema")
 	}
 	var schema map[string]any
 	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(registered), &schema); err != nil {
 		t.Fatal(err)
 	}
 	if _, hasOneOf := schema["oneOf"]; hasOneOf {
-		t.Fatalf("change_prepare schema must not rely on top-level oneOf: %s", mcpresult.ToolSchemaJSON(registered))
+		t.Fatalf("change schema must not rely on top-level oneOf: %s", mcpresult.ToolSchemaJSON(registered))
 	}
 	if schema["additionalProperties"] != false {
-		t.Fatalf("change_prepare must reject unknown fields: %s", mcpresult.ToolSchemaJSON(registered))
+		t.Fatalf("change must reject unknown fields: %s", mcpresult.ToolSchemaJSON(registered))
 	}
 	properties, ok := schema["properties"].(map[string]any)
 	if !ok {
 		t.Fatal("missing properties")
 	}
 	if properties["session_id"] == nil || properties["purpose"] == nil || properties["user_confirmed"] != nil {
-		t.Fatalf("change_prepare semantic fields are invalid: %+v", properties)
+		t.Fatalf("change semantic fields are invalid: %+v", properties)
 	}
 	operations, ok := properties["operations"].(map[string]any)
 	if !ok {

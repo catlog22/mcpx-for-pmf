@@ -30,7 +30,7 @@ func TestObservationRecordsToolLifecycleAndRedacts(t *testing.T) {
 		"token":     "do-not-store-this-token",
 		"path":      "config.yaml",
 	})
-	
+
 	wrapper := rt.instrumentTool("observer_test", func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return mcpresult.NewText(`{"message":"visible output","password":"do-not-store-this-password"}`), nil
 	})
@@ -81,7 +81,7 @@ func TestObservationRecordsToolLifecycleAndRedacts(t *testing.T) {
 	}
 
 	errorRequest := mcpresult.Request(map[string]any{"intent": "run the failing observer operation", "workspace": "demo"})
-	
+
 	errorWrapper := rt.instrumentTool("observer_error_test", func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return nil, errors.New("observer operation failed")
 	})
@@ -426,7 +426,7 @@ func TestObservationSocketEndToEndDeliversToolEvents(t *testing.T) {
 		return mcpresult.NewText("e2e output"), nil
 	})
 	request := mcpresult.Request(map[string]any{"intent": "verify observer delivery", "workspace": "demo"})
-	
+
 	if _, err := wrapper(ctx, request); err != nil {
 		t.Fatal(err)
 	}

@@ -178,7 +178,7 @@ func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Reques
 
 // commandOutputText renders the model-facing summary with any stdout/stderr
 // inline, so completed command output is readable directly in the conversation.
-// Truncated streams state the truncation and point to task_read/task_control for more.
+// Truncated streams state the truncation and point to task_read/task for more.
 func commandOutputText(data map[string]any, summary string) string {
 	var builder strings.Builder
 	builder.WriteString(summary)
@@ -193,7 +193,7 @@ func commandOutputText(data map[string]any, summary string) string {
 		builder.WriteString(text)
 	}
 	if truncated, _ := data["output_truncated"].(bool); truncated {
-		builder.WriteString("\n\nOutput truncated; call task_control(operation=attach) or task_read(view=logs) to read more.")
+		builder.WriteString("\n\nOutput truncated; call task(operation=attach) or task_read(view=logs) to read more.")
 	}
 	return builder.String()
 }

@@ -82,7 +82,7 @@ func TestResolveRemoteSessionWorkspaceWithoutTransportBinding(t *testing.T) {
 func TestWorkspaceInfoDoesNotAutoSelectSingleWorkspace(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	req := mcpresult.Request(map[string]any{"intent": "inspect the project workspace", "action": "project"})
-	
+
 	out, err := rt.toolRuntimeInspect(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +112,7 @@ func TestRegisteredToolsExcludeCompatibilityInterfaces(t *testing.T) {
 			t.Fatalf("removed compatibility tool %q is still registered", removed)
 		}
 	}
-	for _, required := range []string{"workspace_list", "session_open", "source_read", "change_apply", "change_read"} {
+	for _, required := range []string{"workspace_read", "session", "source_read", "change", "change_read"} {
 		if _, exists := tools[required]; !exists {
 			t.Fatalf("required tool %q is missing", required)
 		}

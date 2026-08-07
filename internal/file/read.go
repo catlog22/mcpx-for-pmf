@@ -339,6 +339,9 @@ func lineEndingName(crlfCount, lfCount, crCount int) string {
 	return "CR"
 }
 
+// DetectMIME returns a source-friendly MIME type for path/content.
+func DetectMIME(path string, content []byte) string { return detectMIME(path, content) }
+
 func detectMIME(path string, content []byte) string {
 	extension := strings.ToLower(filepath.Ext(path))
 	if detected, ok := sourceMIMEByExtension[extension]; ok {

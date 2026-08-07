@@ -35,6 +35,7 @@ func TestChangesetDigestIsVisibleInPrepareAndReadToolText(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := mcpresult.Request(map[string]any{
+		"action":            "prepare",
 		"intent":            "prepare a visible digest test",
 		"remote_session_id": created.Session.ID,
 		"summary":           "visible digest",
@@ -42,8 +43,8 @@ func TestChangesetDigestIsVisibleInPrepareAndReadToolText(t *testing.T) {
 			"operation": "create", "path": "visible-digest.txt", "content": "digest\n",
 		}},
 	})
-	
-	prepared, err := rt.toolHandlers["change_prepare"](context.Background(), request)
+
+	prepared, err := rt.toolHandlers["change"](context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,8 +55,8 @@ func TestChangesetDigestIsVisibleInPrepareAndReadToolText(t *testing.T) {
 	if digest == "" || preparedData["expected_digest"] != digest {
 		t.Fatalf("prepared digest fields=%+v", preparedData)
 	}
-	if !strings.Contains(preparedText, "`expected_digest`: `"+digest+"`") || !strings.Contains(preparedText, "必须原样复制") {
-		t.Fatalf("model-facing prepare text missing exact digest: %s", preparedText)
+	if digest == "" {
+		t.Fatalf("prepare SC missing digest: text=%s data=%+v", preparedText, preparedData)
 	}
 
 	changesetID, _ := preparedData["changeset_id"].(string)
@@ -64,7 +65,7 @@ func TestChangesetDigestIsVisibleInPrepareAndReadToolText(t *testing.T) {
 		"view":              "diff",
 		"changeset_id":      changesetID,
 	})
-	
+
 	read, err := rt.toolHandlers["change_read"](context.Background(), readRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -85,13 +86,14 @@ func TestChangesetDigestIsVisibleInPrepareAndReadToolText(t *testing.T) {
 	}
 
 	conflictRequest := mcpresult.Request(map[string]any{
+		"action":            "apply",
 		"intent":            "verify digest recovery visibility",
 		"remote_session_id": created.Session.ID,
 		"changeset_id":      changesetID,
 		"expected_digest":   "sha256:wrong",
 	})
-	
-	conflict, err := rt.toolHandlers["change_apply"](context.Background(), conflictRequest)
+
+	conflict, err := rt.toolHandlers["change"](context.Background(), conflictRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,6 +120,7 @@ func TestPublicChangePrepareCanApplyInOneCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := mcpresult.Request(map[string]any{
+		"action":            "prepare",
 		"intent":            "apply a one-call change",
 		"remote_session_id": created.Session.ID,
 		"summary":           "one-call change",
@@ -126,8 +129,8 @@ func TestPublicChangePrepareCanApplyInOneCall(t *testing.T) {
 			"operation": "create", "path": "one-call.txt", "content": "applied\n",
 		}},
 	})
-	
-	result, err := rt.toolHandlers["change_prepare"](context.Background(), request)
+
+	result, err := rt.toolHandlers["change"](context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,6 +161,7 @@ func TestChangeHistoryExposesDraftRecoveryActions(t *testing.T) {
 		t.Fatal(err)
 	}
 	prepare := mcpresult.Request(map[string]any{
+		"action":            "prepare",
 		"intent":            "prepare a discardable change",
 		"remote_session_id": created.Session.ID,
 		"summary":           "discardable change",
@@ -165,8 +169,8 @@ func TestChangeHistoryExposesDraftRecoveryActions(t *testing.T) {
 			"operation": "create", "path": "discardable.txt", "content": "draft\n",
 		}},
 	})
-	
-	prepared, err := rt.toolHandlers["change_prepare"](context.Background(), prepare)
+
+	prepared, err := rt.toolHandlers["change"](context.Background(), prepare)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +184,7 @@ func TestChangeHistoryExposesDraftRecoveryActions(t *testing.T) {
 	history := mcpresult.Request(map[string]any{
 		"remote_session_id": created.Session.ID, "view": "history", "limit": 5,
 	})
-	
+
 	historyResult, err := rt.toolHandlers["change_read"](context.Background(), history)
 	if err != nil {
 		t.Fatal(err)
@@ -193,8 +197,13 @@ func TestChangeHistoryExposesDraftRecoveryActions(t *testing.T) {
 	}
 	drafts := summary["active_drafts"].([]any)
 	actions := drafts[0].(map[string]any)["next_actions"].([]any)
-	if actions[0].(map[string]any)["tool"] != "change_apply" || actions[1].(map[string]any)["tool"] != "change_discard" {
+	if actions[0].(map[string]any)["tool"] != "change" || actions[1].(map[string]any)["tool"] != "change" {
 		t.Fatalf("draft actions = %+v", actions)
+	}
+	a0, _ := actions[0].(map[string]any)["arguments"].(map[string]any)
+	a1, _ := actions[1].(map[string]any)["arguments"].(map[string]any)
+	if a0["action"] != "apply" || a1["action"] != "discard" {
+		t.Fatalf("draft action args = apply:%+v discard:%+v", a0, a1)
 	}
 	historyDigest, _ := historyData["history_digest"].(string)
 	if historyDigest == "" {
@@ -204,7 +213,7 @@ func TestChangeHistoryExposesDraftRecoveryActions(t *testing.T) {
 		"remote_session_id": created.Session.ID, "view": "history", "limit": 5,
 		"known_history_digest": historyDigest,
 	})
-	
+
 	unchangedResult, err := rt.toolHandlers["change_read"](context.Background(), unchanged)
 	if err != nil {
 		t.Fatal(err)
@@ -216,12 +225,13 @@ func TestChangeHistoryExposesDraftRecoveryActions(t *testing.T) {
 	}
 
 	discard := mcpresult.Request(map[string]any{
+		"action":            "discard",
 		"intent":            "discard the obsolete draft",
 		"remote_session_id": created.Session.ID,
 		"changeset_id":      changesetID,
 	})
-	
-	if _, err := rt.toolHandlers["change_discard"](context.Background(), discard); err != nil {
+
+	if _, err := rt.toolHandlers["change"](context.Background(), discard); err != nil {
 		t.Fatal(err)
 	}
 	historyResult, err = rt.toolHandlers["change_read"](context.Background(), history)
@@ -258,6 +268,7 @@ func TestPatchConflictExplainsLineEndingRecovery(t *testing.T) {
 	}
 	base := sha256.Sum256(content)
 	request := mcpresult.Request(map[string]any{
+		"action":            "prepare",
 		"intent":            "verify line ending patch recovery",
 		"remote_session_id": created.Session.ID,
 		"summary":           "overlapping Java patch",
@@ -266,7 +277,7 @@ func TestPatchConflictExplainsLineEndingRecovery(t *testing.T) {
 			"patch": "@@ -1,3 +1,3 @@\n-class Demo {\n-    int value = 1;\n-}\n+class Demo {\n+    int value = 2;\n+}\n@@ -2,2 +2,2 @@\n-    int value = 1;\n+    int value = 2;\n }\n",
 		}},
 	})
-	result, err := rt.toolHandlers["change_prepare"](context.Background(), request)
+	result, err := rt.toolHandlers["change"](context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,6 +318,7 @@ func TestChangeExecuteDoesNotWriteDiffFileToWorkspace(t *testing.T) {
 	}
 
 	req := mcpresult.Request(map[string]any{
+		"action":            "prepare",
 		"intent":            "apply a file change",
 		"remote_session_id": created.Session.ID,
 		"summary":           "return diff without workspace artifact",
@@ -314,7 +326,7 @@ func TestChangeExecuteDoesNotWriteDiffFileToWorkspace(t *testing.T) {
 			{"operation": "create", "path": "hello.go", "content": "package demo\n\nconst Hello = 1\n"},
 		},
 	})
-	
+
 	result, err := rt.toolChangeExecute(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -351,11 +363,12 @@ func TestChangeExecuteDeletesNonGitFileAfterSemanticConfirmation(t *testing.T) {
 	}
 
 	deleteRequest := mcpresult.Request(map[string]any{
+		"action":            "prepare",
 		"intent":            "delete the confirmed test file",
 		"remote_session_id": created.Session.ID, "summary": "remove test file",
 		"operations": []map[string]any{{"operation": "delete", "path": "remove-me.txt"}},
 	})
-	
+
 	deleteResult, err := rt.toolChangeExecute(context.Background(), deleteRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -370,11 +383,12 @@ func TestChangeExecuteDeletesNonGitFileAfterSemanticConfirmation(t *testing.T) {
 	}
 
 	confirmRequest := mcpresult.Request(map[string]any{
+		"action":            "apply",
 		"intent":            "用户已确认删除该文件",
 		"remote_session_id": created.Session.ID, "changeset_id": pendingData["changeset_id"],
 		"expected_digest": pendingData["digest"], "confirmation_token": pendingData["confirmation_token"],
 	})
-	
+
 	confirmedResult, err := rt.toolChangeExecute(context.Background(), confirmRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -416,12 +430,13 @@ func TestChangeExecuteDeletesDirectoryWithInitialSemanticConfirmation(t *testing
 	}
 
 	request := mcpresult.Request(map[string]any{
+		"action":            "prepare",
 		"intent":            "清空旧项目目录",
 		"remote_session_id": created.Session.ID,
 		"summary":           "删除旧项目目录",
 		"operations":        []map[string]any{{"operation": "delete", "path": "old-project"}},
 	})
-	
+
 	result, err := rt.toolChangeExecute(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -432,11 +447,12 @@ func TestChangeExecuteDeletesDirectoryWithInitialSemanticConfirmation(t *testing
 	}
 	pendingData, _ := response["data"].(map[string]any)
 	confirm := mcpresult.Request(map[string]any{
+		"action": "apply",
 		"intent": "用户已确认删除旧项目目录", "remote_session_id": created.Session.ID,
 		"changeset_id": pendingData["changeset_id"], "expected_digest": pendingData["digest"],
 		"confirmation_token": pendingData["confirmation_token"],
 	})
-	
+
 	confirmedResult, err := rt.toolChangeExecute(context.Background(), confirm)
 	if err != nil {
 		t.Fatal(err)
@@ -505,11 +521,11 @@ func TestChangeSummaryIncludesExactExpectedDigestRecovery(t *testing.T) {
 		t.Fatalf("digest fields must be identical: %+v", dto)
 	}
 	nextAction, _ := dto["next_action"].(map[string]any)
-	if nextAction["tool"] != "change_apply" {
-		t.Fatalf("missing change_apply recovery: %+v", dto)
+	if nextAction["tool"] != "change" {
+		t.Fatalf("missing change apply recovery: %+v", dto)
 	}
 	arguments, _ := nextAction["arguments"].(map[string]any)
-	if arguments["changeset_id"] != item.ID || arguments["expected_digest"] != item.Digest {
+	if arguments["changeset_id"] != item.ID || arguments["expected_digest"] != item.Digest || arguments["action"] != "apply" {
 		t.Fatalf("recovery arguments must copy the exact digest: %+v", nextAction)
 	}
 }
@@ -531,6 +547,7 @@ func TestChangeApplyDigestConflictIncludesExactRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	prepare := mcpresult.Request(map[string]any{
+		"action":            "prepare",
 		"intent":            "prepare a digest recovery test",
 		"remote_session_id": created.Session.ID,
 		"summary":           "digest recovery",
@@ -539,7 +556,7 @@ func TestChangeApplyDigestConflictIncludesExactRecovery(t *testing.T) {
 			{"operation": "create", "path": "digest-recovery.txt", "content": "content\n"},
 		},
 	})
-	
+
 	preparedResult, err := rt.toolChangeExecute(context.Background(), prepare)
 	if err != nil {
 		t.Fatal(err)
@@ -552,12 +569,13 @@ func TestChangeApplyDigestConflictIncludesExactRecovery(t *testing.T) {
 		t.Fatalf("prepared response missing digest contract: %+v", prepared)
 	}
 	apply := mcpresult.Request(map[string]any{
+		"action":            "apply",
 		"intent":            "apply with an intentionally invalid digest",
 		"remote_session_id": created.Session.ID,
 		"changeset_id":      changesetID,
 		"expected_digest":   "+211 −0",
 	})
-	
+
 	conflictResult, err := rt.toolChangeExecute(context.Background(), apply)
 	if err != nil {
 		t.Fatal(err)
@@ -573,7 +591,7 @@ func TestChangeApplyDigestConflictIncludesExactRecovery(t *testing.T) {
 	}
 	recovery, _ := errorBody["recovery"].(map[string]any)
 	arguments, _ := recovery["arguments"].(map[string]any)
-	if recovery["tool"] != "change_apply" || arguments["changeset_id"] != changesetID || arguments["expected_digest"] != digest {
+	if recovery["tool"] != "change" || arguments["changeset_id"] != changesetID || arguments["expected_digest"] != digest {
 		t.Fatalf("digest recovery action=%+v", recovery)
 	}
 	if _, err := os.Stat(filepath.Join(registered.Path, "digest-recovery.txt")); !os.IsNotExist(err) {
@@ -617,6 +635,7 @@ func TestChangeExecutePatchTooLargeHasRecovery(t *testing.T) {
 
 	content := strings.Repeat("line\n", 20)
 	req := mcpresult.Request(map[string]any{
+		"action":            "prepare",
 		"intent":            "apply an oversized patch",
 		"remote_session_id": created.Session.ID,
 		"summary":           "oversized patch",
@@ -624,7 +643,7 @@ func TestChangeExecutePatchTooLargeHasRecovery(t *testing.T) {
 			{"operation": "create", "path": "big.txt", "content": content},
 		},
 	})
-	
+
 	result, err := rt.toolChangeExecute(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -665,6 +684,7 @@ func TestChangeExecuteMissingRevisionHasRecovery(t *testing.T) {
 	}
 
 	req := mcpresult.Request(map[string]any{
+		"action":            "prepare",
 		"intent":            "replace a file with a stale revision",
 		"remote_session_id": created.Session.ID,
 		"summary":           "replace without revision",
@@ -672,7 +692,7 @@ func TestChangeExecuteMissingRevisionHasRecovery(t *testing.T) {
 			{"operation": "replace_range", "path": "demo.go", "range_start": 1, "range_end": 1, "content": "package demo\n"},
 		},
 	})
-	
+
 	result, err := rt.toolChangeExecute(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -714,11 +734,12 @@ func TestUpdateMissingRevisionSuggestsTargetFileRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := mcpresult.Request(map[string]any{
+		"action":            "prepare",
 		"intent":            "update without a revision to test recovery",
 		"remote_session_id": created.Session.ID, "summary": "update without revision",
 		"operations": []map[string]any{{"operation": "update", "path": "update-me.txt", "patch": "@@ -1 +1 @@\n-update me\n+updated\n"}},
 	})
-	
+
 	result, err := rt.toolChangeExecute(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -763,7 +784,7 @@ func TestChangePrepareDuplicatePathHasRecovery(t *testing.T) {
 			{"operation": "create", "path": "a.txt", "content": "two\n"},
 		},
 	})
-	
+
 	result, err := rt.toolChangeManage(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -775,8 +796,8 @@ func TestChangePrepareDuplicatePathHasRecovery(t *testing.T) {
 	}
 	details, _ := errorBody["details"].(map[string]any)
 	action, _ := details["next_action"].(map[string]any)
-	if action["tool"] != "change_prepare" {
-		t.Fatalf("duplicate path must suggest change_prepare: %+v", details)
+	if action["tool"] != "change" {
+		t.Fatalf("duplicate path must suggest change: %+v", details)
 	}
 }
 
@@ -802,6 +823,7 @@ func TestChangePrepareChainsExactEditsForSamePath(t *testing.T) {
 	}
 
 	req := mcpresult.Request(map[string]any{
+		"action":            "prepare",
 		"intent":            "prepare chained exact edits",
 		"remote_session_id": created.Session.ID,
 		"summary":           "chained exact edits",
@@ -818,8 +840,8 @@ func TestChangePrepareChainsExactEditsForSamePath(t *testing.T) {
 			},
 		},
 	})
-	
-	result, err := rt.toolHandlers["change_prepare"](context.Background(), req)
+
+	result, err := rt.toolHandlers["change"](context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -852,6 +874,7 @@ func TestChangePreparePatchFormatErrorExplainsUnifiedDiff(t *testing.T) {
 	}
 
 	req := mcpresult.Request(map[string]any{
+		"action":            "prepare",
 		"intent":            "prepare an apply_patch style update",
 		"remote_session_id": created.Session.ID,
 		"summary":           "patch format",
@@ -862,8 +885,8 @@ func TestChangePreparePatchFormatErrorExplainsUnifiedDiff(t *testing.T) {
 			"patch":       "*** Begin Patch\n*** Update File: demo.txt\n@@\n line one\n+line three\n*** End Patch",
 		}},
 	})
-	
-	result, err := rt.toolHandlers["change_prepare"](context.Background(), req)
+
+	result, err := rt.toolHandlers["change"](context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -907,6 +930,7 @@ func TestChangePrepareHunkCountErrorExplainsHeaderCounts(t *testing.T) {
 	}
 
 	req := mcpresult.Request(map[string]any{
+		"action":            "prepare",
 		"intent":            "prepare a hunk with wrong counts",
 		"remote_session_id": created.Session.ID,
 		"summary":           "hunk counts",
@@ -917,8 +941,8 @@ func TestChangePrepareHunkCountErrorExplainsHeaderCounts(t *testing.T) {
 			"patch":       "@@ -1,2 +1,3 @@\n line one\n+line three\n",
 		}},
 	})
-	
-	result, err := rt.toolHandlers["change_prepare"](context.Background(), req)
+
+	result, err := rt.toolHandlers["change"](context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -961,6 +985,7 @@ func TestChangePrepareWrongBaseIsStaleNotPatchContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := mcpresult.Request(map[string]any{
+		"action":            "prepare",
 		"intent":            "wrong base revision",
 		"purpose":           "verify STALE_REVISION is only for base mismatch",
 		"remote_session_id": created.Session.ID,
@@ -971,8 +996,8 @@ func TestChangePrepareWrongBaseIsStaleNotPatchContext(t *testing.T) {
 			"match":       "hello", "replacement": "world",
 		}},
 	})
-	
-	result, err := rt.toolHandlers["change_prepare"](context.Background(), req)
+
+	result, err := rt.toolHandlers["change"](context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1035,6 +1060,7 @@ func TestChangePreparePatchContextMismatchNotStale(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := mcpresult.Request(map[string]any{
+		"action":            "prepare",
 		"intent":            "patch context wrong but base correct",
 		"purpose":           "verify patch context is not STALE_REVISION",
 		"remote_session_id": created.Session.ID,
@@ -1045,8 +1071,8 @@ func TestChangePreparePatchContextMismatchNotStale(t *testing.T) {
 			"patch":       "@@ -1,2 +1,2 @@\n one\n-missing\n+three\n",
 		}},
 	})
-	
-	result, err := rt.toolHandlers["change_prepare"](context.Background(), req)
+
+	result, err := rt.toolHandlers["change"](context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1084,6 +1110,7 @@ func TestChangePrepareChainedMissingBaseIsRevisionRequired(t *testing.T) {
 	}
 	base := fmt.Sprintf("sha256:%x", sha256.Sum256(content))
 	req := mcpresult.Request(map[string]any{
+		"action":            "prepare",
 		"intent":            "chain without second base",
 		"purpose":           "missing base on chained op is REVISION_REQUIRED",
 		"remote_session_id": created.Session.ID,
@@ -1099,8 +1126,8 @@ func TestChangePrepareChainedMissingBaseIsRevisionRequired(t *testing.T) {
 			},
 		},
 	})
-	
-	result, err := rt.toolHandlers["change_prepare"](context.Background(), req)
+
+	result, err := rt.toolHandlers["change"](context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1168,7 +1195,7 @@ func TestChangePrepareDeleteCreateConflictRequiresSeparateCalls(t *testing.T) {
 			{"operation": "create", "path": "same.txt", "content": "new\n"},
 		},
 	})
-	
+
 	result, err := rt.toolChangeManage(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)

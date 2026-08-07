@@ -383,7 +383,7 @@ func (r *Runtime) Start() error {
 	r.registerTools(s)
 	if r.observerSocket != nil {
 		if err := r.observerSocket.Start(); err != nil {
-			logging.With("component", "workspace_observer").Error("start socket failed", "err", err)
+			logging.With("component", "workspace_readr").Error("start socket failed", "err", err)
 			return fmt.Errorf("start workspace observer: %w", err)
 		}
 	}
@@ -934,8 +934,8 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 			{"kind": "artifact", "uri_template": "mcpx://remote-sessions/{remote_session_id}/artifacts/{artifact_id}"},
 		},
 		"recommended_workflows": map[string]any{
-			"bootstrap":     []string{"session_open"},
-			"source_change": []string{"source_read", "change_prepare", "change_apply", "command_run"},
+			"bootstrap":     []string{"session"},
+			"source_change": []string{"source_read", "change", "change", "command_run"},
 		},
 		"client_refresh": map[string]any{
 			"when":    "tool_schema_revision_changed",
@@ -982,7 +982,7 @@ func (r *Runtime) toolWorkspaceList(ctx context.Context, req *mcp.CallToolReques
 			"description": w.Description,
 		})
 	}
-	r.logAudit(audit.Event{RequestID: envReq.RequestID, Tool: "workspace_list", Status: "ok"})
+	r.logAudit(audit.Event{RequestID: envReq.RequestID, Tool: "workspace_read", Status: "ok"})
 	return r.remoteResult(envReq, "", "", map[string]any{"workspaces": items})
 }
 

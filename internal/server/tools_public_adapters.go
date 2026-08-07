@@ -26,6 +26,86 @@ func (r *Runtime) toolWorkspaceObserve(ctx context.Context, req *mcp.CallToolReq
 	return r.toolWorkspaceState(ctx, publicDispatch(req, "action", publicSelector(req, "view")))
 }
 
+// toolWorkspaceRead consolidates list/observe/history behind view.
+func (r *Runtime) toolWorkspaceRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	switch publicSelector(req, "view") {
+	case "list":
+		return r.toolWorkspaceList(ctx, req)
+	case "history":
+		return r.toolWorkspaceHistoryRead(ctx, req)
+	default:
+		return r.toolWorkspaceObserve(ctx, req)
+	}
+}
+
+// toolSession consolidates open + lifecycle transitions behind action.
+func (r *Runtime) toolSession(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	action := publicSelector(req, "action")
+	switch action {
+	case "open":
+		return r.toolSessionOpen(ctx, req)
+	case "update", "handoff", "attach", "close":
+		return r.toolSessionTransition(ctx, publicDispatch(req, "operation", action))
+	default:
+		envReq, _, fail := r.remoteRequest(ctx, req)
+		if fail != nil {
+			return fail, nil
+		}
+		return r.terminalError(envReq, envReq.RemoteSessionID, envReq.Workspace, "bad_request", "action must be open, update, handoff, attach, or close")
+	}
+}
+
+// toolChange consolidates prepare/discard/apply/revert behind action.
+func (r *Runtime) toolChange(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	switch publicSelector(req, "action") {
+	case "prepare":
+		return r.toolChangePreparePublic(ctx, req)
+	case "discard":
+		return r.toolChangeDiscardPublic(ctx, req)
+	case "apply":
+		return r.toolChangeApply(ctx, req)
+	case "revert":
+		return r.toolChangeRevertPublic(ctx, req)
+	default:
+		envReq, _, remote, fail := r.changeRequest(ctx, req, false)
+		if fail != nil {
+			return fail, nil
+		}
+		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "bad_request", "action must be prepare, discard, apply, or revert")
+	}
+}
+
+// toolTask consolidates attach/stop/stdin behind action.
+func (r *Runtime) toolTask(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return r.toolTaskControl(ctx, publicDispatch(req, "operation", publicSelector(req, "action")))
+}
+
+// toolPlan consolidates create + transitions behind action.
+func (r *Runtime) toolPlan(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	action := publicSelector(req, "action")
+	if action == "create" {
+		return r.toolPlanCreatePublic(ctx, req)
+	}
+	return r.toolPlanTransition(ctx, publicDispatch(req, "transition", action))
+}
+
+// toolEnvironment is write-side snapshot create (action=snapshot_create).
+func (r *Runtime) toolEnvironment(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if action := publicSelector(req, "action"); action != "" && action != "snapshot_create" {
+		envReq, _, remote, fail := r.changeRequest(ctx, req, false)
+		if fail != nil {
+			return fail, nil
+		}
+		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "bad_request", "action must be snapshot_create")
+	}
+	return r.toolEnvironmentSnapshotCreate(ctx, req)
+}
+
+// toolArtifact is write-side register.
+func (r *Runtime) toolArtifact(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return r.toolArtifactRegister(ctx, req)
+}
+
 func (r *Runtime) toolWorkspaceHistoryRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {

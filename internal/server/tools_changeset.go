@@ -160,12 +160,14 @@ func changeHistorySummary(remoteSessionID string, history []changeset.Changeset)
 			"summary":      item.Summary,
 			"files":        paths,
 			"next_actions": []map[string]any{
-				nextActionWithReason("change_apply", "继续应用该草稿时复制 changeset_id 和 digest", map[string]any{
+				nextActionWithReason("change", "继续应用该草稿时复制 changeset_id 和 digest", map[string]any{
+					"action":            "apply",
 					"remote_session_id": remoteSessionID,
 					"changeset_id":      item.ID,
 					"expected_digest":   item.Digest,
 				}),
-				nextActionWithReason("change_discard", "该草稿不再需要时一次丢弃，避免继续占用交付状态", map[string]any{
+				nextActionWithReason("change", "该草稿不再需要时一次丢弃，避免继续占用交付状态", map[string]any{
+					"action":            "discard",
 					"remote_session_id": remoteSessionID,
 					"changeset_id":      item.ID,
 				}),
@@ -379,17 +381,19 @@ func changeSummaryDTO(item changeset.Changeset) map[string]any {
 	if strings.TrimSpace(item.Digest) != "" {
 		dto["expected_digest"] = item.Digest
 		if item.Status == "draft" {
-			nextTool := "change_apply"
+			nextTool := "change"
 			nextArguments := map[string]any{
+				"action":            "apply",
 				"remote_session_id": item.RemoteSessionID,
 				"changeset_id":      item.ID,
 				"expected_digest":   item.Digest,
 			}
 			nextReason := "应用此 Changeset 时必须原样复制 digest 到 expected_digest；不要使用 diff 统计、快照 ID 或空值。"
 			if item.SourceChangesetID != "" {
-				nextTool = "change_revert"
+				nextTool = "change"
 				nextReason = "回滚操作必须继续使用源 Changeset ID；digest 只用于识别当前变更，不要把生成的回滚草稿 ID 当作源 ID。"
 				nextArguments = map[string]any{
+					"action":            "revert",
 					"remote_session_id": item.RemoteSessionID,
 					"changeset_id":      item.SourceChangesetID,
 				}
@@ -697,7 +701,7 @@ func (r *Runtime) changeError(envReq envelope.Request, remoteSessionID, workspac
 		if path != "" {
 			arguments["path"] = path
 		}
-		addRecoveryAction(&response, "file_read", "source_read 后复制字段 sha256 → operations[].base_sha256，再 change_prepare", arguments)
+		addRecoveryAction(&response, "file_read", "source_read 后复制字段 sha256 → operations[].base_sha256，再 change", arguments)
 	}
 	if code == "FORMAT_CHANGED" {
 		arguments := map[string]any{"remote_session_id": remoteSessionID, "view": "file", "mode": "full"}
@@ -754,12 +758,12 @@ func attachChangeFieldSemantics(response *envelope.Response, code, path string, 
 	if ordinal != nil {
 		d["failed_ordinal"] = *ordinal
 	}
-	// Fixed copy contract: source_read.sha256 -> change_prepare.operations[].base_sha256
+	// Fixed copy contract: source_read.sha256 -> change.operations[].base_sha256
 	fieldMap := map[string]any{
 		"base_sha256": map[string]any{
 			"from_tool":  "source_read",
 			"from_field": "sha256",
-			"to_tool":    "change_prepare",
+			"to_tool":    "change",
 			"to_field":   "operations[].base_sha256",
 			"rule":       "copy_verbatim",
 			"note":       "形如 sha256:<64 hex>；禁止截断、改前缀或改字段名。create 可省略；delete 可省略；其余改已有文件必填。",
@@ -782,9 +786,9 @@ func attachChangeFieldSemantics(response *envelope.Response, code, path string, 
 			"note":     "create/insert_*/replace_range 用 content。",
 		},
 		"expected_digest": map[string]any{
-			"from_tool":  "change_prepare",
+			"from_tool":  "change",
 			"from_field": "digest",
-			"to_tool":    "change_apply",
+			"to_tool":    "change",
 			"to_field":   "expected_digest",
 			"rule":       "copy_verbatim",
 			"note":       "也可复制 expected_digest 同名字段；禁止填 diff 统计或 changeset_id。",
@@ -798,7 +802,7 @@ func attachChangeFieldSemantics(response *envelope.Response, code, path string, 
 		d["retry"] = map[string]any{
 			"steps": []map[string]any{
 				{"tool": "source_read", "arguments": map[string]any{"session_id": remoteSessionID, "view": "file", "mode": "full", "path": path}},
-				{"tool": "change_prepare", "set": map[string]string{"operations[failed_ordinal].base_sha256": "source_read.sha256"}},
+				{"tool": "change", "set": map[string]string{"operations[failed_ordinal].base_sha256": "source_read.sha256"}},
 			},
 		}
 	case "STALE_REVISION":
@@ -806,7 +810,7 @@ func attachChangeFieldSemantics(response *envelope.Response, code, path string, 
 		d["retry"] = map[string]any{
 			"steps": []map[string]any{
 				{"tool": "source_read", "arguments": map[string]any{"session_id": remoteSessionID, "view": "file", "mode": "full", "path": path}},
-				{"tool": "change_prepare", "set": map[string]string{"operations[failed_ordinal].base_sha256": "source_read.sha256"}, "note": "仅重试该 path/ordinal；其它文件的 base 可不变"},
+				{"tool": "change", "set": map[string]string{"operations[failed_ordinal].base_sha256": "source_read.sha256"}, "note": "仅重试该 path/ordinal；其它文件的 base 可不变"},
 			},
 		}
 	case "PATCH_CONTEXT_NOT_FOUND", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_MISMATCH", "PATCH_HUNKS_OVERLAP", "PATCH_APPLY_FAILED":
@@ -815,15 +819,15 @@ func attachChangeFieldSemantics(response *envelope.Response, code, path string, 
 		d["retry"] = map[string]any{
 			"steps": []map[string]any{
 				{"tool": "source_read", "arguments": map[string]any{"session_id": remoteSessionID, "view": "file", "mode": "full", "path": path}},
-				{"tool": "change_prepare", "note": "用 content 重建 match/replacement；base_sha256=返回的 sha256；优先 exact 操作"},
+				{"tool": "change", "note": "用 content 重建 match/replacement；base_sha256=返回的 sha256；优先 exact 操作"},
 			},
 		}
 	case "DELETE_CREATE_CONFLICT":
 		d["retry"] = map[string]any{
 			"steps": []any{
-				"change_prepare+apply 仅 delete",
+				"change+apply 仅 delete",
 				"source_read/list 确认删除结果",
-				"change_prepare+apply 仅 create",
+				"change+apply 仅 create",
 			},
 		}
 	}

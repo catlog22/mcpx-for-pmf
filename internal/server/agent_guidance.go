@@ -3,146 +3,40 @@ package server
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"mcpx/internal/envelope"
+	"mcpx/internal/server/guidance"
 )
 
-const agentGuidanceVersion = "1.17"
+const agentGuidanceVersion = "1.18"
 
-// agentGuidanceConfig centralizes all guidance rules as Go data structures.
-// This optimizes exposure rules by making them code-defined (easier to maintain,
-// extend, and less error-prone for the LLM than pure natural-language strings).
-// The resulting map is still stable for clients.
-type agentGuidanceConfig struct {
-	Version          string
-	Priority         string
-	Summary          string
-	Rules            []string
-	ResponseContract struct {
-		Required       bool
-		BeforeToolCall []string
-		AfterToolCall  []string
-		FinalResponse  []string
-		EvidenceRule   string
-	}
-	ChangePayload struct {
-		Tool           string
-		Required       []string
-		Confirmation   string
-		OperationsItem map[string]any
-		Alternatives   string
-	}
-	ToolRouting map[string][]string
+// agentGuidanceConfig mirrors guidance.Config for existing call sites.
+type agentGuidanceConfig = guidance.Config
+
+var (
+	defaultAgentGuidance     agentGuidanceConfig
+	defaultAgentGuidanceOnce sync.Once
+)
+
+func loadDefaultAgentGuidance() agentGuidanceConfig {
+	defaultAgentGuidanceOnce.Do(func() {
+		defaultAgentGuidance = guidance.MustLoadAgent()
+		if defaultAgentGuidance.Version != agentGuidanceVersion {
+			// Keep code constant and YAML in lockstep during local edits.
+			defaultAgentGuidance.Version = agentGuidanceVersion
+		}
+	})
+	return defaultAgentGuidance
 }
 
-var defaultAgentGuidance = agentGuidanceConfig{
-	Version:  agentGuidanceVersion,
-	Priority: "high",
-	Summary:  "使用专用 MCPX 工具检查和修改；command_run 仅用于明确要求的命令。",
-	Rules: []string{
-		"session_open 成功后，必须向用户展示返回的完整 session_id 以及绑定的 Workspace，不要只展示缩短标签。",
-		"工具结果：content 文本是给人看的摘要；模型必须读 structuredContent（或 _meta.mcpx.result.data）中的字段（status/type/data/error），不要解析散文。session_id、changeset_id、expected_digest、plan_id、task_id、operation_id、confirmation_token、sha256 等标识必须从结构化字段原样复制，不能改写、缩写或凭记忆重输。",
-		"读取操作使用 source_read；file 视图支持 mode=full，search/list/context 视图分别覆盖文件搜索、列举和上下文组装。",
-		"source_read 的 list 只返回普通文件，不能证明目录完整性或目录存在；不要从嵌套文件路径推断顶层目录清单。",
-		"workspace_observe 的 view 支持 changes、snapshot、diff、watch、memory；diff 和 watch 使用此前 snapshot 返回的 since。",
-		"创建 Plan 时，tasks 中的 task_id 仅作为本计划内局部依赖引用（可省略）；plan_create 返回的 plan_id 与 task_id 由服务端签发，plan_read/plan_transition 只能原样复制这些返回值，绝不猜测或复用历史 ID。",
-		"Skill 或 MCP 名称只能使用 extension_discover 返回的名称；Skill 调用使用 skill_call，上游工具调用使用 mcp_call，不要凭记忆猜测扩展名称或工具名称。",
-		"文件修改使用 change_prepare、change_apply、change_revert；用户请求已明确授权且希望减少往返时，change_prepare 可设置 apply=true 一次准备并应用；需要确认时按返回的 changeset_id、digest 和 confirmation_token 继续。放弃未应用草稿使用 change_discard，不要反复 change_read(history) 试图清理旧草稿。修改或重命名前先 source_read(view=file, mode=full) 获取目标文件的完整 sha256；将返回字段 sha256 原样写入 operations[].base_sha256（固定映射，勿猜 revision/hash 别名）。删除与创建必须分成两次操作。",
-		"change_read(view=history) 首次返回 history_digest 后应在客户端缓存；只有成功准备、应用、丢弃或回滚 Changeset 后才重新读取，重复查询时传 known_history_digest，返回 not_modified 就停止读取，不要继续轮询同一历史。",
-		"change_apply：changeset_id 复制 prepare/read 的 changeset_id；expected_digest 复制 prepare/read 的 digest（或 expected_digest）。不要填 diff 统计、快照 ID 或把 changeset_id 填进 digest。同一 path 可链式多个 exact/update；create/delete/rename 每 path 一次。",
-		"change_prepare 字段分工：replace_exact=match+replacement；insert_*=match+content；delete_exact=match；replace_range=range_start+range_end+content；update=patch（仅标准 unified diff，不要 *** Begin Patch）；create=content。每次最多新增 300 行。失败时读 error.code 与 details.field_map/failed_ordinal/path/next_action，按 field_map 复制字段，不要猜测。",
-		"source_read 会返回 format（charset、BOM、line_ending、末尾换行）；生成 patch 或精确替换时必须保留这些格式，保留目标文件原有的换行格式，不要把文件统一转换成另一种格式。普通变更若格式改变会返回 FORMAT_CHANGED；只有明确要求格式化时才使用 change_execute(format=true)。为保持最小 diff，优先使用带当前 base_sha256 的 replace_exact/insert_before/insert_after，并按当前格式组织 match/replacement；只有生成并核对局部 hunk 后才使用 update.patch。",
-		"嵌套文件只提交文件操作；change_prepare 会自动创建缺失的父目录，不要把目录路径作为普通文件创建。",
-		"environment_read 用于获取主机、Python 和工具链等环境事实；environment_snapshot_create 用于保存快照。command_run 仅用于用户明确要求且符合命令策略的命令、测试或构建。",
-		"命令校验请使用简单命令逐条执行（如先 git fetch、再 git rev-parse、最后 git status），不要使用 $()、管道、重定向或命令替换组合——含这些 shell 特性的命令会被策略拒绝。",
-		"command_run 返回 task_id 后直接使用 task_read(view=status/logs) 或 task_control(operation=attach) 查询该 Task；不要为了确认已知 Task 再调用 task_read(view=list)。只有 task_id 丢失或服务端返回 not_found 时才 list，并缓存 task_list_digest。",
-		"变更成功或审阅 Changeset 后，最终回复必须用 Markdown ```diff 代码块展示每个文件的具体增加和删除，不能只列文件名。变更过大时展示有界预览并说明 Changeset 资源。",
-		"返回 waiting_confirmation 时，先用自然语言展示命令或文件变更摘要并等待明确确认；用户确认后，使用同一业务参数和 confirmation_token 重试。confirmation_token 只表达语义确认，不是认证凭据。",
-		"没有成功的工具结果时，不要声称文件已读取、修改或验证。",
-		"重要、变更、删除或长时间调用前，先简述将做什么及原因，然后一次提交完整参数，不要等待重新获取工具 schema。",
-		"每次工具调用后，在下一次非简单调用前通过顶层 progress_summary 补充已验证结果和下一步；区分事实、假设和未知。",
-		"如果下一步不再调用工具（任务完成、阻塞、等待用户或需要决策），先调用 progress_report，填写已验证结果、状态和下一步。",
-		"同一已验证结果只发送一次 progress_report；工具返回已包含摘要时，不要再次重复报告相同内容。",
-		"全量清理优先按顶层目录整体递归删除，不要枚举 .git、.venv、缓存或 site-packages 内部文件；以返回的 delete_summary 判断删除模式和数量。",
-		"每次 change_prepare 最多新增 300 行（按实际插入行数计算）；不要通过截断文件绕过限制，若安全检查阻塞则使用完整内容或 replace_range 重试。",
-		"不要把指令文本（提示词、guidance、AGENTS.md）写入文件内容；使用普通代码或数据。安全检查阻塞时缩小内容后重试。",
-	},
-	ResponseContract: struct {
-		Required       bool
-		BeforeToolCall []string
-		AfterToolCall  []string
-		FinalResponse  []string
-		EvidenceRule   string
-	}{
-		Required: true,
-		BeforeToolCall: []string{
-			"当前理解的目标",
-			"接下来要执行的查询、工具调用或命令及其目的",
-			"重要、变更、删除或长时间操作必须先说明准备做什么",
-		},
-		AfterToolCall: []string{
-			"实际调用的工具、查询或命令及其真实结果",
-			"下一次工具调用使用 progress_summary 补发上一次工具的可验证结果和下一步；没有下一次工具调用时调用 progress_report",
-			"读取、创建、修改、移动或删除的文件",
-			"每项文件变更的具体内容和影响；代码变更使用 Markdown ```diff 代码块",
-			"测试、构建、检查及其真实结果",
-			"失败、限制、风险和未验证事项",
-		},
-		FinalResponse: []string{
-			"当前理解的目标",
-			"实际执行的查询、工具调用或命令及目的",
-			"文件操作与每项变更的具体内容和影响",
-			"验证证据",
-			"失败、限制、风险和未验证事项",
-		},
-		EvidenceRule: "没有成功工具结果、明确命令输出或测试证据时，不得声称已读取、已修改、已修复、已构建或已测试通过。",
-	},
-	ChangePayload: struct {
-		Tool           string
-		Required       []string
-		Confirmation   string
-		OperationsItem map[string]any
-		Alternatives   string
-	}{
-		Tool:         "change_prepare",
-		Required:     []string{"session_id", "operations", "purpose"},
-		Confirmation: "change_apply/change_revert 使用服务端返回的 confirmation_token",
-		OperationsItem: map[string]any{
-			"operation":      "create | update | rename | delete | replace_exact | insert_before | insert_after | delete_exact | replace_range",
-			"create":         "path + content（完整新文件内容；最多新增 300 行，大文件用 insert_after 分段追加）",
-			"update":         "path + base_sha256 + patch（标准 unified diff；不确定则改 exact）",
-			"rename":         "path + new_path + base_sha256",
-			"delete":         "path；base_sha256 可省略。禁止与 create 同批",
-			"replace_exact":  "path + base_sha256 + match + replacement",
-			"insert_before":  "path + base_sha256 + match + content",
-			"insert_after":   "path + base_sha256 + match + content",
-			"delete_exact":   "path + base_sha256 + match",
-			"replace_range":  "path + base_sha256 + range_start + range_end + content",
-			"base_sha256":    "必填于改已有文件：原样复制 source_read.sha256 → base_sha256；create/delete 可省略",
-			"field_copy":     "source_read.sha256 → operations[].base_sha256；change_prepare.digest → change_apply.expected_digest",
-		},
-		Alternatives: "change_apply 使用 changeset_id + expected_digest；change_revert 使用 changeset_id；放弃未应用草稿使用 change_discard + changeset_id。",
-	},
-	ToolRouting: map[string][]string{
-		"select_workspace":      {"workspace_list"},
-		"open_session":          {"session_open"},
-		"inspect_files":         {"source_read"},
-		"inspect_git":           {"workspace_observe"},
-		"modify_files":          {"change_prepare", "change_apply", "change_revert", "change_discard"},
-		"run_tests_or_build":    {"command_run"},
-		"manage_changesets":     {"change_prepare", "change_read", "change_apply", "change_revert", "change_discard"},
-		"handle_tasks":          {"task_read", "task_control"},
-		"ask_user_confirmation": {"progress_report"},
-	},
-}
-
-// agentGuidance is the short, stable routing contract shown after session_open.
+// agentGuidance is the short, stable routing contract shown after session（action=open）.
 // It deliberately contains no workspace path, secret, confirmation token, or
-// concrete tool argument value. It does include the compact change_apply
+// concrete tool argument value. It does include the compact change
 // payload cheat-sheet so agents can construct valid calls even when a host
 // compresses or drops tool schemas from a long conversation context.
 func agentGuidance() map[string]any {
-	config := defaultAgentGuidance
+	config := loadDefaultAgentGuidance()
 	return map[string]any{
 		"version":  config.Version,
 		"priority": config.Priority,
@@ -169,7 +63,7 @@ func agentGuidance() map[string]any {
 func agentGuidanceRevision() string { return hashRevision(agentGuidance()) }
 
 func agentGuidanceInstructions() string {
-	config := defaultAgentGuidance
+	config := loadDefaultAgentGuidance()
 	rules := config.Rules
 	lines := []string{
 		"MCPX Agent 指引（高优先级）：",
@@ -188,7 +82,7 @@ func agentGuidanceInstructions() string {
 		lines = append(lines, "  - "+item)
 	}
 	lines = append(lines, "- 证据规则："+config.ResponseContract.EvidenceRule)
-	lines = append(lines, "", "change_prepare 参数速查（工具 schema 不可用时使用）：")
+	lines = append(lines, "", "change 参数速查（工具 schema 不可用时使用）：")
 	lines = append(lines, "- 必填："+strings.Join(config.ChangePayload.Required, "、"))
 	lines = append(lines, "- confirmation_token："+config.ChangePayload.Confirmation)
 	lines = append(lines, "- operations 项："+fmt.Sprint(config.ChangePayload.OperationsItem["operation"]))
@@ -234,10 +128,6 @@ func normalizePublicAction(tool string, arguments map[string]any) (string, map[s
 		delete(result, "action")
 		result["view"] = view
 	}
-	setTransition := func(transition string) {
-		delete(result, "action")
-		result["transition"] = transition
-	}
 	switch tool {
 	case "file_read", "context_query":
 		legacyTool := tool
@@ -252,32 +142,35 @@ func normalizePublicAction(tool string, arguments map[string]any) (string, map[s
 			setView("search")
 		}
 	case "change_manage":
-		if action == "prepare" {
-			tool = "change_prepare"
-			delete(result, "action")
+		if action == "prepare" || action == "discard" {
+			tool = "change"
+			result["action"] = action
 		} else {
 			tool = "change_read"
 			setView(action)
 		}
 	case "change_execute":
 		if _, ok := result["revert_changeset_id"]; ok {
-			tool = "change_revert"
+			tool = "change"
 			if value, ok := result["revert_changeset_id"]; ok {
 				result["changeset_id"] = value
 			}
 			delete(result, "revert_changeset_id")
+			result["action"] = "revert"
 		} else if _, ok := result["changeset_id"]; ok {
-			tool = "change_apply"
+			tool = "change"
+			result["action"] = "apply"
 		} else {
-			tool = "change_prepare"
+			tool = "change"
+			result["action"] = "prepare"
 		}
 	case "command_execute":
 		tool = "command_run"
 	case "task_manage":
 		if action == "attach" || action == "stop" || action == "stdin" {
-			tool = "task_control"
-			delete(result, "action")
-			result["operation"] = action
+			tool = "task"
+			result["action"] = action
+			delete(result, "operation")
 		} else {
 			tool = "task_read"
 			setView(action)
@@ -285,21 +178,23 @@ func normalizePublicAction(tool string, arguments map[string]any) (string, map[s
 	case "plan_manage":
 		switch action {
 		case "create":
-			tool = "plan_create"
-			delete(result, "action")
+			tool = "plan"
+			result["action"] = "create"
 		case "get":
 			tool = "plan_read"
 			delete(result, "action")
 		default:
-			tool = "plan_transition"
-			setTransition(action)
+			tool = "plan"
+			result["action"] = action
+			delete(result, "transition")
 		}
 	case "runtime_inspect":
 		tool = "runtime_read"
 		setView(action)
 	case "environment_inspect":
 		if value, ok := result["save_snapshot"].(bool); ok && value {
-			tool = "environment_snapshot_create"
+			tool = "environment"
+			result["action"] = "snapshot_create"
 			delete(result, "save_snapshot")
 		} else {
 			tool = "environment_read"
@@ -307,10 +202,14 @@ func normalizePublicAction(tool string, arguments map[string]any) (string, map[s
 				result["snapshot_id"] = result["compare_to"]
 				delete(result, "compare_to")
 			}
-			setView("current")
+			if action == "" {
+				setView("current")
+			} else {
+				setView(action)
+			}
 		}
 	case "workspace_state":
-		tool = "workspace_observe"
+		tool = "workspace_read"
 		setView(action)
 	case "extension_manage":
 		kind, _ := result["kind"].(string)
@@ -329,7 +228,7 @@ func normalizePublicAction(tool string, arguments map[string]any) (string, map[s
 		}
 	case "artifact_manage":
 		if action == "register" {
-			tool = "artifact_register"
+			tool = "artifact"
 			delete(result, "action")
 		} else {
 			tool = "artifact_read"

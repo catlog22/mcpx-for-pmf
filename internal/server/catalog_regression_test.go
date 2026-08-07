@@ -18,15 +18,15 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 	if _, exists := tools["approval_manage"]; exists {
 		t.Fatal("approval_manage must not be exposed; semantic confirmation uses the original tool")
 	}
-	for _, name := range []string{"workspace_list", "source_read", "workspace_observe", "runtime_read", "environment_read"} {
+	for _, name := range []string{"workspace_read", "source_read", "change_read", "runtime_read", "environment_read"} {
 		annotation := tools[name].Annotations
 		if !annotation.ReadOnlyHint || annotation.DestructiveHint != nil && *annotation.DestructiveHint || !annotation.IdempotentHint {
 			t.Fatalf("%s annotation is unsafe or incomplete: %+v", name, annotation)
 		}
 	}
-	sessionAnnotation := tools["session_open"].Annotations
+	sessionAnnotation := tools["session"].Annotations
 	if sessionAnnotation.DestructiveHint != nil && *sessionAnnotation.DestructiveHint {
-		t.Fatalf("session_open should not be marked destructive: %+v", sessionAnnotation)
+		t.Fatalf("session should not be marked destructive: %+v", sessionAnnotation)
 	}
 	for _, name := range []string{"command_run"} {
 		annotation := tools[name].Annotations
@@ -43,11 +43,11 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 		t.Fatalf("command_run schema must expose the public semantic fields: %+v", commandProperties)
 	}
 	var sessionSchema map[string]any
-	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(tools["session_open"]), &sessionSchema); err != nil {
+	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(tools["session"]), &sessionSchema); err != nil {
 		t.Fatal(err)
 	}
 	if _, exists := sessionSchema["properties"].(map[string]any)["include_skills"]; exists {
-		t.Fatal("session_open must not expose request-level include_skills; use server discovery.skills config")
+		t.Fatal("session must not expose request-level include_skills; use server discovery.skills config")
 	}
 	var sourceSchema map[string]any
 	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(tools["source_read"]), &sourceSchema); err != nil {
@@ -67,32 +67,32 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 	}
 
 	request := mcpresult.Request(map[string]any{"intent": "open the demo workspace", "workspace": "demo"})
-	
+
 	result, err := rt.toolSessionOpen(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	data := structuredBusinessData(result)
 	if data == nil {
-		t.Fatalf("session_open structured content type=%T", result.StructuredContent)
+		t.Fatalf("session structured content type=%T", result.StructuredContent)
 	}
 	instructions, _ := data["instructions"].(map[string]any)
 	if instructions["inline"] != false {
-		t.Fatalf("session_open should default to instruction metadata only: %+v", instructions)
+		t.Fatalf("session should default to instruction metadata only: %+v", instructions)
 	}
 	if data["project_tasks"] != nil {
-		t.Fatalf("session_open should not expand project tasks by default: %+v", data["project_tasks"])
+		t.Fatalf("session should not expand project tasks by default: %+v", data["project_tasks"])
 	}
 	for _, item := range asMapSlice(data["tools"]) {
 		if _, exists := item["input_schema"]; exists {
-			t.Fatalf("session_open should not inline full tool schemas: %+v", item)
+			t.Fatalf("session should not inline full tool schemas: %+v", item)
 		}
 	}
 
 	remote := data["remote_session"].(map[string]any)
 	remoteID := remote["id"].(string)
 	capabilityRequest := mcpresult.Request(map[string]any{"intent": "inspect capabilities", "action": "capabilities", "remote_session_id": remoteID})
-	
+
 	capabilityResult, err := rt.toolRuntimeInspect(context.Background(), capabilityRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -105,7 +105,7 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 	}
 
 	capabilityRequest = mcpresult.Request(map[string]any{"intent": "inspect capability schemas", "action": "capabilities", "remote_session_id": remoteID, "include_tool_schemas": true})
-	
+
 	capabilityResult, err = rt.toolRuntimeInspect(context.Background(), capabilityRequest)
 	if err != nil {
 		t.Fatal(err)

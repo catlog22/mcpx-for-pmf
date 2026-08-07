@@ -242,7 +242,7 @@ func (r *Runtime) changeDigestConflict(envReq envelope.Request, session remotese
 		response.Error.Details["expected_digest"] = item.Digest
 		response.Error.Details["provided_digest"] = providedDigest
 	}
-	addRecoveryAction(&response, "change_apply", "使用当前 Changeset 返回的完整 digest 原样重试；它不是 diff 统计或工作区快照 ID。", map[string]any{
+	addRecoveryAction(&response, "change", "使用当前 Changeset 返回的完整 digest 原样重试；它不是 diff 统计或工作区快照 ID。", map[string]any{
 		"remote_session_id": session.ID,
 		"changeset_id":      item.ID,
 		"expected_digest":   item.Digest,
@@ -273,7 +273,7 @@ func (r *Runtime) executeRevertChange(ctx context.Context, envReq envelope.Reque
 	if apply, exists := envReq.Payload["apply"].(bool); exists && !apply {
 		return changeDiffResult(revert), nil
 	}
-	// A public change_revert is bound to the source Changeset ID. The generated
+	// A public change is bound to the source Changeset ID. The generated
 	// revert draft is intentionally recreated on retry, so binding the semantic
 	// confirmation to the generated draft would make the returned token unusable.
 	effective := r.effectiveConfig(session.WorkspacePath)

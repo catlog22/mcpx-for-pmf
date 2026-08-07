@@ -105,26 +105,26 @@ func (r *Runtime) remoteError(envReq envelope.Request, remoteSessionID, workspac
 	}
 	message := err.Error()
 	if code == "not_found" {
-		message = "remote session not found：session_id 必须原样复制 session_open 返回的完整值，不能改写、缩写或凭记忆重输。"
+		message = "remote session not found：session_id 必须原样复制 session 返回的完整值，不能改写、缩写或凭记忆重输。"
 	}
 	resp := envelope.Fail(status, envReq.RequestID, workspace, nil, code, message)
 	resp.RemoteSessionID = remoteSessionID
 	switch code {
 	case "workspace_not_found":
-		addRecoveryAction(&resp, "workspace_list", "select a valid workspace before retrying session_open", nil)
+		addRecoveryAction(&resp, "workspace_read", "select a valid workspace before retrying session", nil)
 		addRecoveryActions(&resp,
-			nextActionWithReason("workspace_list", "refresh the available workspace names", nil),
-			nextActionWithReason("session_open", "open a Remote Session after selecting a workspace", map[string]any{"workspace": workspace}),
+			nextActionWithReason("workspace_read", "refresh the available workspace names", nil),
+			nextActionWithReason("session", "open a Remote Session after selecting a workspace", map[string]any{"workspace": workspace}),
 		)
 	case "not_found":
 		if remoteSessionID != "" {
-			addRecoveryAction(&resp, "workspace_list", "refresh workspace selection before opening a new Remote Session", nil)
+			addRecoveryAction(&resp, "workspace_read", "refresh workspace selection before opening a new Remote Session", nil)
 		}
 	case "remote_session_required":
 		if workspace != "" {
-			addRecoveryAction(&resp, "session_open", "open or resume a Remote Session before using this tool", map[string]any{"workspace": workspace})
+			addRecoveryAction(&resp, "session", "open or resume a Remote Session before using this tool", map[string]any{"workspace": workspace})
 		} else {
-			addRecoveryAction(&resp, "workspace_list", "select a workspace before opening a Remote Session", nil)
+			addRecoveryAction(&resp, "workspace_read", "select a workspace before opening a Remote Session", nil)
 		}
 	}
 	return r.resultJSON(resp)
@@ -292,7 +292,7 @@ func (r *Runtime) toolRemoteSessionAttach(ctx context.Context, req *mcp.CallTool
 	}
 	return r.remoteResult(envReq, session.ID, session.WorkspaceName, map[string]any{
 		"session":                session,
-		"recommended_next_calls": []string{"session_open", "session_read", "workspace_observe", "task_read"},
+		"recommended_next_calls": []string{"session", "session_read", "workspace_read", "task_read"},
 	})
 }
 

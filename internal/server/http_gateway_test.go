@@ -13,11 +13,8 @@ import (
 	"testing"
 	"time"
 
-	
-
-	"mcpx/internal/mcpresult"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
+	"mcpx/internal/mcpresult"
 
 	"mcpx/internal/config"
 	"mcpx/internal/oauth"

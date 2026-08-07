@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"mcpx/internal/artifact"
 	"mcpx/internal/mcpresult"
-
 	"mcpx/internal/remotesession"
 	"mcpx/internal/security"
 )
@@ -73,9 +72,12 @@ func (r *Runtime) toolArtifactRead(ctx context.Context, req *mcp.CallToolRequest
 		"artifact": read.Artifact, "offset": read.Offset, "next_offset": read.Next,
 		"eof": read.EOF, "encoding": read.Encoding, "data": read.Data,
 	}
+	if len(read.Format) > 0 {
+		data["format"] = read.Format
+	}
 	if !read.EOF {
-		data["next_action"] = nextAction("artifact_manage", map[string]any{
-			"action": "read", "remote_session_id": remote.ID, "artifact_id": artifactID, "offset": read.Next, "limit": intPayload(envReq.Payload, "limit"),
+		data["next_action"] = nextAction("artifact_read", map[string]any{
+			"view": "content", "session_id": remote.ID, "artifact_id": artifactID, "offset": read.Next, "limit": intPayload(envReq.Payload, "limit"),
 		})
 	}
 	return compactToolResult(data, fmt.Sprintf("Read artifact %s at byte offset %d.", artifactID, read.Offset)), nil
@@ -98,10 +100,19 @@ func (r *Runtime) resourceArtifact(ctx context.Context, req *mcp.ReadResourceReq
 	if err != nil {
 		return nil, err
 	}
-	if utf8.Valid(content) && artifactTextMIME(registered.MIMEType) {
-		return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: req.Params.URI, MIMEType: registered.MIMEType, Text: string(content)}}}, nil
+	pres := artifact.PresentText(registered.Path, content, registered.MIMEType)
+	if pres.OK {
+		return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{
+			URI: req.Params.URI, MIMEType: pres.MIME, Text: string(pres.UTF8),
+		}}}, nil
 	}
-	return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: req.Params.URI, MIMEType: registered.MIMEType, Blob: content}}}, nil
+	mimeType := pres.RawMIME
+	if mimeType == "" {
+		mimeType = registered.MIMEType
+	}
+	return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{
+		URI: req.Params.URI, MIMEType: mimeType, Blob: content,
+	}}}, nil
 }
 
 func parseArtifactURI(value string) (string, string, error) {
@@ -123,8 +134,4 @@ func validArtifactKind(value string) bool {
 	default:
 		return false
 	}
-}
-
-func artifactTextMIME(value string) bool {
-	return strings.HasPrefix(value, "text/") || strings.Contains(value, "json") || strings.Contains(value, "xml") || strings.Contains(value, "yaml")
 }
