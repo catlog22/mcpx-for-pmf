@@ -11,7 +11,9 @@ import (
 const (
 	defaultAsyncBuffer = 256
 	defaultAsyncDrain  = 2 * time.Second
-	asyncWriteTimeout  = 2 * time.Second
+	// Longer than a busy SQLite write under concurrent tool storms; request
+	// path never waits on this (Enqueue is non-blocking).
+	asyncWriteTimeout = 15 * time.Second
 )
 
 // AsyncRecorder writes observation events off the tools/call hot path.

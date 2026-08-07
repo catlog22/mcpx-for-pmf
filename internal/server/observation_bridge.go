@@ -22,7 +22,11 @@ import (
 )
 
 const observationSummaryMaxBytes = 8 << 10
-const observationWriteTimeout = 2 * time.Second
+
+// observationWriteTimeout bounds SQLite append only. Must not inherit the
+// tools/call request deadline (WithoutCancel still preserves deadlines), or
+// busy DB writes surface as "context deadline exceeded" after OAuth/session.
+const observationWriteTimeout = 10 * time.Second
 
 type observationTaskStreamKey struct {
 	taskID          string
@@ -62,7 +66,9 @@ func (b *observationBridge) Record(ctx context.Context, event observation.Event)
 		event.Output, truncated = observation.SanitizeJSON(event.Output, observation.MaxEventBytes)
 		event.Truncated = event.Truncated || truncated
 	}
-	writeCtx, cancel := context.WithTimeout(observationContext(ctx), observationWriteTimeout)
+	// Always use an independent background budget so async/sync observation
+	// never fails because the HTTP request context already expired.
+	writeCtx, cancel := context.WithTimeout(context.Background(), observationWriteTimeout)
 	defer cancel()
 	persisted, err := b.store.Append(writeCtx, event)
 	if err != nil {
@@ -70,6 +76,7 @@ func (b *observationBridge) Record(ctx context.Context, event observation.Event)
 			"workspace", event.Workspace, "type", event.Type, "err", err)
 		return err
 	}
+	_ = ctx // retained for call-site symmetry; resolution uses observationContext elsewhere
 	b.broker.Publish(persisted)
 	return nil
 }
