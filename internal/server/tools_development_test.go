@@ -1,6 +1,8 @@
 package server
 
 import (
+	"mcpx/internal/mcpresult"
+
 	"context"
 	"os"
 	"path/filepath"
@@ -8,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/auth"
 	"mcpx/internal/config"
@@ -91,29 +93,29 @@ func TestProjectTaskAndArtifactRemoteSessionFlow(t *testing.T) {
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	var logsRequest mcp.CallToolRequest
-	logsRequest.Params.Arguments = map[string]any{"intent": "read task logs", "remote_session_id": remoteSessionID, "action": "logs", "task_id": taskID, "stdout_offset": 0, "stderr_offset": 0}
+	logsRequest := mcpresult.Request(map[string]any{"intent": "read task logs", "remote_session_id": remoteSessionID, "action": "logs", "task_id": taskID, "stdout_offset": 0, "stderr_offset": 0})
+	
 	logsResult, err := runtime.toolTaskManage(ctx, logsRequest)
 	if err != nil || len(logsResult.Content) < 1 {
 		t.Fatalf("terminal logs result=%+v err=%v", logsResult, err)
 	}
-	logText, ok := logsResult.Content[0].(mcp.TextContent)
+	logText, ok := logsResult.Content[0].(*mcp.TextContent)
 	if !ok {
 		t.Fatalf("terminal logs text type=%T", logsResult.Content[0])
 	}
 	if !strings.Contains(logText.Text, "example.invalid/project") {
 		t.Fatalf("task logs must stay inline in the result text: %q", logText.Text)
 	}
-	logResources, err := runtime.resourceTaskLogs(ctx, mcp.ReadResourceRequest{Params: mcp.ReadResourceParams{URI: "mcpx://remote-sessions/" + remoteSessionID + "/tasks/" + taskID + "/logs"}})
-	if err != nil || len(logResources) != 1 {
+	logResources, err := runtime.resourceTaskLogs(ctx, &mcp.ReadResourceRequest{Params: &mcp.ReadResourceParams{URI: "mcpx://remote-sessions/" + remoteSessionID + "/tasks/" + taskID + "/logs"}})
+	if err != nil || logResources == nil || len(logResources.Contents) != 1 {
 		t.Fatalf("read terminal log resource: resources=%+v err=%v", logResources, err)
 	}
 
-	var registerRequest mcp.CallToolRequest
-	registerRequest.Params.Arguments = map[string]any{
+	registerRequest := mcpresult.Request(map[string]any{
 		"intent":            "register the test report artifact",
 		"remote_session_id": remoteSessionID, "path": "report.txt", "kind": "test_report", "name": "Go test report",
-	}
+	})
+	
 	registeredResult, err := runtime.toolArtifactRegister(ctx, registerRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -121,16 +123,16 @@ func TestProjectTaskAndArtifactRemoteSessionFlow(t *testing.T) {
 	if len(registeredResult.Content) < 2 {
 		t.Fatalf("artifact result content=%+v", registeredResult.Content)
 	}
-	link, ok := registeredResult.Content[1].(mcp.ResourceLink)
+	link, ok := registeredResult.Content[1].(*mcp.ResourceLink)
 	if !ok || link.URI == "" {
 		t.Fatalf("resource link=%+v", registeredResult.Content[1])
 	}
-	resources, err := runtime.resourceArtifact(ctx, mcp.ReadResourceRequest{Params: mcp.ReadResourceParams{URI: link.URI}})
+	resources, err := runtime.resourceArtifact(ctx, &mcp.ReadResourceRequest{Params: &mcp.ReadResourceParams{URI: link.URI}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	text, ok := resources[0].(mcp.TextResourceContents)
-	if !ok || text.Text != "all checks passed\n" {
+	rc := resources.Contents[0]
+	if rc == nil || rc.Text != "all checks passed\n" {
 		t.Fatalf("resource=%+v", resources)
 	}
 }
@@ -152,14 +154,14 @@ func TestCommandExecuteInlinesSmallOutputWithoutLogLink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var req mcp.CallToolRequest
-	req.Params.Arguments = map[string]any{
+	req := mcpresult.Request(map[string]any{
 		"intent":            "run a small command",
 		"remote_session_id": created.Session.ID,
 		"command":           "printf hello-stdout",
 		"purpose":           "verify inline stdout rendering",
 		"scope":             "workspace",
-	}
+	})
+	
 	result, err := rt.toolCommandExecute(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +169,7 @@ func TestCommandExecuteInlinesSmallOutputWithoutLogLink(t *testing.T) {
 	if len(result.Content) != 1 {
 		t.Fatalf("small completed command must not attach a log resource: %+v", result.Content)
 	}
-	content, ok := result.Content[0].(mcp.TextContent)
+	content, ok := result.Content[0].(*mcp.TextContent)
 	if !ok {
 		t.Fatalf("content type = %T", result.Content[0])
 	}
@@ -197,14 +199,14 @@ func TestCommandExecuteTruncatedOutputStaysInline(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var req mcp.CallToolRequest
-	req.Params.Arguments = map[string]any{
+	req := mcpresult.Request(map[string]any{
 		"intent":            "run a command with bounded output",
 		"remote_session_id": created.Session.ID,
 		"command":           "printf abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz",
 		"purpose":           "verify truncated output stays inline",
 		"scope":             "workspace",
-	}
+	})
+	
 	result, err := rt.toolCommandExecute(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -212,7 +214,7 @@ func TestCommandExecuteTruncatedOutputStaysInline(t *testing.T) {
 	if len(result.Content) != 1 {
 		t.Fatalf("no file resource may be attached to the conversation: %+v", result.Content)
 	}
-	content, ok := result.Content[0].(mcp.TextContent)
+	content, ok := result.Content[0].(*mcp.TextContent)
 	if !ok {
 		t.Fatalf("content type = %T", result.Content[0])
 	}

@@ -8,7 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/mcpresult"
 
 	"mcpx/internal/arc"
 	"mcpx/internal/envelope"
@@ -16,8 +18,8 @@ import (
 	"mcpx/internal/terminal"
 )
 
-func executionMode(req mcp.CallToolRequest) string {
-	mode, _ := req.GetArguments()["execution_mode"].(string)
+func executionMode(req *mcp.CallToolRequest) string {
+	mode, _ := mcpresult.Arguments(req)["execution_mode"].(string)
 	return strings.ToLower(strings.TrimSpace(mode))
 }
 
@@ -30,7 +32,7 @@ func asyncEligibleTool(name string) bool {
 	}
 }
 
-func (r *Runtime) submitAsyncTool(ctx context.Context, name string, req mcp.CallToolRequest, envReq envelope.Request) (*mcp.CallToolResult, error) {
+func (r *Runtime) submitAsyncTool(ctx context.Context, name string, req *mcp.CallToolRequest, envReq envelope.Request) (*mcp.CallToolResult, error) {
 	if r.operations == nil {
 		return r.terminalError(envReq, envReq.RemoteSessionID, envReq.Workspace, "operation_unavailable", "asynchronous operations are unavailable")
 	}
@@ -46,7 +48,7 @@ func (r *Runtime) submitAsyncTool(ctx context.Context, name string, req mcp.Call
 	if err != nil {
 		return r.remoteError(envReq, remoteID, envReq.Workspace, err)
 	}
-	arguments := cloneArguments(req.GetArguments())
+	arguments := cloneArguments(mcpresult.Arguments(req))
 	delete(arguments, "execution_mode")
 	record, err := r.operations.Submit(ctx, operation.SubmitSpec{
 		RemoteSessionID: session.ID,
@@ -78,8 +80,7 @@ func (r *Runtime) executeOperationStep(ctx context.Context, input operation.Exec
 	arguments["session_id"] = input.RemoteSessionID
 	arguments["purpose"] = input.Purpose
 	arguments["execution_mode"] = "sync"
-	request := mcp.CallToolRequest{}
-	request.Params.Arguments = arguments
+	request := mcpresult.Request(arguments)
 	childCtx := r.operationChildContext(ctx, input)
 	result, callErr := handler(childCtx, request)
 	if callErr == nil && (input.Tool == "command_run" || input.Tool == "command_execute") {
@@ -130,7 +131,7 @@ func resultTaskID(result *mcp.CallToolResult) string {
 		return ""
 	}
 	if result.Meta != nil {
-		if metadata, ok := result.Meta.AdditionalFields[arc.ResultMetadataKey]; ok {
+		if metadata, ok := result.Meta[arc.ResultMetadataKey]; ok {
 			switch typed := metadata.(type) {
 			case arc.Envelope:
 				if taskID := strings.TrimSpace(findStringValue(typed.MCPX.Result.Data, "task_id")); strings.HasPrefix(taskID, "task_") {
@@ -146,7 +147,7 @@ func resultTaskID(result *mcp.CallToolResult) string {
 		}
 	}
 	for _, content := range result.Content {
-		textContent, ok := content.(mcp.TextContent)
+		textContent, ok := content.(*mcp.TextContent)
 		if !ok {
 			continue
 		}
@@ -202,7 +203,7 @@ func operationResult(result *mcp.CallToolResult, callErr error) operation.Execut
 
 func operationResultStatus(result *mcp.CallToolResult) string {
 	for _, content := range result.Content {
-		textContent, ok := content.(mcp.TextContent)
+		textContent, ok := content.(*mcp.TextContent)
 		if !ok {
 			continue
 		}
@@ -249,7 +250,7 @@ func resultConfirmationToken(result *mcp.CallToolResult) string {
 		return ""
 	}
 	for _, content := range result.Content {
-		textContent, ok := content.(mcp.TextContent)
+		textContent, ok := content.(*mcp.TextContent)
 		if !ok {
 			continue
 		}

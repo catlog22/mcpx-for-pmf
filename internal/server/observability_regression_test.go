@@ -13,7 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/mcpresult"
 
 	"mcpx/internal/config"
 	"mcpx/internal/logging"
@@ -53,20 +55,20 @@ func TestToolLogRecordsDuration(t *testing.T) {
 	logging.Init(logging.Options{Level: "info", Format: "text", Out: &output})
 	defer logging.Init(logging.Options{Level: "info"})
 
-	handler := func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		return mcp.NewToolResultText("ok"), nil
+	handler := func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return mcpresult.NewText("ok"), nil
 	}
 	instrumented := (&Runtime{}).instrumentTool("observability_test", handler)
-	request := mcp.CallToolRequest{}
-	request.Params.Arguments = map[string]any{}
+	request := mcpresult.Request(map[string]any{})
+	
 	result, err := instrumented(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Meta == nil || result.Meta.AdditionalFields["mcpx.processing_ms"] == nil {
+	if result.Meta == nil || result.Meta["mcpx.processing_ms"] == nil {
 		t.Fatalf("missing tool processing metadata: %+v", result.Meta)
 	}
-	text, ok := result.Content[0].(mcp.TextContent)
+	text, ok := result.Content[0].(*mcp.TextContent)
 	if !ok {
 		t.Fatalf("ARC content type = %T", result.Content[0])
 	}

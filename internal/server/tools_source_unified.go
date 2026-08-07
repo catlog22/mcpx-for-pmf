@@ -8,7 +8,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/mcpresult"
 
 	"mcpx/internal/config"
 	"mcpx/internal/envelope"
@@ -25,7 +27,7 @@ func nextAction(tool string, arguments map[string]any) map[string]any {
 // toolFileReadUnified is the sole public source-read entry. A single path
 // retains the concise shape, while items[] runs the same bounded batch reader
 // and preserves per-item failures rather than failing the whole call.
-func (r *Runtime) toolFileReadUnified(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolFileReadUnified(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, session, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil
@@ -107,7 +109,7 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req mcp.CallToolReque
 			})
 		}
 		summary := fmt.Sprintf("Read %d source item(s); %d bytes returned.", len(results), batch.TotalBytes)
-		return mcp.NewToolResultStructured(data, sourceReadDisplay(data, summary)), nil
+		return compactToolResult(data, sourceReadDisplay(data, summary)), nil
 	}
 
 	path, _ := envReq.Payload["path"].(string)
@@ -135,7 +137,7 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req mcp.CallToolReque
 		data["next_action"] = nextAction("file_read", map[string]any{"remote_session_id": session.ID, "path": path, "offset": read.Offset + read.Limit, "limit": read.Limit})
 	}
 	summary := fmt.Sprintf("Read %s (%d lines).", path, read.TotalLines)
-	return mcp.NewToolResultStructured(data, sourceReadDisplay(data, summary)), nil
+	return compactToolResult(data, sourceReadDisplay(data, summary)), nil
 }
 
 func (r *Runtime) toolFileReadFull(envReq envelope.Request, remoteSessionID, workspace, workspacePath, path string) (*mcp.CallToolResult, error) {
@@ -154,9 +156,9 @@ func (r *Runtime) toolFileReadFull(envReq envelope.Request, remoteSessionID, wor
 	}
 	data := fullFileReadData(read)
 	summary := fmt.Sprintf("Read %s in full (%d bytes, %s).", path, read.Size, read.MIMEType)
-	result := mcp.NewToolResultStructured(data, fullFileReadDisplay(read, data, summary))
+	result := compactToolResult(data, fullFileReadDisplay(read, data, summary))
 	if strings.HasPrefix(read.MIMEType, "image/") {
-		result.Content = append(result.Content, mcp.NewImageContent(base64.StdEncoding.EncodeToString(read.Content), read.MIMEType))
+		result.Content = append(result.Content, mcpresult.NewImage(read.Content, read.MIMEType))
 	}
 	return result, nil
 }
@@ -242,12 +244,8 @@ func fullFileReadDisplay(read file.FullReadResult, data map[string]any, summary 
 		if !strings.HasSuffix(content, "\n") {
 			content += "\n"
 		}
-		display := fence + "html\n" + content + fence + "\n\nRevision: `" + read.SHA256 + "`"
-		if read.LineEnding != "" && read.LineEnding != "none" {
-			display += "\n\n换行：`" + read.LineEnding + "`"
-		}
-		display += formatDisplay(data)
-		return display
+		// format/line_ending are structured fields only; text keeps Revision for copy.
+		return fence + "html\n" + content + fence + "\n\nRevision: `" + read.SHA256 + "`"
 	}
 	return sourceReadDisplay(data, summary)
 }
@@ -299,44 +297,14 @@ func sourceReadDisplay(data map[string]any, summary string) string {
 		if truncated, _ := item["truncated"].(bool); truncated {
 			builder.WriteString("\n\n> 内容已截断；请继续调用 `source_read(view=file)` 读取后续内容。")
 		}
+		// Keep Revision in text so terminal agents that only read content can
+		// copy base_sha256. format/line_ending/charset live only in structured
+		// fields (data.format / data.line_ending) — do not restate as prose.
 		if revision, _ := item["sha256"].(string); strings.TrimSpace(revision) != "" {
 			fmt.Fprintf(&builder, "\n\nRevision: `%s`", revision)
 		}
-		if lineEnding, _ := item["line_ending"].(string); lineEnding != "" && lineEnding != "none" {
-			fmt.Fprintf(&builder, "\n\n换行：`%s`", lineEnding)
-		}
-		builder.WriteString(formatDisplay(item))
 	}
 	return builder.String()
-}
-
-func formatDisplay(item map[string]any) string {
-	format, ok := item["format"].(map[string]any)
-	if !ok || len(format) == 0 {
-		return ""
-	}
-	charset, _ := format["charset"].(string)
-	bom, _ := format["bom"].(string)
-	lineEnding, _ := format["line_ending"].(string)
-	finalNewline := "未知"
-	switch value := format["final_newline"].(type) {
-	case bool:
-		if value {
-			finalNewline = "是"
-		} else {
-			finalNewline = "否"
-		}
-	}
-	if charset == "" {
-		charset = "unknown"
-	}
-	if bom == "" {
-		bom = "unknown"
-	}
-	if lineEnding == "" {
-		lineEnding = "none"
-	}
-	return fmt.Sprintf("\n\n格式：字符集 `%s`；BOM `%s`；换行 `%s`；末尾换行 `%s`", charset, bom, lineEnding, finalNewline)
 }
 
 func sourceReadItems(data map[string]any) []map[string]any {
@@ -401,7 +369,7 @@ func sourceReadLanguage(path string) string {
 	}
 }
 
-func (r *Runtime) toolContextQueryUnified(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolContextQueryUnified(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	action := toolAction(req)
 	if action == "query" {
 		return r.toolContextQueryAction(ctx, req)
@@ -415,7 +383,7 @@ func (r *Runtime) toolContextQueryUnified(ctx context.Context, req mcp.CallToolR
 	return r.invalidAction(ctx, req, "context_query", action)
 }
 
-func (r *Runtime) toolContextQueryAction(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolContextQueryAction(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, session, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil
@@ -478,7 +446,7 @@ func (r *Runtime) toolContextQueryAction(ctx context.Context, req mcp.CallToolRe
 	return compactToolResult(data, fmt.Sprintf("Context query returned %d file(s).", len(files))), nil
 }
 
-func (r *Runtime) toolContextSearchAction(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolContextSearchAction(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, session, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil
@@ -513,7 +481,7 @@ func (r *Runtime) toolContextSearchAction(ctx context.Context, req mcp.CallToolR
 	return compactToolResult(data, fmt.Sprintf("Source search returned %d match(es).", len(resultData.Matches))), nil
 }
 
-func (r *Runtime) toolContextListAction(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolContextListAction(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, session, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil

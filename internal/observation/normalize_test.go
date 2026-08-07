@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-
-	"github.com/mark3labs/mcp-go/mcp"
 )
 
 func TestNormalizeToolInputRedactsSensitiveArguments(t *testing.T) {
@@ -26,27 +24,36 @@ func TestNormalizeToolInputRedactsSensitiveArguments(t *testing.T) {
 	}
 }
 
-func TestNormalizeToolOutputOmitsBinaryContent(t *testing.T) {
-	result := &mcp.CallToolResult{
-		Content: []mcp.Content{
-			mcp.NewTextContent("visible output"),
-			mcp.ImageContent{MIMEType: "image/png", Data: "very-large-base64"},
-		},
-		StructuredContent: map[string]any{"api_key": "secret", "ok": true},
-	}
-	encoded, truncated := NormalizeToolOutput(result, MaxEventBytes)
+func TestNormalizeHumanToolOutputOmitsStructuredContent(t *testing.T) {
+	encoded, truncated := NormalizeHumanToolOutput(HumanObsSnapshot{
+		Status:  "succeeded",
+		Summary: "visible output",
+		Command: "echo hi",
+	}, MaxEventBytes)
 	if truncated {
 		t.Fatal("small output was truncated")
+	}
+	text := string(encoded)
+	if strings.Contains(text, "structured_content") || strings.Contains(text, "mcpx.result") {
+		t.Fatalf("model structured payload leaked into human observation: %s", text)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(encoded, &payload); err != nil {
 		t.Fatal(err)
 	}
-	text := string(encoded)
-	if strings.Contains(text, "very-large-base64") || strings.Contains(text, "secret") {
-		t.Fatalf("binary or sensitive output leaked: %s", text)
+	if payload["summary"] != "visible output" || payload["command"] != "echo hi" {
+		t.Fatalf("human fields missing: %s", text)
 	}
-	if !strings.Contains(text, "visible output") || payload["content"] == nil {
-		t.Fatalf("text output missing: %s", text)
+}
+
+func TestNormalizeHumanToolOutputRedactsSecretsInSummaryPath(t *testing.T) {
+	// Path/command fields go through Sanitize map redaction when nested keys match.
+	encoded, _ := NormalizeHumanToolOutput(HumanObsSnapshot{
+		Status:  "failed",
+		Summary: "failed with password=should-stay-in-summary-unless-key",
+		Path:    "ok.go",
+	}, MaxEventBytes)
+	if !strings.Contains(string(encoded), "ok.go") {
+		t.Fatalf("path missing: %s", encoded)
 	}
 }

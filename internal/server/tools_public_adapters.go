@@ -6,25 +6,27 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/mcpresult"
 
 	"mcpx/internal/observation"
 )
 
-func publicSelector(req mcp.CallToolRequest, key string) string {
-	value, _ := req.GetArguments()[key].(string)
+func publicSelector(req *mcp.CallToolRequest, key string) string {
+	value, _ := mcpresult.Arguments(req)[key].(string)
 	return strings.ToLower(strings.TrimSpace(value))
 }
 
-func publicDispatch(req mcp.CallToolRequest, key, value string) mcp.CallToolRequest {
+func publicDispatch(req *mcp.CallToolRequest, key, value string) *mcp.CallToolRequest {
 	return forwardedRequest(req, map[string]any{key: value})
 }
 
-func (r *Runtime) toolWorkspaceObserve(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolWorkspaceObserve(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolWorkspaceState(ctx, publicDispatch(req, "action", publicSelector(req, "view")))
 }
 
-func (r *Runtime) toolWorkspaceHistoryRead(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolWorkspaceHistoryRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
 		return fail, nil
@@ -154,7 +156,7 @@ func parseUnixMillis(value string) (int64, error) {
 	return parsed, nil
 }
 
-func (r *Runtime) toolSessionRead(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolSessionRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	action := publicSelector(req, "view")
 	if action == "summary" {
 		action = "get"
@@ -162,11 +164,11 @@ func (r *Runtime) toolSessionRead(ctx context.Context, req mcp.CallToolRequest) 
 	return r.toolSessionManage(ctx, publicDispatch(req, "action", action))
 }
 
-func (r *Runtime) toolSessionTransition(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolSessionTransition(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolSessionManage(ctx, publicDispatch(req, "action", publicSelector(req, "operation")))
 }
 
-func (r *Runtime) toolSourceRead(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolSourceRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	view := publicSelector(req, "view")
 	if view == "file" {
 		return r.toolFileReadUnified(ctx, req)
@@ -176,60 +178,57 @@ func (r *Runtime) toolSourceRead(ctx context.Context, req mcp.CallToolRequest) (
 		action = "query"
 	}
 	updates := map[string]any{"action": action}
-	if mode, ok := req.GetArguments()["search_mode"]; ok {
+	if mode, ok := mcpresult.Arguments(req)["search_mode"]; ok {
 		updates["mode"] = mode
 	}
 	return r.toolContextQueryUnified(ctx, forwardedRequest(req, updates))
 }
 
-func (r *Runtime) toolChangePreparePublic(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if apply, _ := req.GetArguments()["apply"].(bool); apply {
+func (r *Runtime) toolChangePreparePublic(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if apply, _ := mcpresult.Arguments(req)["apply"].(bool); apply {
 		return r.toolChangeExecute(ctx, req)
 	}
 	return r.toolChangeManage(ctx, publicDispatch(req, "action", "prepare"))
 }
 
-func (r *Runtime) toolChangeRead(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolChangeRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolChangeManage(ctx, publicDispatch(req, "action", publicSelector(req, "view")))
 }
 
-func (r *Runtime) toolChangeDiscardPublic(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolChangeDiscardPublic(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolChangeManage(ctx, publicDispatch(req, "action", "discard"))
 }
 
-func (r *Runtime) toolChangeApply(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolChangeApply(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolChangeExecute(ctx, forwardedRequest(req, map[string]any{"apply": true}))
 }
 
-func (r *Runtime) toolChangeRevertPublic(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args := make(map[string]any, len(req.GetArguments()))
-	for key, value := range req.GetArguments() {
+func (r *Runtime) toolChangeRevertPublic(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := make(map[string]any, len(mcpresult.Arguments(req)))
+	for key, value := range mcpresult.Arguments(req) {
 		args[key] = value
 	}
 	changesetID, _ := args["changeset_id"].(string)
 	delete(args, "changeset_id")
-	revertRequest := req
-	revertRequest.Params.Arguments = args
-	return r.toolChangeExecute(ctx, forwardedRequest(revertRequest, map[string]any{
-		"revert_changeset_id": changesetID,
-		"apply":               true,
-	}))
+	args["revert_changeset_id"] = changesetID
+	args["apply"] = true
+	return r.toolChangeExecute(ctx, mcpresult.Request(args))
 }
 
-func (r *Runtime) toolCommandRun(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolCommandRun(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolCommandExecute(ctx, req)
 }
 
-func (r *Runtime) toolTaskRead(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolTaskRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolTaskManage(ctx, publicDispatch(req, "action", publicSelector(req, "view")))
 }
 
-func (r *Runtime) toolTaskControl(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolTaskControl(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolTaskManage(ctx, publicDispatch(req, "action", publicSelector(req, "operation")))
 }
 
-func (r *Runtime) toolProgressReportPublic(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args := req.GetArguments()
+func (r *Runtime) toolProgressReportPublic(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := mcpresult.Arguments(req)
 	updates := map[string]any{}
 	if current, ok := args["current"].(string); ok {
 		updates["summary"] = current
@@ -261,49 +260,49 @@ func (r *Runtime) toolProgressReportPublic(ctx context.Context, req mcp.CallTool
 	return r.toolProgressReport(ctx, forwardedRequest(req, updates))
 }
 
-func (r *Runtime) toolPlanCreatePublic(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolPlanCreatePublic(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolPlanManage(ctx, publicDispatch(req, "action", "create"))
 }
 
-func (r *Runtime) toolPlanReadPublic(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolPlanReadPublic(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolPlanManage(ctx, publicDispatch(req, "action", "get"))
 }
 
-func (r *Runtime) toolPlanTransition(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolPlanTransition(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolPlanManage(ctx, publicDispatch(req, "action", publicSelector(req, "transition")))
 }
 
-func (r *Runtime) toolRuntimeRead(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolRuntimeRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolRuntimeInspect(ctx, publicDispatch(req, "action", publicSelector(req, "view")))
 }
 
-func (r *Runtime) toolEnvironmentRead(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolEnvironmentRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	updates := map[string]any{"save_snapshot": false}
 	if publicSelector(req, "view") == "compare" {
-		if snapshotID, ok := req.GetArguments()["snapshot_id"]; ok {
+		if snapshotID, ok := mcpresult.Arguments(req)["snapshot_id"]; ok {
 			updates["compare_to"] = snapshotID
 		}
 	}
 	return r.toolEnvironmentInspect(ctx, forwardedRequest(req, updates))
 }
 
-func (r *Runtime) toolEnvironmentSnapshotCreate(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolEnvironmentSnapshotCreate(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolEnvironmentInspect(ctx, forwardedRequest(req, map[string]any{"save_snapshot": true}))
 }
 
-func (r *Runtime) toolExtensionDiscover(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolExtensionDiscover(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolExtensionManage(ctx, publicDispatch(req, "action", publicSelector(req, "view")))
 }
 
-func (r *Runtime) toolSkillCall(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolSkillCall(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolExtensionManage(ctx, forwardedRequest(req, map[string]any{"action": "call", "kind": "skill"}))
 }
 
-func (r *Runtime) toolMCPCallPublic(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolMCPCallPublic(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolExtensionManage(ctx, forwardedRequest(req, map[string]any{"action": "call", "kind": "mcp"}))
 }
 
-func (r *Runtime) toolArtifactReadPublic(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolArtifactReadPublic(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	action := publicSelector(req, "view")
 	if action == "content" {
 		action = "read"

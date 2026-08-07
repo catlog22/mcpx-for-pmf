@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/mcpresult"
 
 	"mcpx/internal/changeset"
 	"mcpx/internal/envelope"
@@ -22,36 +24,44 @@ import (
 
 func TestObservationRecordsToolLifecycleAndRedacts(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	request := mcp.CallToolRequest{}
-	request.Params.Arguments = map[string]any{
+	request := mcpresult.Request(map[string]any{
 		"intent":    "inspect the project configuration",
 		"workspace": "demo",
 		"token":     "do-not-store-this-token",
 		"path":      "config.yaml",
-	}
-	wrapper := rt.instrumentTool("observer_test", func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		return mcp.NewToolResultText(`{"message":"visible output","password":"do-not-store-this-password"}`), nil
+	})
+	
+	wrapper := rt.instrumentTool("observer_test", func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return mcpresult.NewText(`{"message":"visible output","password":"do-not-store-this-password"}`), nil
 	})
 	if _, err := wrapper(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
 
-	events, err := rt.observation.store.History(context.Background(), "demo", 0, 50)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var started, completed *observationEventView
-	for _, event := range events {
-		if event.Tool != "observer_test" {
-			continue
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		events, err := rt.observation.store.History(context.Background(), "demo", 0, 50)
+		if err != nil {
+			t.Fatal(err)
 		}
-		view := observationEventView{Type: event.Type, Sequence: event.Sequence, Intent: event.Intent, Input: string(event.Input), Output: string(event.Output)}
-		switch event.Type {
-		case "tool.started":
-			started = &view
-		case "tool.completed":
-			completed = &view
+		started, completed = nil, nil
+		for _, event := range events {
+			if event.Tool != "observer_test" {
+				continue
+			}
+			view := observationEventView{Type: event.Type, Sequence: event.Sequence, Intent: event.Intent, Input: string(event.Input), Output: string(event.Output)}
+			switch event.Type {
+			case "tool.started":
+				started = &view
+			case "tool.completed":
+				completed = &view
+			}
 		}
+		if started != nil && completed != nil && started.Sequence < completed.Sequence {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if started == nil || completed == nil || started.Sequence >= completed.Sequence {
 		t.Fatalf("tool lifecycle order invalid: started=%+v completed=%+v", started, completed)
@@ -70,23 +80,31 @@ func TestObservationRecordsToolLifecycleAndRedacts(t *testing.T) {
 		t.Fatalf("completed status=%+v", output)
 	}
 
-	errorRequest := mcp.CallToolRequest{}
-	errorRequest.Params.Arguments = map[string]any{"intent": "run the failing observer operation", "workspace": "demo"}
-	errorWrapper := rt.instrumentTool("observer_error_test", func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	errorRequest := mcpresult.Request(map[string]any{"intent": "run the failing observer operation", "workspace": "demo"})
+	
+	errorWrapper := rt.instrumentTool("observer_error_test", func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return nil, errors.New("observer operation failed")
 	})
 	if _, err := errorWrapper(context.Background(), errorRequest); err == nil {
 		t.Fatal("expected handler error")
 	}
-	events, err = rt.observation.store.History(context.Background(), "demo", 0, 50)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var errorOutput string
-	for _, event := range events {
-		if event.Tool == "observer_error_test" && event.Type == "tool.completed" {
-			errorOutput = string(event.Output)
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		events, err := rt.observation.store.History(context.Background(), "demo", 0, 50)
+		if err != nil {
+			t.Fatal(err)
 		}
+		errorOutput = ""
+		for _, event := range events {
+			if event.Tool == "observer_error_test" && event.Type == "tool.completed" {
+				errorOutput = string(event.Output)
+			}
+		}
+		if errorOutput != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	var errorView map[string]any
 	if err := json.Unmarshal([]byte(errorOutput), &errorView); err != nil {
@@ -404,11 +422,11 @@ func TestObservationSocketEndToEndDeliversToolEvents(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("observer did not connect")
 	}
-	wrapper := rt.instrumentTool("observer_e2e", func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		return mcp.NewToolResultText("e2e output"), nil
+	wrapper := rt.instrumentTool("observer_e2e", func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return mcpresult.NewText("e2e output"), nil
 	})
-	request := mcp.CallToolRequest{}
-	request.Params.Arguments = map[string]any{"intent": "verify observer delivery", "workspace": "demo"}
+	request := mcpresult.Request(map[string]any{"intent": "verify observer delivery", "workspace": "demo"})
+	
 	if _, err := wrapper(ctx, request); err != nil {
 		t.Fatal(err)
 	}

@@ -1,14 +1,14 @@
 package server
 
 import (
+	"mcpx/internal/mcpresult"
+
 	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/mark3labs/mcp-go/mcp"
 
 	"mcpx/internal/envelope"
 	"mcpx/internal/operation"
@@ -36,9 +36,7 @@ func operationTestSession(t *testing.T, rt *Runtime, workspace string) remoteses
 
 func callOperationTool(t *testing.T, rt *Runtime, name string, arguments map[string]any) map[string]any {
 	t.Helper()
-	request := mcp.CallToolRequest{}
-	request.Params.Arguments = arguments
-	result, err := rt.toolHandlers[name](context.Background(), request)
+	result, err := rt.toolHandlers[name](context.Background(), mcpresult.Request(arguments))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,6 +326,44 @@ func TestOperationBatchResultUnwrapsToolContent(t *testing.T) {
 	}
 	if view["next_cursor"] != "" {
 		t.Fatalf("unexpected cursor for short result: %+v", view)
+	}
+}
+
+func TestOperationResultValuePrefersARCMetaOverHumanText(t *testing.T) {
+	// Matches persisted step shape after WrapToolResult: human text + machine ARC in _meta.
+	raw := []byte(`{
+		"_meta": {
+			"mcpx.result": {
+				"mcpx": {
+					"result": {
+						"type": "search_result",
+						"status": "succeeded",
+						"summary": "Source search returned 1 match(es).",
+						"data": {
+							"matches": [{"path": "src/A.java", "line": 10, "text": "class A"}]
+						}
+					}
+				}
+			}
+		},
+		"content": [{"type": "text", "text": "Source search returned 1 match(es).\n- ` + "`src/A.java`" + `"}]
+	}`)
+	value := operationResultValue(raw)
+	asMap, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("want map result, got %T %#v", value, value)
+	}
+	if asMap["type"] != "search_result" {
+		t.Fatalf("type=%v", asMap["type"])
+	}
+	data, _ := asMap["data"].(map[string]any)
+	matches, _ := data["matches"].([]any)
+	if len(matches) != 1 {
+		t.Fatalf("matches must come from ARC meta, not prose text: %+v", value)
+	}
+	match, _ := matches[0].(map[string]any)
+	if match["path"] != "src/A.java" {
+		t.Fatalf("match path=%v", match["path"])
 	}
 }
 

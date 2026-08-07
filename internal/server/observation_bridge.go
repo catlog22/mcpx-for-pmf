@@ -8,7 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/mcpresult"
 
 	"mcpx/internal/changeset"
 	"mcpx/internal/envelope"
@@ -31,9 +33,11 @@ type observationTaskStreamKey struct {
 // observationBridge is the single write boundary for the workspace observer.
 // Store.Append always happens before Broker.Publish so a live observer can
 // recover every event from SQLite after a disconnect or buffer overflow.
+// Tool start/complete events are enqueued on async so tools/call is not blocked.
 type observationBridge struct {
 	store           *observation.Store
 	broker          *observation.Broker
+	async           *observation.AsyncRecorder
 	resolve         func(context.Context, envelope.Request) (string, string)
 	outputStateMu   sync.Mutex
 	outputSanitizer map[observationTaskStreamKey]*observation.TextStreamSanitizer
@@ -86,10 +90,18 @@ func observationContext(ctx context.Context) context.Context {
 	return context.WithoutCancel(ctx)
 }
 
+func (b *observationBridge) enqueueOrRecord(ctx context.Context, event observation.Event) error {
+	if b != nil && b.async != nil {
+		b.async.Enqueue(event)
+		return nil
+	}
+	return b.Record(ctx, event)
+}
+
 func (b *observationBridge) RecordToolStarted(ctx context.Context, name string, req envelope.Request, args map[string]any) error {
 	workspace, remoteID := b.target(ctx, req)
 	input, truncated := observation.NormalizeToolInput(args, observation.MaxEventBytes)
-	return b.Record(ctx, observation.Event{
+	return b.enqueueOrRecord(ctx, observation.Event{
 		Workspace:         workspace,
 		RemoteSessionID:   remoteID,
 		RequestID:         req.RequestID,
@@ -109,39 +121,39 @@ func (b *observationBridge) RecordToolStarted(ctx context.Context, name string, 
 
 func (b *observationBridge) RecordToolCompleted(ctx context.Context, name string, req envelope.Request, args map[string]any, result *mcp.CallToolResult, callErr error, timing interactionTiming) error {
 	workspace, remoteID := b.target(ctx, req)
-	resultJSON, truncated := observation.NormalizeToolOutput(result, observation.MaxEventBytes)
 	input, inputTruncated := observation.NormalizeToolInput(args, observation.MaxEventBytes)
-	var resultValue any
-	if err := json.Unmarshal(resultJSON, &resultValue); err != nil {
-		resultValue = map[string]any{"available": false}
-	}
 	status := "succeeded"
 	if callErr != nil || result == nil || result.IsError {
 		status = "failed"
 	} else if responseStatus := publicResultStatus(result); responseStatus != "" {
 		status = responseStatus
 	}
-	outputValue := map[string]any{
-		"status": status,
-		"timing": map[string]any{
-			"started_at_ms":     timing.StartedAtMs,
-			"received_at_ms":    timing.ReceivedAtMs,
-			"completed_at_ms":   timing.CompletedAtMs,
-			"processing_ms":     timing.ProcessingMs,
-			"server_elapsed_ms": timing.ServerElapsedMs,
-		},
-		"result": resultValue,
+	facts := toolObservationFacts(name, args, result, timing)
+	summary := firstToolText(result)
+	if summary == "" {
+		summary = fmt.Sprintf("%s %s", name, status)
 	}
 	if callErr != nil {
-		outputValue["error"] = observation.RedactText(callErr.Error())
+		summary = observation.RedactText(callErr.Error())
 	}
-	facts := toolObservationFacts(name, args, resultJSON, timing)
-	encoded, encodeErr := json.Marshal(outputValue)
-	if encodeErr != nil {
-		encoded = []byte(`{"status":"error","result":{"available":false}}`)
-		truncated = true
+	snap := observation.HumanObsSnapshot{
+		Tool:             name,
+		Status:           status,
+		Purpose:          req.Intent,
+		Intent:           req.Intent,
+		ProgressSummary:  req.ProgressSummary,
+		Summary:          summary,
+		Command:          facts.Command,
+		WorkingDirectory: facts.WorkingDirectory,
+		ExitCode:         facts.ExitCode,
+		DurationMs:       facts.DurationMs,
+		Path:             facts.Path,
+		ResourceURI:      facts.ResourceURI,
+		InputRedacted:    input,
+		Truncated:        inputTruncated,
 	}
-	return b.Record(ctx, observation.Event{
+	output, outTruncated := observation.NormalizeHumanToolOutput(snap, observation.MaxEventBytes)
+	return b.enqueueOrRecord(ctx, observation.Event{
 		Workspace:         workspace,
 		RemoteSessionID:   remoteID,
 		RequestID:         req.RequestID,
@@ -155,7 +167,7 @@ func (b *observationBridge) RecordToolCompleted(ctx context.Context, name string
 		Intent:            req.Intent,
 		ProgressSummary:   req.ProgressSummary,
 		Input:             input,
-		Output:            encoded,
+		Output:            output,
 		Summary:           fmt.Sprintf("%s %s", name, status),
 		Command:           facts.Command,
 		WorkingDirectory:  facts.WorkingDirectory,
@@ -165,7 +177,8 @@ func (b *observationBridge) RecordToolCompleted(ctx context.Context, name string
 		MCPServer:         facts.MCPServer,
 		MCPTool:           facts.MCPTool,
 		Path:              facts.Path,
-		Truncated:         truncated || inputTruncated,
+		ResourceURI:       facts.ResourceURI,
+		Truncated:         inputTruncated || outTruncated,
 	})
 }
 
@@ -173,28 +186,24 @@ func publicResultStatus(result *mcp.CallToolResult) string {
 	if result == nil {
 		return ""
 	}
-	for _, content := range result.Content {
-		textContent, ok := content.(mcp.TextContent)
-		if !ok {
-			continue
-		}
-		var payload struct {
-			Status string `json:"status"`
-		}
-		if json.Unmarshal([]byte(textContent.Text), &payload) != nil {
-			continue
-		}
-		switch payload.Status {
-		case string(envelope.StatusOK), string(envelope.StatusAccepted), string(envelope.StatusNeedConfirmation), string(envelope.StatusInterrupted):
-			return payload.Status
-		case string(envelope.StatusError):
-			return "failed"
+	if sc, ok := result.StructuredContent.(map[string]any); ok {
+		if status, _ := sc["status"].(string); status != "" {
+			switch status {
+			case string(envelope.StatusOK), string(envelope.StatusAccepted), string(envelope.StatusNeedConfirmation), string(envelope.StatusInterrupted):
+				return status
+			case string(envelope.StatusError): // wire value "failed"
+				return "failed"
+			}
 		}
 	}
 	return operationResultStatus(result)
 }
 
-func toolObservationFacts(name string, args map[string]any, normalized json.RawMessage, timing interactionTiming) observation.Event {
+func firstToolText(result *mcp.CallToolResult) string {
+	return mcpresult.FirstText(result)
+}
+
+func toolObservationFacts(name string, args map[string]any, result *mcp.CallToolResult, timing interactionTiming) observation.Event {
 	facts := observation.Event{DurationMs: timing.ServerElapsedMs}
 	if command, ok := args["command"].(string); ok {
 		facts.Command = strings.TrimSpace(command)
@@ -212,47 +221,39 @@ func toolObservationFacts(name string, args map[string]any, normalized json.RawM
 		facts.MCPServer, _ = args["server"].(string)
 		facts.MCPTool, _ = args["tool"].(string)
 	}
-	var payload struct {
-		StructuredContent map[string]any `json:"structured_content"`
-		Content           []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
+	// Pull a few human-useful fields from structured data only — never dump SC.
+	data := businessDataFromResult(result)
+	if workingDirectory, ok := data["working_directory"].(string); ok {
+		facts.WorkingDirectory = workingDirectory
 	}
-	if json.Unmarshal(normalized, &payload) != nil {
-		return facts
+	if command, ok := data["command"].(string); ok && facts.Command == "" {
+		facts.Command = command
 	}
-	apply := func(value map[string]any) {
-		if workingDirectory, ok := value["working_directory"].(string); ok {
-			facts.WorkingDirectory = workingDirectory
-		}
-		if command, ok := value["command"].(string); ok && facts.Command == "" {
-			facts.Command = command
-		}
-		if duration, ok := numberValue(value["duration_ms"]); ok && duration >= 0 {
-			facts.DurationMs = int64(duration)
-		}
-		if exitCode, ok := numberValue(value["exit_code"]); ok {
-			code := int(exitCode)
-			facts.ExitCode = &code
-		}
+	if duration, ok := numberValue(data["duration_ms"]); ok && duration >= 0 {
+		facts.DurationMs = int64(duration)
 	}
-	apply(payload.StructuredContent)
-	if len(payload.StructuredContent) == 0 {
-		for _, content := range payload.Content {
-			if content.Type != "text" {
-				continue
-			}
-			var response struct {
-				Data map[string]any `json:"data"`
-			}
-			if json.Unmarshal([]byte(content.Text), &response) == nil {
-				apply(response.Data)
-				break
-			}
-		}
+	if exitCode, ok := numberValue(data["exit_code"]); ok {
+		code := int(exitCode)
+		facts.ExitCode = &code
+	}
+	if path, ok := data["path"].(string); ok && facts.Path == "" {
+		facts.Path = path
 	}
 	return facts
+}
+
+func businessDataFromResult(result *mcp.CallToolResult) map[string]any {
+	if result == nil {
+		return map[string]any{}
+	}
+	sc, ok := result.StructuredContent.(map[string]any)
+	if !ok || sc == nil {
+		return map[string]any{}
+	}
+	if data, ok := sc["data"].(map[string]any); ok && data != nil {
+		return data
+	}
+	return sc
 }
 
 func numberValue(value any) (float64, bool) {

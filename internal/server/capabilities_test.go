@@ -1,15 +1,15 @@
 package server
 
 import (
+	"mcpx/internal/mcpresult"
+
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
 	"testing"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/auth"
 	"mcpx/internal/config"
@@ -24,10 +24,10 @@ func TestCapabilityCatalogMatchesRegisteredTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
-	protocol := mcpserver.NewMCPServer("test", "1")
+	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
 	runtime.registerTools(protocol)
-	registered := make([]string, 0, len(protocol.ListTools()))
-	for name := range protocol.ListTools() {
+	registered := make([]string, 0, len(runtime.listedToolMap()))
+	for name := range runtime.listedToolMap() {
 		registered = append(registered, name)
 	}
 	sort.Strings(registered)
@@ -121,17 +121,13 @@ func TestCapabilityListIncludesInstructionsSkillsAndRoleState(t *testing.T) {
 		t.Fatal("owner capability did not expose change_apply as available")
 	}
 
-	var readRequest mcp.CallToolRequest
-	readRequest.Params.Arguments = map[string]any{"intent": "read project instructions", "remote_session_id": remoteID, "id": "project"}
+	readRequest := mcpresult.Request(map[string]any{"intent": "read project instructions", "remote_session_id": remoteID, "id": "project"})
+	
 	readResult, err := runtime.toolAgentInstructionRead(ctx, readRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := readResult.Content[0].(mcp.TextContent).Text
-	var readResponse map[string]any
-	if err := json.Unmarshal([]byte(text), &readResponse); err != nil {
-		t.Fatal(err)
-	}
+	readResponse := decodeToolResult(t, readResult)
 	if readResponse["data"].(map[string]any)["content"] != "# Project\n" {
 		t.Fatalf("instruction read: %+v", readResponse)
 	}

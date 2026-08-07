@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/approval"
 	"mcpx/internal/audit"
@@ -27,7 +27,7 @@ const defaultCommandYield = 10 * time.Second
 // toolCommandExecute uses one Task implementation for both ordinary commands
 // and discovered project tasks. It waits for short commands, but only exposes
 // a task_id to clients when the process still runs after the yield window.
-func (r *Runtime) toolCommandExecute(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, remote, fail := r.changeRequest(ctx, req, true)
 	if fail != nil {
 		return fail, nil
@@ -292,7 +292,7 @@ func containsUnsafeShellFeature(command string) bool {
 		strings.Contains(withoutAnd, "&")
 }
 
-func (r *Runtime) toolTaskManage(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolTaskManage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	action := toolAction(req)
 	edit := action == "stop" || action == "stdin"
 	envReq, principal, remote, fail := r.changeRequest(ctx, req, edit)

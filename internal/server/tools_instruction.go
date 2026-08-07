@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/envelope"
 	"mcpx/internal/instruction"
 )
 
-func (r *Runtime) toolAgentInstructionList(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolAgentInstructionList(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, remote, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil
@@ -38,14 +38,10 @@ func (r *Runtime) toolAgentInstructionList(ctx context.Context, req mcp.CallTool
 			r.cfg.Discovery.Instructions.GlobalAgentsPath, remote.WorkspacePath, paths, maxBytes,
 		)
 	}
-	result, err := r.remoteResult(envReq, remote.ID, remote.WorkspaceName, data)
-	if err == nil {
-		result.StructuredContent = data
-	}
-	return result, err
+	return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, data)
 }
 
-func (r *Runtime) toolAgentInstructionRead(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolAgentInstructionRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, remote, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil
@@ -69,11 +65,7 @@ func (r *Runtime) toolAgentInstructionRead(ctx context.Context, req mcp.CallTool
 		return r.resultJSON(response)
 	}
 	data := map[string]any{"instruction": document, "content": content}
-	result, err := r.remoteResult(envReq, remote.ID, remote.WorkspaceName, data)
-	if err == nil {
-		result.StructuredContent = data
-	}
-	return result, err
+	return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, data)
 }
 
 func (r *Runtime) agentInstructions(workspacePath string) []instruction.Document {

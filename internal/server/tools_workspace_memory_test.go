@@ -1,12 +1,12 @@
 package server
 
 import (
+	"mcpx/internal/mcpresult"
+
 	"context"
 	"encoding/json"
 	"testing"
 	"time"
-
-	"github.com/mark3labs/mcp-go/mcp"
 
 	"mcpx/internal/observation"
 	"mcpx/internal/remotesession"
@@ -41,17 +41,17 @@ func TestWorkspaceStateMemoryReturnsBoundedFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	request := mcp.CallToolRequest{}
-	request.Params.Arguments = map[string]any{
+	request := mcpresult.Request(map[string]any{
 		"intent": "查询项目记忆", "action": "memory", "remote_session_id": created.Session.ID,
 		"keyword": "核心文件", "latest": float64(10),
-	}
+	})
+	
 	result, err := rt.toolWorkspaceState(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	envelope := decodeToolResult(t, result)
-	if envelope["status"] != "succeeded" {
+	if envelope["status"] != "ok" && envelope["status"] != "succeeded" {
 		t.Fatalf("memory response=%+v", envelope)
 	}
 	data, ok := envelope["data"].(map[string]any)
@@ -85,11 +85,11 @@ func TestWorkspaceStateMemoryRejectsInvalidLatest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := mcp.CallToolRequest{}
-	request.Params.Arguments = map[string]any{
+	request := mcpresult.Request(map[string]any{
 		"intent": "查询项目记忆", "action": "memory", "remote_session_id": created.Session.ID,
 		"latest": float64(51),
-	}
+	})
+	
 	result, err := rt.toolWorkspaceState(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)

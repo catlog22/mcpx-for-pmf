@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"image"
 	"image/color"
 	"image/png"
@@ -12,7 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/mcpresult"
 
 	"mcpx/internal/arc"
 )
@@ -34,9 +35,15 @@ func TestSourceReadDisplayIncludesMarkdownSourceBlock(t *testing.T) {
 	}
 
 	display := sourceReadDisplay(data, "Read src/Supplier.vue (10 lines).")
-	for _, want := range []string{"Read src/Supplier.vue", "Revision: `sha256:test-revision`", "换行：`CRLF`", "字符集 `utf-8`", "BOM `none`", "末尾换行 `是`", "### `src/Supplier.vue` (lines 5-7 of 10)", "```vue", "<template>"} {
+	for _, want := range []string{"Read src/Supplier.vue", "Revision: `sha256:test-revision`", "### `src/Supplier.vue` (lines 5-7 of 10)", "```vue", "<template>"} {
 		if !strings.Contains(display, want) {
 			t.Fatalf("source display missing %q: %s", want, display)
+		}
+	}
+	// format/line_ending live in structured fields only — not restated as prose.
+	for _, ban := range []string{"换行：", "字符集", "末尾换行", "格式："} {
+		if strings.Contains(display, ban) {
+			t.Fatalf("source display must not prose-format metadata %q: %s", ban, display)
 		}
 	}
 }
@@ -50,9 +57,9 @@ func TestFileReadResultExposesSourceInHostTextAndKeepsStructuredData(t *testing.
 		"limit":       3,
 		"total_lines": 3,
 	}
-	raw := mcp.NewToolResultStructured(data, sourceReadDisplay(data, "Read src/Supplier.vue (3 lines)."))
+	raw := mcpresult.NewStructured(data, sourceReadDisplay(data, "Read src/Supplier.vue (3 lines)."))
 	wrapped := arc.WrapToolResult("file_read", arc.ResultContext{}, raw)
-	text, ok := wrapped.Content[0].(mcp.TextContent)
+	text, ok := wrapped.Content[0].(*mcp.TextContent)
 	if !ok {
 		t.Fatalf("first content type = %T", wrapped.Content[0])
 	}
@@ -105,13 +112,13 @@ func TestFileReadFullReturnsHTMLAndDirectImageContent(t *testing.T) {
 
 	read := func(path string) *mcp.CallToolResult {
 		t.Helper()
-		request := mcp.CallToolRequest{}
-		request.Params.Arguments = map[string]any{
+		request := mcpresult.Request(map[string]any{
 			"intent":            "读取客户端预览文件",
 			"remote_session_id": remoteSessionID,
 			"path":              path,
 			"mode":              "full",
-		}
+		})
+		
 		result, err := rt.toolFileReadUnified(context.Background(), request)
 		if err != nil {
 			t.Fatal(err)
@@ -120,16 +127,16 @@ func TestFileReadFullReturnsHTMLAndDirectImageContent(t *testing.T) {
 	}
 
 	htmlResult := read("preview.html")
-	htmlText, ok := htmlResult.Content[0].(mcp.TextContent)
+	htmlText, ok := htmlResult.Content[0].(*mcp.TextContent)
 	if !ok || !strings.Contains(htmlText.Text, "```html\n"+string(html)+"```") || !strings.Contains(htmlText.Text, "Revision: `sha256:") {
 		t.Fatalf("full HTML was not returned directly: %#v", htmlResult.Content)
 	}
-	htmlData, ok := htmlResult.StructuredContent.(map[string]any)
-	if !ok || htmlData["mode"] != "full" || htmlData["mime_type"] != "text/html" || htmlData["encoding"] != "utf-8" {
+	htmlData := structuredBusinessData(htmlResult)
+	if htmlData["mode"] != "full" || htmlData["mime_type"] != "text/html" || htmlData["encoding"] != "utf-8" {
 		t.Fatalf("HTML metadata=%+v", htmlResult.StructuredContent)
 	}
 	wrappedHTML := arc.WrapToolResult("file_read", arc.ResultContext{}, htmlResult)
-	wrappedHTMLText, ok := wrappedHTML.Content[0].(mcp.TextContent)
+	wrappedHTMLText, ok := wrappedHTML.Content[0].(*mcp.TextContent)
 	if !ok || !strings.Contains(wrappedHTMLText.Text, string(html)) || !strings.Contains(wrappedHTMLText.Text, "</html>\n```") {
 		t.Fatalf("ARC dropped full HTML content: %#v", wrappedHTML.Content)
 	}
@@ -138,20 +145,20 @@ func TestFileReadFullReturnsHTMLAndDirectImageContent(t *testing.T) {
 	if len(imageResult.Content) != 2 {
 		t.Fatalf("image result content=%#v", imageResult.Content)
 	}
-	imageContent, ok := imageResult.Content[1].(mcp.ImageContent)
+	imageContent, ok := imageResult.Content[1].(*mcp.ImageContent)
 	if !ok || imageContent.MIMEType != "image/png" {
 		t.Fatalf("image content=%T %#v", imageResult.Content[1], imageResult.Content[1])
 	}
-	decoded, err := base64.StdEncoding.DecodeString(imageContent.Data)
-	if err != nil || !bytes.Equal(decoded, imageBytes) {
-		t.Fatalf("image bytes changed: err=%v size=%d/%d", err, len(decoded), len(imageBytes))
+	decoded := imageContent.Data
+	if !bytes.Equal(decoded, imageBytes) {
+		t.Fatalf("image bytes changed: size=%d/%d", len(decoded), len(imageBytes))
 	}
 
 	wrapped := arc.WrapToolResult("file_read", arc.ResultContext{}, imageResult)
 	if len(wrapped.Content) != 2 {
 		t.Fatalf("wrapped image content=%#v", wrapped.Content)
 	}
-	if _, ok := wrapped.Content[1].(mcp.ImageContent); !ok {
+	if _, ok := wrapped.Content[1].(*mcp.ImageContent); !ok {
 		t.Fatalf("ARC dropped direct image content: %T", wrapped.Content[1])
 	}
 }
@@ -171,14 +178,14 @@ func TestSourceReadWindowAndBatchExposeSameFormat(t *testing.T) {
 
 	read := func(arguments map[string]any) map[string]any {
 		t.Helper()
-		request := mcp.CallToolRequest{}
-		request.Params.Arguments = arguments
+		request := mcpresult.Request(map[string]any{})
+		request = mcpresult.Request(arguments)
 		result, err := rt.toolFileReadUnified(context.Background(), request)
 		if err != nil {
 			t.Fatal(err)
 		}
-		data, ok := result.StructuredContent.(map[string]any)
-		if !ok {
+		data := structuredBusinessData(result)
+		if data == nil {
 			t.Fatalf("structured data=%T", result.StructuredContent)
 		}
 		return data
@@ -198,8 +205,8 @@ func TestSourceReadWindowAndBatchExposeSameFormat(t *testing.T) {
 		"mode":              "window",
 		"items":             []any{map[string]any{"path": "format.txt", "limit": 10}},
 	})
-	results, ok := batch["results"].([]map[string]any)
-	if !ok || len(results) != 1 {
+	results := asMapSlice(batch["results"])
+	if len(results) != 1 {
 		t.Fatalf("batch results=%T %+v", batch["results"], batch)
 	}
 	if !reflect.DeepEqual(windowFormat, results[0]["format"]) {

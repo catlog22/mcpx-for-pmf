@@ -10,24 +10,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/envelope"
 	"mcpx/internal/security"
 )
 
-func (r *Runtime) toolProjectInspect(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolProjectInspect(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, session, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil
 	}
 	data := inspectProject(ctx, session.WorkspacePath)
 	data["agent_instructions"] = r.agentInstructions(session.WorkspacePath)
-	result, err := r.remoteResult(envReq, session.ID, session.WorkspaceName, data)
-	if err == nil {
-		result.StructuredContent = data
-	}
-	return result, err
+	return r.remoteResult(envReq, session.ID, session.WorkspaceName, data)
 }
 
 func (r *Runtime) sourcePathAllowed(workspacePath string) func(string) bool {

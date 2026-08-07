@@ -11,7 +11,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/audit"
 	"mcpx/internal/auth"
@@ -22,7 +22,7 @@ import (
 	"mcpx/internal/security"
 )
 
-func (r *Runtime) toolChangePrepare(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolChangePrepare(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, session, fail := r.changeRequest(ctx, req, true)
 	if fail != nil {
 		return fail, nil
@@ -62,7 +62,7 @@ func (r *Runtime) toolChangePrepare(ctx context.Context, req mcp.CallToolRequest
 	return changeDiffResult(prepared), nil
 }
 
-func (r *Runtime) toolChangeDiff(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolChangeDiff(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, session, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil
@@ -78,7 +78,7 @@ func (r *Runtime) toolChangeDiff(ctx context.Context, req mcp.CallToolRequest) (
 	return changeDiffResult(item), nil
 }
 
-func (r *Runtime) toolChangeHistory(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolChangeHistory(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, session, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil
@@ -179,7 +179,7 @@ func changeHistorySummary(remoteSessionID string, history []changeset.Changeset)
 	}
 }
 
-func (r *Runtime) toolChangeDiscard(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolChangeDiscard(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, session, fail := r.changeRequest(ctx, req, true)
 	if fail != nil {
 		return fail, nil
@@ -200,7 +200,7 @@ func (r *Runtime) toolChangeDiscard(ctx context.Context, req mcp.CallToolRequest
 	return changeDiffResult(discarded), nil
 }
 
-func (r *Runtime) toolChangeRevert(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolChangeRevert(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, session, fail := r.changeRequest(ctx, req, true)
 	if fail != nil {
 		return fail, nil
@@ -228,7 +228,7 @@ func (r *Runtime) toolChangeRevert(ctx context.Context, req mcp.CallToolRequest)
 	return changeDiffResult(revert), nil
 }
 
-func (r *Runtime) changeRequest(ctx context.Context, req mcp.CallToolRequest, edit bool) (envelope.Request, auth.Principal, remotesession.Session, *mcp.CallToolResult) {
+func (r *Runtime) changeRequest(ctx context.Context, req *mcp.CallToolRequest, edit bool) (envelope.Request, auth.Principal, remotesession.Session, *mcp.CallToolResult) {
 	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
 		return envReq, principal, remotesession.Session{}, fail
@@ -527,7 +527,7 @@ func changeDiffResultFromDTO(item changeset.Changeset, dto map[string]any) *mcp.
 	if markdown := changesetDiffMarkdown(dto); markdown != "" {
 		fallback += "\n\n" + markdown
 	}
-	return mcp.NewToolResultStructured(dto, fallback)
+	return compactToolResult(dto, fallback)
 }
 
 func changesetDiffMarkdown(dto map[string]any) string {
@@ -604,12 +604,23 @@ func (r *Runtime) changeError(envReq envelope.Request, remoteSessionID, workspac
 	switch {
 	case errors.Is(err, changeset.ErrNotFound):
 		code = "CHANGESET_NOT_FOUND"
+	case (strings.Contains(message, "base_sha256") || strings.Contains(message, "expected_sha256")) && strings.Contains(message, "required"):
+		// Before STALE: missing base must not be classified as revision mismatch.
+		code = "REVISION_REQUIRED"
 	case strings.Contains(message, "no match"):
 		code = "PATCH_CONTEXT_NOT_FOUND"
 	case strings.Contains(message, "ambiguous_match"):
 		code = "PATCH_CONTEXT_AMBIGUOUS"
-	case strings.Contains(message, "hunk") || strings.Contains(message, "overlap"):
+	case strings.Contains(message, "hunk") || strings.Contains(message, "overlap") || strings.Contains(message, "expected Unified Diff"):
+		// Check before generic "does not match" (hunk line counts also use that phrase).
 		code = "PATCH_HUNKS_OVERLAP"
+	case strings.Contains(message, "does not match"):
+		// Correct base + wrong patch context/removed line — not a stale file revision.
+		// Covers "context does not match" and "removed line does not match".
+		code = "PATCH_CONTEXT_MISMATCH"
+	case strings.Contains(message, "patch apply failed"):
+		// Generic patch apply errors (syntax, parse) that are not hunk/context-specific.
+		code = "PATCH_APPLY_FAILED"
 	case strings.Contains(message, "rollback:") && !strings.Contains(message, "rollback: <nil>"):
 		code = "PATCH_ROLLBACK_FAILED"
 	case errors.Is(err, changeset.ErrStaleRevision):
@@ -630,8 +641,6 @@ func (r *Runtime) changeError(envReq envelope.Request, remoteSessionID, workspac
 		code = "PATCH_DUPLICATE_PATH"
 	case strings.Contains(message, "delete/create conflict"):
 		code = "DELETE_CREATE_CONFLICT"
-	case (strings.Contains(message, "base_sha256") || strings.Contains(message, "expected_sha256")) && strings.Contains(message, "required"):
-		code = "REVISION_REQUIRED"
 	case strings.Contains(message, "new_path required"):
 		code = "MISSING_ARGUMENT"
 	}
@@ -646,7 +655,13 @@ func (r *Runtime) changeError(envReq envelope.Request, remoteSessionID, workspac
 		message += "；" + patchFormatGuidance
 	}
 	if code == "STALE_REVISION" {
-		message += "；patch 上下文与实际文件不一致（通常来自旧版本或生成错误）。仅需重试失败的这个文件操作，其他文件操作可保持 base_sha256 不变；先 source_read(view=full) 获取当前内容，按实际行内容重新生成 hunk，或改用 replace_exact/insert_before/insert_after。"
+		message += "；base_sha256 与当前文件版本不一致。调用 source_read(view=file, mode=full, path=…) 后，将返回的 sha256 原样写入失败 op 的 base_sha256 再重试该 path。"
+	}
+	if code == "REVISION_REQUIRED" {
+		message += "；缺少 base_sha256。先 source_read(view=file, mode=full) 取返回字段 sha256，原样填入 operations[].base_sha256（字段名固定，不要用 revision/hash/digest）。"
+	}
+	if code == "PATCH_CONTEXT_MISMATCH" || code == "PATCH_APPLY_FAILED" {
+		message += "；补丁或匹配上下文与文件内容不一致（base_sha256 可能仍正确）。按 source_read 返回的 content 重建 match/replacement，或改用 replace_exact；不要重试同一 patch。"
 	}
 	if code == "FORMAT_CHANGED" {
 		message += "；普通变更必须保留目标文件的字符集、BOM、换行格式和末尾换行状态；先读取当前文件的 format，再按该格式生成内容。只有明确要求格式化时才使用 change_execute(format=true)。"
@@ -654,17 +669,21 @@ func (r *Runtime) changeError(envReq envelope.Request, remoteSessionID, workspac
 	if code == "CHANGESET_DISCARDED" {
 		message += "；该草稿已明确丢弃，不能继续应用；请重新准备新的 Changeset。"
 	}
-	if code == "PATCH_HUNKS_OVERLAP" || code == "STALE_REVISION" {
+	if code == "PATCH_HUNKS_OVERLAP" || code == "PATCH_CONTEXT_MISMATCH" || code == "PATCH_APPLY_FAILED" || code == "PATCH_CONTEXT_NOT_FOUND" || code == "PATCH_CONTEXT_AMBIGUOUS" {
 		message += "；" + patchGuidance
 	}
 	response := envelope.Fail(envelope.StatusError, envReq.RequestID, workspace, nil, code, message)
 	response.RemoteSessionID = remoteSessionID
-	if code == "STALE_REVISION" || code == "PATCH_CONFLICT" || code == "PATCH_CONTEXT_NOT_FOUND" || code == "PATCH_CONTEXT_AMBIGUOUS" || code == "PATCH_HUNKS_OVERLAP" {
-		path := changesetErrorPath(message)
+	path := changesetErrorPath(message)
+	ordinal := changesetErrorOrdinal(message)
+	attachChangeFieldSemantics(&response, code, path, ordinal, remoteSessionID)
+	if code == "STALE_REVISION" || code == "PATCH_CONFLICT" || code == "PATCH_CONTEXT_NOT_FOUND" || code == "PATCH_CONTEXT_AMBIGUOUS" || code == "PATCH_HUNKS_OVERLAP" || code == "PATCH_CONTEXT_MISMATCH" || code == "PATCH_APPLY_FAILED" {
 		if path != "" {
-			addRecoveryAction(&response, "file_read", "read the current file revision before generating a new Changeset", map[string]any{
+			addRecoveryAction(&response, "file_read", "调用 source_read 读取当前文件；将返回的 sha256 原样写入 base_sha256 后仅重试失败 op", map[string]any{
 				"remote_session_id": remoteSessionID,
 				"path":              path,
+				"view":              "file",
+				"mode":              "full",
 			})
 		} else {
 			addRecoveryAction(&response, "context_query", "list or locate the affected file before retrying", map[string]any{
@@ -674,19 +693,18 @@ func (r *Runtime) changeError(envReq envelope.Request, remoteSessionID, workspac
 		}
 	}
 	if code == "REVISION_REQUIRED" {
-		arguments := map[string]any{"remote_session_id": remoteSessionID}
-		if path := changesetErrorPath(message); path != "" {
-			arguments["path"] = path
-		}
-		addRecoveryAction(&response, "file_read", "read the current revision of the target file, then retry the operation with its base_sha256", arguments)
-	}
-	if code == "FORMAT_CHANGED" {
-		path := changesetErrorPath(message)
-		arguments := map[string]any{"remote_session_id": remoteSessionID}
+		arguments := map[string]any{"remote_session_id": remoteSessionID, "view": "file", "mode": "full"}
 		if path != "" {
 			arguments["path"] = path
 		}
-		addRecoveryAction(&response, "file_read", "读取目标文件的完整 format 后，保持字符集、BOM、换行和末尾换行状态重新准备 Changeset", arguments)
+		addRecoveryAction(&response, "file_read", "source_read 后复制字段 sha256 → operations[].base_sha256，再 change_prepare", arguments)
+	}
+	if code == "FORMAT_CHANGED" {
+		arguments := map[string]any{"remote_session_id": remoteSessionID, "view": "file", "mode": "full"}
+		if path != "" {
+			arguments["path"] = path
+		}
+		addRecoveryAction(&response, "file_read", "读取 format 与 sha256 后按原 line_ending 重写 match/content，并带上 base_sha256", arguments)
 	}
 	if code == "PATCH_DUPLICATE_PATH" {
 		addRecoveryAction(&response, "change_manage", "merge operations for the same path into a single operation", map[string]any{
@@ -694,7 +712,7 @@ func (r *Runtime) changeError(envReq envelope.Request, remoteSessionID, workspac
 			"action":            "prepare",
 		})
 	}
-	if code == "PATCH_HUNKS_OVERLAP" || code == "STALE_REVISION" || code == "FORMAT_CHANGED" {
+	if code == "PATCH_HUNKS_OVERLAP" || code == "PATCH_CONTEXT_MISMATCH" || code == "PATCH_APPLY_FAILED" || code == "FORMAT_CHANGED" {
 		if response.Error != nil {
 			if response.Error.Details == nil {
 				response.Error.Details = map[string]any{}
@@ -720,22 +738,140 @@ func (r *Runtime) changeError(envReq envelope.Request, remoteSessionID, workspac
 	return r.resultJSON(response)
 }
 
+// attachChangeFieldSemantics fills machine-readable field maps so models copy
+// values instead of inventing field names or aliases.
+func attachChangeFieldSemantics(response *envelope.Response, code, path string, ordinal *int, remoteSessionID string) {
+	if response == nil || response.Error == nil {
+		return
+	}
+	if response.Error.Details == nil {
+		response.Error.Details = map[string]any{}
+	}
+	d := response.Error.Details
+	if path != "" {
+		d["path"] = path
+	}
+	if ordinal != nil {
+		d["failed_ordinal"] = *ordinal
+	}
+	// Fixed copy contract: source_read.sha256 -> change_prepare.operations[].base_sha256
+	fieldMap := map[string]any{
+		"base_sha256": map[string]any{
+			"from_tool":  "source_read",
+			"from_field": "sha256",
+			"to_tool":    "change_prepare",
+			"to_field":   "operations[].base_sha256",
+			"rule":       "copy_verbatim",
+			"note":       "形如 sha256:<64 hex>；禁止截断、改前缀或改字段名。create 可省略；delete 可省略；其余改已有文件必填。",
+		},
+		"match": map[string]any{
+			"from_tool":  "source_read",
+			"from_field": "content",
+			"to_field":   "operations[].match",
+			"rule":       "substring_of_content",
+			"note":       "必须是 content 中的连续原文，含空白与换行。",
+		},
+		"replacement": map[string]any{
+			"to_field": "operations[].replacement",
+			"for":      []string{"replace_exact"},
+			"note":     "replace_exact 用 replacement；insert_* 用 content；不要对调。",
+		},
+		"content": map[string]any{
+			"to_field": "operations[].content",
+			"for":      []string{"create", "insert_before", "insert_after", "replace_range"},
+			"note":     "create/insert_*/replace_range 用 content。",
+		},
+		"expected_digest": map[string]any{
+			"from_tool":  "change_prepare",
+			"from_field": "digest",
+			"to_tool":    "change_apply",
+			"to_field":   "expected_digest",
+			"rule":       "copy_verbatim",
+			"note":       "也可复制 expected_digest 同名字段；禁止填 diff 统计或 changeset_id。",
+		},
+	}
+	d["field_map"] = fieldMap
+
+	switch code {
+	case "REVISION_REQUIRED":
+		d["required_fields"] = []string{"operations[].base_sha256"}
+		d["retry"] = map[string]any{
+			"steps": []map[string]any{
+				{"tool": "source_read", "arguments": map[string]any{"session_id": remoteSessionID, "view": "file", "mode": "full", "path": path}},
+				{"tool": "change_prepare", "set": map[string]string{"operations[failed_ordinal].base_sha256": "source_read.sha256"}},
+			},
+		}
+	case "STALE_REVISION":
+		d["required_fields"] = []string{"operations[].base_sha256"}
+		d["retry"] = map[string]any{
+			"steps": []map[string]any{
+				{"tool": "source_read", "arguments": map[string]any{"session_id": remoteSessionID, "view": "file", "mode": "full", "path": path}},
+				{"tool": "change_prepare", "set": map[string]string{"operations[failed_ordinal].base_sha256": "source_read.sha256"}, "note": "仅重试该 path/ordinal；其它文件的 base 可不变"},
+			},
+		}
+	case "PATCH_CONTEXT_NOT_FOUND", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_MISMATCH", "PATCH_HUNKS_OVERLAP", "PATCH_APPLY_FAILED":
+		d["preferred_operations"] = []string{"replace_exact", "insert_before", "insert_after", "delete_exact"}
+		d["avoid"] = []string{"update.patch until context is verified"}
+		d["retry"] = map[string]any{
+			"steps": []map[string]any{
+				{"tool": "source_read", "arguments": map[string]any{"session_id": remoteSessionID, "view": "file", "mode": "full", "path": path}},
+				{"tool": "change_prepare", "note": "用 content 重建 match/replacement；base_sha256=返回的 sha256；优先 exact 操作"},
+			},
+		}
+	case "DELETE_CREATE_CONFLICT":
+		d["retry"] = map[string]any{
+			"steps": []any{
+				"change_prepare+apply 仅 delete",
+				"source_read/list 确认删除结果",
+				"change_prepare+apply 仅 create",
+			},
+		}
+	}
+}
+
+func changesetErrorOrdinal(message string) *int {
+	const prefix = "operation "
+	lower := strings.ToLower(message)
+	index := strings.Index(lower, prefix)
+	if index < 0 {
+		return nil
+	}
+	rest := message[index+len(prefix):]
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return nil
+	}
+	n, err := strconv.Atoi(rest[:end])
+	if err != nil {
+		return nil
+	}
+	return &n
+}
+
 func changesetErrorPath(message string) string {
-	for _, marker := range []string{"file revision is stale:", "file format changed:", "digest mismatch for ", "apply ", "patch context did not match in ", "base_sha256 (expected_sha256 alias) required for ", "expected_sha256 required for "} {
+	for _, marker := range []string{"file revision is stale:", "patch apply failed:", "file format changed:", "digest mismatch for ", "apply ", "patch context did not match in ", "base_sha256 (expected_sha256 alias) required for ", "expected_sha256 required for ", "base_sha256 required for "} {
 		index := strings.LastIndex(strings.ToLower(message), marker)
 		if index < 0 {
 			continue
 		}
 		candidate := strings.TrimSpace(message[index+len(marker):])
-		for _, operation := range []string{"create", "update", "rename", "delete"} {
+		// "… required for update: path" or "… required for replace_exact" (no path).
+		for _, operation := range []string{"replace_exact", "insert_before", "insert_after", "delete_exact", "replace_range", "create", "update", "rename", "delete"} {
 			prefix := operation + ": "
 			if strings.HasPrefix(candidate, prefix) {
 				candidate = strings.TrimSpace(strings.TrimPrefix(candidate, prefix))
 				break
 			}
+			if candidate == operation || strings.HasPrefix(candidate, operation+"；") || strings.HasPrefix(candidate, operation+";") || strings.HasPrefix(candidate, operation+",") {
+				return ""
+			}
 		}
-		if colon := strings.Index(candidate, ":"); colon >= 0 {
-			candidate = candidate[:colon]
+		// Path is the first token; stop at punctuation or whitespace (incl. fullwidth).
+		if cut := strings.IndexAny(candidate, ":；;，,\n\r\t "); cut >= 0 {
+			candidate = candidate[:cut]
 		}
 		candidate = strings.Trim(strings.TrimSpace(candidate), "`\"'")
 		if candidate != "" && !strings.ContainsAny(candidate, " \t\r\n") {

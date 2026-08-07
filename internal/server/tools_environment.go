@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/auth"
 	"mcpx/internal/envelope"
@@ -14,7 +14,7 @@ import (
 	"mcpx/internal/remotesession"
 )
 
-func (r *Runtime) toolEnvironmentInspect(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolEnvironmentInspect(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
 		return fail, nil
@@ -90,11 +90,7 @@ func (r *Runtime) toolEnvironmentInspect(ctx context.Context, req mcp.CallToolRe
 		report.SnapshotID = snapshot.ID
 	}
 
-	result, err := r.remoteResult(envReq, remoteSessionID, workspaceName, report)
-	if err == nil {
-		result.StructuredContent = report
-	}
-	return result, err
+	return r.remoteResult(envReq, remoteSessionID, workspaceName, report)
 }
 
 func (r *Runtime) ensureSessionEnvironment(ctx context.Context, principal auth.Principal, result *remotesession.CreateResult) error {

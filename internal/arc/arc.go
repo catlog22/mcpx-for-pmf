@@ -10,7 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/mcpresult"
 )
 
 const Version = "1.2"
@@ -99,16 +101,17 @@ type Envelope struct {
 	} `json:"mcpx"`
 }
 
-// WrapToolResult converts an internal handler result to the public MCPX result
-// format. The first text content is the host-visible rendered display (source
-// blocks, Markdown diffs, or a concise summary). The complete ARC envelope is
-// kept in _meta[ResultMetadataKey] instead of structuredContent: many MCP
-// hosts render structuredContent as a raw JSON card, which hides the useful
-// Markdown result from both the model and the user. Non-text protocol content
-// such as images and resource links is preserved.
+// WrapToolResult converts an internal handler result to the public MCPX result.
+//
+// Contract:
+//   - content[0].text — human-facing summary only (Markdown / short status / diffs)
+//   - structuredContent — model-facing fields {status, type, data, error?, actions?, hints?}
+//   - _meta[mcpx.result] — full ARC envelope for traces
+//
+// Models must consume structuredContent (or ARC data), not parse prose text.
 func WrapToolResult(tool string, runtime ResultContext, raw *mcp.CallToolResult) *mcp.CallToolResult {
 	if raw == nil {
-		raw = mcp.NewToolResultError("tool returned no result")
+		raw = mcpresult.NewError("tool returned no result")
 	}
 	data, summary := extractResult(raw)
 	resultType, resultData, hints, actions := classify(tool, raw.IsError, data, summary)
@@ -120,28 +123,55 @@ func WrapToolResult(tool string, runtime ResultContext, raw *mcp.CallToolResult)
 		renderer = "diff"
 	}
 	display, _ := RenderToolContent(tool, resultType, renderer, summary, resultData)
+	status := publicResultStatus(raw, data)
 
 	var envelope Envelope
 	envelope.MCPX.Version = Version
 	envelope.MCPX.Trace = buildTrace(tool, runtime, runtime.Timing)
 	envelope.MCPX.Result = Result{
-		Type: resultType, Schema: schemaForType(resultType), Status: publicResultStatus(raw, data), Summary: summary,
+		Type: resultType, Schema: schemaForType(resultType), Status: status, Summary: summary,
 		Data: resultData, Presentation: DefaultPresentation(resultType), Hints: hints, Actions: actions,
 	}
-	content := []mcp.Content{mcp.NewTextContent(display)}
+	content := []mcp.Content{&mcp.TextContent{Text: display}}
 	for _, item := range raw.Content {
-		if _, isText := item.(mcp.TextContent); !isText {
-			content = append(content, item)
+		if _, isText := item.(*mcp.TextContent); isText {
+			continue // replaced by display summary
 		}
+		content = append(content, item)
 	}
 	raw.Content = content
-	// The human-readable content is the default presentation. Preserve the
-	// machine-readable ARC envelope in response metadata without triggering
-	// host UIs that display structuredContent verbatim as JSON.
-	raw.StructuredContent = nil
-	raw.RawStructuredContent = nil
+	raw.StructuredContent = modelStructuredContent(status, resultType, resultData, data, hints, actions, raw.IsError)
 	setMetadata(raw, envelope, resultType)
 	return raw
+}
+
+// modelStructuredContent is the machine contract for models.
+func modelStructuredContent(status, resultType string, resultData any, rawData map[string]any, hints Hints, actions []Action, isError bool) map[string]any {
+	payload := map[string]any{
+		"status": status,
+		"type":   resultType,
+		"data":   resultData,
+	}
+	if rawData != nil {
+		if errBody, ok := rawData["error"]; ok && errBody != nil {
+			payload["error"] = errBody
+		}
+	}
+	if isError && payload["error"] == nil && resultData != nil {
+		if asMap, ok := resultData.(map[string]any); ok {
+			if _, hasCode := asMap["code"]; hasCode {
+				payload["error"] = asMap
+			}
+		}
+	}
+	if hints.PreferredBehavior != "" {
+		payload["hints"] = hints
+	}
+	if len(actions) > 0 {
+		payload["actions"] = actions
+	}
+	normalized, _ := normalizePublicData(payload).(map[string]any)
+	return normalized
 }
 
 func buildTrace(tool string, runtime ResultContext, timing Timing) Trace {
@@ -165,19 +195,16 @@ func buildTrace(tool string, runtime ResultContext, timing Timing) Trace {
 func setMetadata(result *mcp.CallToolResult, envelope Envelope, resultType string) {
 	trace := envelope.MCPX.Trace
 	if result.Meta == nil {
-		result.Meta = &mcp.Meta{AdditionalFields: map[string]any{}}
+		result.Meta = mcp.Meta{}
 	}
-	if result.Meta.AdditionalFields == nil {
-		result.Meta.AdditionalFields = map[string]any{}
-	}
-	result.Meta.AdditionalFields["mcpx.version"] = Version
-	result.Meta.AdditionalFields["mcpx.trace_id"] = trace.TraceID
-	result.Meta.AdditionalFields["mcpx.span_id"] = trace.SpanID
-	result.Meta.AdditionalFields["mcpx.request_id"] = trace.RequestID
-	result.Meta.AdditionalFields["mcpx.result_type"] = resultType
-	result.Meta.AdditionalFields["mcpx.processing_ms"] = trace.Duration.ServerMs - trace.NetworkLatencyMs
-	result.Meta.AdditionalFields["mcpx.server_elapsed_ms"] = trace.Duration.ServerMs
-	result.Meta.AdditionalFields[ResultMetadataKey] = envelope
+	result.Meta["mcpx.version"] = Version
+	result.Meta["mcpx.trace_id"] = trace.TraceID
+	result.Meta["mcpx.span_id"] = trace.SpanID
+	result.Meta["mcpx.request_id"] = trace.RequestID
+	result.Meta["mcpx.result_type"] = resultType
+	result.Meta["mcpx.processing_ms"] = trace.Duration.ServerMs - trace.NetworkLatencyMs
+	result.Meta["mcpx.server_elapsed_ms"] = trace.Duration.ServerMs
+	result.Meta[ResultMetadataKey] = envelope
 }
 
 func extractResult(raw *mcp.CallToolResult) (map[string]any, string) {
@@ -473,12 +500,7 @@ func toMap(value any) (map[string]any, bool) {
 }
 
 func firstText(result *mcp.CallToolResult) string {
-	for _, content := range result.Content {
-		if text, ok := content.(mcp.TextContent); ok {
-			return text.Text
-		}
-	}
-	return ""
+	return mcpresult.FirstText(result)
 }
 
 func newTraceID() string {

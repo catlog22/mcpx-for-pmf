@@ -2,9 +2,10 @@ package server
 
 import (
 	"context"
-	"encoding/base64"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/mcpresult"
 
 	"mcpx/internal/audit"
 	"mcpx/internal/envelope"
@@ -15,7 +16,7 @@ type screenCapturer interface {
 	Capture(context.Context, screenshot.Request) (screenshot.Result, error)
 }
 
-func (r *Runtime) toolScreenshotCapture(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolScreenshotCapture(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, session, fail := r.changeRequest(ctx, req, true)
 	if fail != nil {
 		return fail, nil
@@ -38,10 +39,8 @@ func (r *Runtime) toolScreenshotCapture(ctx context.Context, req mcp.CallToolReq
 	if err != nil {
 		return nil, err
 	}
-	result.Content = append(result.Content, mcp.ImageContent{
-		Type: mcp.ContentTypeImage, Data: base64.StdEncoding.EncodeToString(captured.Data), MIMEType: captured.Metadata.MIMEType,
-	})
-	result.StructuredContent = captured.Metadata
+	// Image is host-visible content; structured metadata stays in wire SC from remoteResult.
+	result.Content = append(result.Content, mcpresult.NewImage(captured.Data, captured.Metadata.MIMEType))
 	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: session.ID, Workspace: session.WorkspaceName, Tool: "screenshot_capture", Status: "ok", Detail: map[string]any{
 		"mode": captured.Metadata.Mode, "display": captured.Metadata.Display,
 		"width": captured.Metadata.OutputWidth, "height": captured.Metadata.OutputHeight,

@@ -159,6 +159,40 @@ func TestPrepareAppliesChainedExactEditsForSamePath(t *testing.T) {
 	assertFile(t, filepath.Join(workspace, "multi.txt"), string(original))
 }
 
+// Regression: models reuse source_read.sha256 on every chained exact op. After hop 1,
+// intermediate OriginalSHA256 is no longer the disk root; ops 3+ must still accept the root base.
+func TestPrepareChainedExactEditsAcceptDiskBaseOnThirdOp(t *testing.T) {
+	workspace, store, remoteID, principal := newChangesetFixture(t, nil)
+	original := []byte("alpha\nbeta\ngamma\ndelta\n")
+	if err := os.WriteFile(filepath.Join(workspace, "chain.txt"), original, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store.DB())
+	base := hashBytes(original)
+	prepared, err := service.Prepare(context.Background(), remoteID, principal.ID, workspace, "three-hop chain with shared base", []Operation{
+		{Operation: "replace_exact", Path: "chain.txt", BaseSHA256: base, Match: "alpha", Content: "ALPHA"},
+		{Operation: "replace_exact", Path: "chain.txt", BaseSHA256: base, Match: "beta", Content: "BETA"},
+		{Operation: "replace_exact", Path: "chain.txt", BaseSHA256: base, Match: "gamma", Content: "GAMMA"},
+	})
+	if err != nil {
+		t.Fatalf("third chained op must accept on-disk base_sha256: %v", err)
+	}
+	if len(prepared.Files) != 3 {
+		t.Fatalf("files=%d want 3", len(prepared.Files))
+	}
+	if got, want := string(prepared.Files[2].Proposed), "ALPHA\nBETA\nGAMMA\ndelta\n"; got != want {
+		t.Fatalf("proposed=%q want %q", got, want)
+	}
+	if prepared.Files[0].ChainRootSHA256 != base || prepared.Files[2].ChainRootSHA256 != base {
+		t.Fatalf("chain root must stay on-disk base: first=%q third=%q want %q",
+			prepared.Files[0].ChainRootSHA256, prepared.Files[2].ChainRootSHA256, base)
+	}
+	if _, err := service.Apply(context.Background(), prepared.ID, workspace); err != nil {
+		t.Fatal(err)
+	}
+	assertFile(t, filepath.Join(workspace, "chain.txt"), "ALPHA\nBETA\nGAMMA\ndelta\n")
+}
+
 func TestApplyCreatesNestedParentDirectories(t *testing.T) {
 	workspace, store, remoteID, principal := newChangesetFixture(t, nil)
 	service := NewService(store.DB())
@@ -329,7 +363,7 @@ func TestPrepareAppliesUnifiedPatchAtServer(t *testing.T) {
 	assertFile(t, filepath.Join(workspace, "App.vue"), "<template>\n  <main>New</main>\n</template>\n")
 }
 
-func TestPrepareRejectsPatchWithStaleContext(t *testing.T) {
+func TestPrepareRejectsPatchWithMismatchedContext(t *testing.T) {
 	workspace := t.TempDir()
 	original := "one\ntwo\n"
 	if err := os.WriteFile(filepath.Join(workspace, "value.txt"), []byte(original), 0o644); err != nil {
@@ -339,8 +373,59 @@ func TestPrepareRejectsPatchWithStaleContext(t *testing.T) {
 		Operation: "update", Path: "value.txt", BaseSHA256: hashBytes([]byte(original)),
 		Patch: "@@ -1,2 +1,2 @@\n one\n-missing\n+three\n",
 	}, nil)
+	if err == nil {
+		t.Fatal("expected patch context mismatch")
+	}
+	if errors.Is(err, ErrStaleRevision) {
+		t.Fatalf("patch context mismatch must not be ErrStaleRevision, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "does not match") && !strings.Contains(err.Error(), "patch apply failed") {
+		t.Fatalf("expected patch apply/context error, got %v", err)
+	}
+}
+
+func TestPrepareChainedMissingBaseIsRevisionRequired(t *testing.T) {
+	workspace := t.TempDir()
+	original := "alpha\nbeta\n"
+	if err := os.WriteFile(filepath.Join(workspace, "value.txt"), []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base := hashBytes([]byte(original))
+	first, err := prepareOperation(workspace, 0, Operation{
+		Operation: "replace_exact", Path: "value.txt", BaseSHA256: base,
+		Match: "alpha", Content: "ALPHA",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = prepareOperation(workspace, 1, Operation{
+		Operation: "replace_exact", Path: "value.txt",
+		Match: "beta", Content: "BETA",
+	}, &first)
+	if err == nil {
+		t.Fatal("expected missing base_sha256 error")
+	}
+	if errors.Is(err, ErrStaleRevision) {
+		t.Fatalf("missing base must not be ErrStaleRevision, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "base_sha256 required") {
+		t.Fatalf("expected base_sha256 required, got %v", err)
+	}
+}
+
+func TestPrepareWrongBaseIsStaleRevision(t *testing.T) {
+	workspace := t.TempDir()
+	original := "alpha\nbeta\n"
+	if err := os.WriteFile(filepath.Join(workspace, "value.txt"), []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := prepareOperation(workspace, 0, Operation{
+		Operation: "replace_exact", Path: "value.txt",
+		BaseSHA256: "sha256:" + strings.Repeat("0", 64),
+		Match:      "alpha", Content: "ALPHA",
+	}, nil)
 	if !errors.Is(err, ErrStaleRevision) {
-		t.Fatalf("expected stale patch context, got %v", err)
+		t.Fatalf("expected ErrStaleRevision, got %v", err)
 	}
 }
 

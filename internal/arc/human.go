@@ -50,6 +50,10 @@ func RenderToolContent(tool, resultType, renderer, summary string, data any) (st
 		if text, ok := renderOperationConfirmation(summary, asMap); ok {
 			return text, true
 		}
+		// Human summary only — models must use structuredContent.data.
+		if text, ok := renderOperationHumanSummary(summary, asMap); ok {
+			return text, true
+		}
 	}
 
 	if text, ok := renderProjectData(summary, asMap); ok {
@@ -81,13 +85,14 @@ func renderCommandConfirmation(summary string, data map[string]any) (string, boo
 	if command == "" && token == "" {
 		return summary, false
 	}
+	// Put confirmation_token first so host preview truncation cannot hide it.
 	var builder strings.Builder
+	if token != "" {
+		fmt.Fprintf(&builder, "confirmation_token: %s\n", inlineCode(token))
+	}
 	builder.WriteString("命令等待语义确认：请向用户展示命令及用途，获得明确确认后，使用相同 command 和 confirmation_token 原样重试。")
 	if command != "" {
 		fmt.Fprintf(&builder, "\n- command: %s", inlineCode(command))
-	}
-	if token != "" {
-		fmt.Fprintf(&builder, "\n- confirmation_token: %s", inlineCode(token))
 	}
 	if purpose := compactHuman(humanField(data, "purpose")); purpose != "" {
 		fmt.Fprintf(&builder, "\n- purpose: %s", purpose)
@@ -502,6 +507,45 @@ func renderProjectData(summary string, data map[string]any) (string, bool) {
 		builder.WriteString("\n```")
 	}
 	return strings.TrimSpace(builder.String()), true
+}
+
+// renderOperationHumanSummary is for people only. Models must read structuredContent.
+func renderOperationHumanSummary(summary string, data map[string]any) (string, bool) {
+	if data["confirmation_required"] == true || data["status"] == "waiting_confirmation" {
+		return summary, false
+	}
+	state := humanField(data, "state")
+	if state == "" {
+		state = humanField(data, "status")
+	}
+	opID := humanField(data, "operation_id")
+	purpose := compactHuman(humanField(data, "purpose"))
+	var builder strings.Builder
+	if strings.TrimSpace(summary) != "" && !isGenericSummary(summary) {
+		builder.WriteString(strings.TrimSpace(summary))
+	} else {
+		builder.WriteString("异步操作")
+		if state != "" {
+			fmt.Fprintf(&builder, " %s", state)
+		}
+	}
+	if opID != "" {
+		fmt.Fprintf(&builder, "\n- operation_id: %s", inlineCode(opID))
+	}
+	if purpose != "" {
+		fmt.Fprintf(&builder, "\n- purpose: %s", purpose)
+	}
+	if items := humanMaps(data["items"]); len(items) > 0 {
+		fmt.Fprintf(&builder, "\n- items: %d", len(items))
+	}
+	if steps := humanMaps(data["steps"]); len(steps) > 0 {
+		fmt.Fprintf(&builder, "\n- steps: %d", len(steps))
+	}
+	out := strings.TrimSpace(builder.String())
+	if out == "" {
+		return summary, false
+	}
+	return out, true
 }
 
 func renderGenericData(summary string, data map[string]any) (string, bool) {

@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/audit"
 	"mcpx/internal/config"
@@ -87,7 +87,7 @@ func (r *Runtime) terminalError(envReq envelope.Request, remoteSessionID, worksp
 	return r.resultJSON(response)
 }
 
-func (r *Runtime) toolFileSnapshot(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolFileSnapshot(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, remote, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil
@@ -106,7 +106,7 @@ func (r *Runtime) toolFileSnapshot(ctx context.Context, req mcp.CallToolRequest)
 	})
 }
 
-func (r *Runtime) toolFileChanges(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolFileChanges(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, remote, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil
@@ -136,7 +136,7 @@ func (r *Runtime) toolFileChanges(ctx context.Context, req mcp.CallToolRequest) 
 	return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, map[string]any{"changes": ch})
 }
 
-func (r *Runtime) toolFileWatch(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolFileWatch(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, remote, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil
@@ -148,7 +148,7 @@ func (r *Runtime) toolFileWatch(ctx context.Context, req mcp.CallToolRequest) (*
 	return r.toolFileChanges(ctx, req)
 }
 
-func (r *Runtime) toolSecretsProvide(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolSecretsProvide(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, remote, fail := r.changeRequest(ctx, req, true)
 	if fail != nil {
 		return fail, nil
@@ -196,7 +196,7 @@ func sortedKeys(values map[string]string) []string {
 	return keys
 }
 
-func (r *Runtime) toolMCPList(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolMCPList(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
 		return fail, nil
@@ -233,14 +233,10 @@ func (r *Runtime) toolMCPList(ctx context.Context, req mcp.CallToolRequest) (*mc
 			data["mcp_manifest_revision"] = mcpRevision(data["servers"])
 		}
 	}
-	result, resultErr := r.remoteResult(envReq, remoteID, ws.Name, data)
-	if resultErr == nil {
-		result.StructuredContent = data
-	}
-	return result, resultErr
+	return r.remoteResult(envReq, remoteID, ws.Name, data)
 }
 
-func (r *Runtime) toolMCPCall(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolMCPCall(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, remote, fail := r.changeRequest(ctx, req, true)
 	if fail != nil {
 		return fail, nil
@@ -347,7 +343,7 @@ func skillSummaryItems(skills []skill.Skill) []map[string]any {
 	return result
 }
 
-func (r *Runtime) toolSkillExecute(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolSkillExecute(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, remote, fail := r.changeRequest(ctx, req, true)
 	if fail != nil {
 		return fail, nil

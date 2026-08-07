@@ -8,14 +8,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"mcpx/internal/mcpresult"
+
+	"mcpx/internal/arc"
 	"mcpx/internal/envelope"
 	"mcpx/internal/operation"
 	"mcpx/internal/remotesession"
 )
 
-func (r *Runtime) toolOperationBatch(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolOperationBatch(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, session, fail := r.changeRequest(ctx, req, true)
 	if fail != nil {
 		return fail, nil
@@ -82,7 +85,7 @@ func (r *Runtime) toolOperationBatch(ctx context.Context, req mcp.CallToolReques
 	return r.resultJSON(response)
 }
 
-func (r *Runtime) toolOperationManage(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolOperationManage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
 		return fail, nil
@@ -234,11 +237,12 @@ func (r *Runtime) validateOperationToolArguments(toolName string, arguments map[
 	if !exists {
 		return fmt.Errorf("tool %q is not registered", toolName)
 	}
-	if len(tool.RawInputSchema) == 0 {
-		return nil
+	rawSchema := mcpresult.ToolSchemaJSON(tool)
+	if len(rawSchema) == 0 || string(rawSchema) == `{"type":"object"}` {
+		// still validate against object if present
 	}
 	var schema map[string]any
-	if err := json.Unmarshal(tool.RawInputSchema, &schema); err != nil {
+	if err := json.Unmarshal(rawSchema, &schema); err != nil {
 		return fmt.Errorf("invalid schema for tool %q", toolName)
 	}
 	merged := cloneArguments(arguments)
@@ -419,10 +423,8 @@ func operationResultView(page operation.ResultPage) map[string]any {
 }
 
 // operationResultValue unwraps the mcp.CallToolResult envelope stored by an
-// operation step. Depending on where the result was persisted, the value is
-// either the raw CallToolResult or a wrapper with a result field. Returning
-// the inner text (parsed as JSON when possible) keeps status/wait/result
-// responses directly usable and avoids a second serial parsing round trip.
+// operation step. Prefer machine data (ARC _meta / structuredContent) over the
+// human text summary so nested source_read matches, sha256, etc. stay fields.
 func operationResultValue(raw json.RawMessage) any {
 	value := decodeJSONValue(raw)
 	wrapper, ok := value.(map[string]any)
@@ -437,6 +439,9 @@ func operationResultValue(raw json.RawMessage) any {
 }
 
 func unwrapToolContent(result map[string]any, fallback any) any {
+	if data := extractMachineToolData(result); data != nil {
+		return data
+	}
 	content, ok := result["content"].([]any)
 	if !ok || len(content) == 0 {
 		return fallback
@@ -454,6 +459,83 @@ func unwrapToolContent(result map[string]any, fallback any) any {
 		return decoded
 	}
 	return text
+}
+
+// extractMachineToolData prefers structured fields over human prose text.
+// Stored step results look like: {_meta: {mcpx.result: {mcpx: {result: {data}}}}, content:[{text}]}.
+func extractMachineToolData(result map[string]any) any {
+	if sc := result["structuredContent"]; sc != nil {
+		return sc
+	}
+	if sc := result["structured_content"]; sc != nil {
+		return sc
+	}
+	meta, _ := result["_meta"].(map[string]any)
+	if meta == nil {
+		meta, _ = result["meta"].(map[string]any)
+	}
+	if meta == nil {
+		return nil
+	}
+	// mcp-go may nest additional fields under additionalFields or flatten them.
+	candidates := []any{meta[arc.ResultMetadataKey], meta["mcpx.result"]}
+	if additional, ok := meta["additionalFields"].(map[string]any); ok {
+		candidates = append(candidates, additional[arc.ResultMetadataKey], additional["mcpx.result"])
+	}
+	if additional, ok := meta["AdditionalFields"].(map[string]any); ok {
+		candidates = append(candidates, additional[arc.ResultMetadataKey], additional["mcpx.result"])
+	}
+	for _, candidate := range candidates {
+		if candidate == nil {
+			continue
+		}
+		if data := arcResultData(candidate); data != nil {
+			return data
+		}
+	}
+	return nil
+}
+
+func arcResultData(value any) any {
+	asMap, ok := value.(map[string]any)
+	if !ok {
+		// envelope may have been stored as typed JSON round-trip only
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return nil
+		}
+		if json.Unmarshal(raw, &asMap) != nil {
+			return nil
+		}
+	}
+	// shapes: {mcpx:{result:{data}}} or {result:{data}} or raw data map
+	if mcpx, ok := asMap["mcpx"].(map[string]any); ok {
+		if result, ok := mcpx["result"].(map[string]any); ok {
+			if data, ok := result["data"]; ok && data != nil {
+				// Keep type/status for consumers that branch on result kind.
+				return map[string]any{
+					"type":    result["type"],
+					"status":  result["status"],
+					"summary": result["summary"],
+					"data":    data,
+				}
+			}
+		}
+	}
+	if result, ok := asMap["result"].(map[string]any); ok {
+		if data, ok := result["data"]; ok && data != nil {
+			return map[string]any{
+				"type":    result["type"],
+				"status":  result["status"],
+				"summary": result["summary"],
+				"data":    data,
+			}
+		}
+	}
+	if _, hasData := asMap["data"]; hasData {
+		return asMap
+	}
+	return nil
 }
 
 func decodeJSONValue(raw json.RawMessage) any {

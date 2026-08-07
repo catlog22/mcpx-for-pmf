@@ -6,10 +6,10 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func (r *Runtime) resourceChangesetDiff(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+func (r *Runtime) resourceChangesetDiff(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 	remoteSessionID, changesetID, err := parseDevelopmentResourceURI(req.Params.URI, "changesets", "diff")
 	if err != nil {
 		return nil, err
@@ -28,10 +28,10 @@ func (r *Runtime) resourceChangesetDiff(ctx context.Context, req mcp.ReadResourc
 	if len(changeset.UnifiedDiff) > 8<<20 {
 		return nil, fmt.Errorf("changeset diff exceeds resource limit")
 	}
-	return []mcp.ResourceContents{mcp.TextResourceContents{URI: req.Params.URI, MIMEType: "text/x-diff", Text: changeset.UnifiedDiff}}, nil
+	return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: req.Params.URI, MIMEType: "text/x-diff", Text: changeset.UnifiedDiff}}}, nil
 }
 
-func (r *Runtime) resourceTaskLogs(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+func (r *Runtime) resourceTaskLogs(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 	remoteSessionID, taskID, err := parseDevelopmentResourceURI(req.Params.URI, "tasks", "logs")
 	if err != nil {
 		return nil, err
@@ -51,7 +51,7 @@ func (r *Runtime) resourceTaskLogs(ctx context.Context, req mcp.ReadResourceRequ
 	if err != nil {
 		return nil, err
 	}
-	return []mcp.ResourceContents{mcp.TextResourceContents{URI: req.Params.URI, MIMEType: "text/plain", Text: string(logs)}}, nil
+	return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: req.Params.URI, MIMEType: "text/plain", Text: string(logs)}}}, nil
 }
 
 func parseDevelopmentResourceURI(value, collection, suffix string) (string, string, error) {

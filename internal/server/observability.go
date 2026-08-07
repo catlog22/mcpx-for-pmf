@@ -8,32 +8,43 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/mcpresult"
 
 	"mcpx/internal/arc"
 	"mcpx/internal/logging"
 )
 
-func (r *Runtime) addTool(s *mcpserver.MCPServer, tool mcp.Tool, handler mcpserver.ToolHandlerFunc) {
+func (r *Runtime) addTool(s *mcp.Server, tool mcp.Tool, handler mcp.ToolHandler) {
 	tool = requireIntentSchema(tool)
-	tool.OutputSchema = mcp.ToolOutputSchema{}
-	tool.RawOutputSchema = arc.OutputSchema()
+	tool.OutputSchema = json.RawMessage(arc.OutputSchema())
 	instrumented := r.instrumentTool(tool.Name, handler)
 	if r.toolHandlers == nil {
-		r.toolHandlers = map[string]mcpserver.ToolHandlerFunc{}
+		r.toolHandlers = map[string]mcp.ToolHandler{}
 	}
 	if r.toolMeta == nil {
 		r.toolMeta = map[string]toolAnnotation{}
 	}
-	r.toolHandlers[tool.Name] = instrumented
-	r.toolMeta[tool.Name] = toolAnnotation{
-		ReadOnly:    boolPointerValue(tool.Annotations.ReadOnlyHint),
-		Destructive: boolPointerValue(tool.Annotations.DestructiveHint),
-		Idempotent:  boolPointerValue(tool.Annotations.IdempotentHint),
-		OpenWorld:   boolPointerValue(tool.Annotations.OpenWorldHint),
+	if r.toolIndex == nil {
+		r.toolIndex = map[string]mcp.Tool{}
 	}
-	s.AddTool(tool, instrumented)
+	ann := toolAnnotation{}
+	if tool.Annotations != nil {
+		ann = toolAnnotation{
+			ReadOnly:    tool.Annotations.ReadOnlyHint,
+			Destructive: boolPointerValue(tool.Annotations.DestructiveHint),
+			Idempotent:  tool.Annotations.IdempotentHint,
+			OpenWorld:   boolPointerValue(tool.Annotations.OpenWorldHint),
+		}
+	}
+	r.toolHandlers[tool.Name] = instrumented
+	r.toolMeta[tool.Name] = ann
+	r.toolIndexMu.Lock()
+	r.toolIndex[tool.Name] = tool
+	r.toolIndexMu.Unlock()
+	tt := tool
+	s.AddTool(&tt, instrumented)
 }
 
 func boolPointerValue(value *bool) bool {
@@ -49,29 +60,22 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 		"type":        "string",
 		"description": "上一工具调用后的可验证进度摘要、结果和下一步；没有下一次工具调用时请使用 progress_report",
 	}
-	if len(tool.RawInputSchema) > 0 {
-		var raw map[string]any
-		if err := json.Unmarshal(tool.RawInputSchema, &raw); err == nil {
-			properties, _ := raw["properties"].(map[string]any)
-			if properties == nil {
-				properties = map[string]any{}
-			}
-			properties["purpose"] = purpose
-			properties["progress_summary"] = progressSummary
-			raw["type"] = "object"
-			raw["properties"] = properties
-			if encoded, marshalErr := json.Marshal(raw); marshalErr == nil {
-				tool.RawInputSchema = encoded
-			}
-		}
-		return tool
+	rawBytes := mcpresult.ToolSchemaJSON(tool)
+	var raw map[string]any
+	if err := json.Unmarshal(rawBytes, &raw); err != nil || raw == nil {
+		raw = map[string]any{"type": "object", "properties": map[string]any{}}
 	}
-	tool.InputSchema.Type = "object"
-	if tool.InputSchema.Properties == nil {
-		tool.InputSchema.Properties = map[string]any{}
+	properties, _ := raw["properties"].(map[string]any)
+	if properties == nil {
+		properties = map[string]any{}
 	}
-	tool.InputSchema.Properties["purpose"] = purpose
-	tool.InputSchema.Properties["progress_summary"] = progressSummary
+	properties["purpose"] = purpose
+	properties["progress_summary"] = progressSummary
+	raw["type"] = "object"
+	raw["properties"] = properties
+	if encoded, marshalErr := json.Marshal(raw); marshalErr == nil {
+		tool.InputSchema = json.RawMessage(encoded)
+	}
 	return tool
 }
 
@@ -104,10 +108,10 @@ type interactionTiming struct {
 	ServerElapsedMs  int64
 }
 
-func (r *Runtime) instrumentTool(name string, handler mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc {
-	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolHandler {
+	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		received := time.Now()
-		callCtx, runtime := ensureRuntimeContext(ctx, req.Header, received)
+		callCtx, runtime := ensureRuntimeContext(ctx, mcpresult.Header(req), received)
 		clientName, clientVersion := clientInfoFromContext(callCtx)
 		if clientName != "" && clientName != "unknown" {
 			runtime = runtimeContextWithClient(runtime, clientName, clientVersion)
@@ -117,7 +121,8 @@ func (r *Runtime) instrumentTool(name string, handler mcpserver.ToolHandlerFunc)
 		internalOperationStep := isOperationChild(callCtx)
 		observationRequest, observationParseErr := r.parseEnv(callCtx, req)
 		if !internalOperationStep && observationParseErr == nil && r.observation != nil {
-			_ = r.observation.RecordToolStarted(callCtx, name, observationRequest, req.GetArguments())
+			// Async: never blocks tools/call on Store.Append.
+			_ = r.observation.RecordToolStarted(callCtx, name, observationRequest, mcpresult.Arguments(req))
 		}
 
 		var result *mcp.CallToolResult
@@ -134,16 +139,15 @@ func (r *Runtime) instrumentTool(name string, handler mcpserver.ToolHandlerFunc)
 		if err != nil || result == nil || result.IsError {
 			status = "error"
 		}
-		if !internalOperationStep && observationParseErr == nil && r.observation != nil {
-			_ = r.observation.RecordToolCompleted(callCtx, name, observationRequest, req.GetArguments(), result, err, timing)
-		}
 		if err != nil {
 			if result == nil {
-				result = mcp.NewToolResultError(err.Error())
+				result = mcpresult.NewError(err.Error())
 			} else {
 				result.IsError = true
 			}
 		}
+		// Wrap first so host-visible content is the human summary; observation
+		// then snapshots that text only (never full structuredContent dump).
 		result = arc.WrapToolResult(name, arc.ResultContext{
 			RequestID: runtime.RequestID, TraceID: runtime.TraceID, SpanID: runtime.SpanID,
 			Timing: arc.Timing{
@@ -152,6 +156,9 @@ func (r *Runtime) instrumentTool(name string, handler mcpserver.ToolHandlerFunc)
 				ProcessingMs: timing.ProcessingMs, ServerElapsedMs: timing.ServerElapsedMs,
 			},
 		}, result)
+		if !internalOperationStep && observationParseErr == nil && r.observation != nil {
+			_ = r.observation.RecordToolCompleted(callCtx, name, observationRequest, mcpresult.Arguments(req), result, err, timing)
+		}
 		if !internalOperationStep {
 			logToolCall(name, runtime, status, timing)
 		}

@@ -1,11 +1,14 @@
 package server
 
 import (
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/mcpresult"
+
 	"encoding/json"
 	"strings"
 	"testing"
 
-	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"mcpx/internal/envelope"
 )
@@ -69,17 +72,17 @@ func TestAgentGuidanceRequiresUserVisibleResponseContract(t *testing.T) {
 
 func TestEveryPublicToolHasModelFacingDescriptionAndActionBranches(t *testing.T) {
 	runtime := &Runtime{}
-	protocol := mcpserver.NewMCPServer("mcpx-test", "0.1.0")
+	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
 	runtime.registerTools(protocol)
-	for name, registered := range protocol.ListTools() {
-		if strings.TrimSpace(registered.Tool.Description) == "" {
+	for name, registered := range runtime.listedToolMap() {
+		if strings.TrimSpace(registered.Description) == "" {
 			t.Fatalf("tool %s has no description", name)
 		}
-		if len(registered.Tool.RawInputSchema) == 0 {
+		if len(mcpresult.ToolSchemaJSON(registered)) == 0 {
 			continue
 		}
 		var schema map[string]any
-		if err := json.Unmarshal(registered.Tool.RawInputSchema, &schema); err != nil {
+		if err := json.Unmarshal(mcpresult.ToolSchemaJSON(registered), &schema); err != nil {
 			t.Fatalf("tool %s schema: %v", name, err)
 		}
 		branches, ok := schema["oneOf"].([]any)
@@ -183,21 +186,21 @@ func TestAgentGuidanceIncludesChangePayloadCheatSheet(t *testing.T) {
 
 func TestChangeSchemasAreSelfDescribingAndFlat(t *testing.T) {
 	runtime := &Runtime{}
-	protocol := mcpserver.NewMCPServer("mcpx-test", "0.1.0")
+	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
 	runtime.registerTools(protocol)
-	registered := protocol.ListTools()["change_prepare"].Tool
-	if len(registered.RawInputSchema) == 0 {
+	registered := runtime.listedToolMap()["change_prepare"]
+	if len(mcpresult.ToolSchemaJSON(registered)) == 0 {
 		t.Fatal("change_prepare must expose a raw schema")
 	}
 	var schema map[string]any
-	if err := json.Unmarshal(registered.RawInputSchema, &schema); err != nil {
+	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(registered), &schema); err != nil {
 		t.Fatal(err)
 	}
 	if _, hasOneOf := schema["oneOf"]; hasOneOf {
-		t.Fatalf("change_prepare schema must not rely on top-level oneOf: %s", registered.RawInputSchema)
+		t.Fatalf("change_prepare schema must not rely on top-level oneOf: %s", mcpresult.ToolSchemaJSON(registered))
 	}
 	if schema["additionalProperties"] != false {
-		t.Fatalf("change_prepare must reject unknown fields: %s", registered.RawInputSchema)
+		t.Fatalf("change_prepare must reject unknown fields: %s", mcpresult.ToolSchemaJSON(registered))
 	}
 	properties, ok := schema["properties"].(map[string]any)
 	if !ok {

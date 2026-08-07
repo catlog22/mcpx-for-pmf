@@ -3,11 +3,12 @@ package arc
 import (
 	"testing"
 
-	"github.com/mark3labs/mcp-go/mcp"
+
+	"mcpx/internal/mcpresult"
 )
 
 func TestWrapToolResultExposesRecoveryActionFromErrorDetails(t *testing.T) {
-	raw := mcp.NewToolResultStructured(map[string]any{
+	raw := mcpresult.NewStructured(map[string]any{
 		"ok":     false,
 		"status": "error",
 		"error": map[string]any{

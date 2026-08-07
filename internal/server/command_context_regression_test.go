@@ -1,11 +1,13 @@
 package server
 
 import (
+	"mcpx/internal/mcpresult"
+
 	"context"
 	"strings"
 	"testing"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"mcpx/internal/remotesession"
 )
 
@@ -28,10 +30,10 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	missingPurpose := mcp.CallToolRequest{}
-	missingPurpose.Params.Arguments = map[string]any{
+	missingPurpose := mcpresult.Request(map[string]any{
 		"remote_session_id": created.Session.ID, "command": "printf context",
-	}
+	})
+	
 	missingResult, err := rt.toolCommandExecute(context.Background(), missingPurpose)
 	if err != nil {
 		t.Fatal(err)
@@ -41,12 +43,12 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 		t.Fatalf("missing purpose was accepted: %+v", missing)
 	}
 
-	invalidScope := mcp.CallToolRequest{}
-	invalidScope.Params.Arguments = map[string]any{
+	invalidScope := mcpresult.Request(map[string]any{
 		"intent":            "validate command scope",
 		"remote_session_id": created.Session.ID, "command": "printf context",
 		"purpose": "verify context binding", "scope": "host",
-	}
+	})
+	
 	invalidResult, err := rt.toolCommandExecute(context.Background(), invalidScope)
 	if err != nil {
 		t.Fatal(err)
@@ -57,12 +59,12 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 	}
 
 	// Confirm rules create a pending action carrying the exact command context.
-	confirmationRequest := mcp.CallToolRequest{}
-	confirmationRequest.Params.Arguments = map[string]any{
+	confirmationRequest := mcpresult.Request(map[string]any{
 		"intent":            "request semantic confirmation for a command",
 		"remote_session_id": created.Session.ID, "command": "echo confirmation",
 		"purpose": "verify confirmation context", "scope": "workspace",
-	}
+	})
+	
 	confirmationResult, err := rt.toolCommandExecute(context.Background(), confirmationRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +74,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 	if confirmationResponse["status"] != "waiting_confirmation" || confirmationData["purpose"] != "verify confirmation context" || confirmationData["scope"] != "workspace" {
 		t.Fatalf("confirm rule must create semantic confirmation: %+v", confirmationResponse)
 	}
-	if text, ok := confirmationResult.Content[0].(mcp.TextContent); ok {
+	if text, ok := confirmationResult.Content[0].(*mcp.TextContent); ok {
 		marker := "confirmation_token: "
 		tokenIndex := strings.Index(text.Text, marker)
 		if tokenIndex < 0 || tokenIndex > 300 {
@@ -86,12 +88,12 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 	if digest, _ := confirmationData["command_digest"].(string); !strings.HasPrefix(digest, "sha256:") {
 		t.Fatalf("missing command digest: %+v", confirmationData)
 	}
-	invalidRetry := mcp.CallToolRequest{}
-	invalidRetry.Params.Arguments = map[string]any{
+	invalidRetry := mcpresult.Request(map[string]any{
 		"intent":            "retry with a stale confirmation token",
 		"remote_session_id": created.Session.ID, "command": "echo confirmation",
 		"purpose": "verify confirmation context", "scope": "workspace", "confirmation_token": "ct_stale-token",
-	}
+	})
+	
 	invalidResult, retryErr := rt.toolCommandExecute(context.Background(), invalidRetry)
 	if retryErr != nil {
 		t.Fatal(retryErr)
@@ -105,12 +107,12 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 	if !strings.Contains(invalidMessage, "未匹配") {
 		t.Fatalf("stale token retry must explain the mismatch: %s", invalidMessage)
 	}
-	confirmRequest := mcp.CallToolRequest{}
-	confirmRequest.Params.Arguments = map[string]any{
+	confirmRequest := mcpresult.Request(map[string]any{
 		"intent":            "用户已确认执行该命令",
 		"remote_session_id": created.Session.ID, "command": "echo confirmation",
 		"purpose": "verify confirmation context", "scope": "workspace", "confirmation_token": confirmationData["confirmation_token"],
-	}
+	})
+	
 	confirmed, err := rt.toolCommandExecute(context.Background(), confirmRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -122,25 +124,25 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 
 	// A retry may rephrase the purpose without invalidating the confirmation
 	// token: the confirmed action is the command itself.
-	rephraseConfirm := mcp.CallToolRequest{}
-	rephraseConfirm.Params.Arguments = map[string]any{
+	rephraseConfirm := mcpresult.Request(map[string]any{
 		"intent":            "request confirmation for a rephrased retry",
 		"remote_session_id": created.Session.ID, "command": "echo rephrase",
 		"purpose": "original intent", "scope": "workspace",
-	}
+	})
+	
 	rephrasePending, err := rt.toolCommandExecute(context.Background(), rephraseConfirm)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rephrasePendingResponse := decodeToolResult(t, rephrasePending)
 	rephraseData, _ := rephrasePendingResponse["data"].(map[string]any)
-	rephraseRetry := mcp.CallToolRequest{}
-	rephraseRetry.Params.Arguments = map[string]any{
+	rephraseRetry := mcpresult.Request(map[string]any{
 		"intent":            "用户已确认，重新表述用途",
 		"remote_session_id": created.Session.ID, "command": "echo rephrase",
 		"purpose": "rephrased intent after user confirmation", "scope": "workspace",
 		"confirmation_token": rephraseData["confirmation_token"],
-	}
+	})
+	
 	rephraseExecuted, err := rt.toolCommandExecute(context.Background(), rephraseRetry)
 	if err != nil {
 		t.Fatal(err)
@@ -149,12 +151,12 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 		t.Fatalf("rephrased confirmation must reuse the pending token: %+v", response)
 	}
 
-	valid := mcp.CallToolRequest{}
-	valid.Params.Arguments = map[string]any{
+	valid := mcpresult.Request(map[string]any{
 		"intent":            "execute the scoped command",
 		"remote_session_id": created.Session.ID, "command": "printf context",
 		"purpose": "verify context binding", "scope": "workspace",
-	}
+	})
+	
 	validResult, err := rt.toolCommandExecute(context.Background(), valid)
 	if err != nil {
 		t.Fatal(err)
@@ -185,14 +187,14 @@ func TestCommandDeniedExplainsUnsafeShellFeatures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := mcp.CallToolRequest{}
-	request.Params.Arguments = map[string]any{
+	request := mcpresult.Request(map[string]any{
 		"intent":            "deny unsafe compound verification",
 		"remote_session_id": created.Session.ID,
 		"command":           `printf '%s' "$(echo hi)"`,
 		"purpose":           "verify remote branch pointer",
 		"scope":             "workspace",
-	}
+	})
+	
 	result, err := rt.toolCommandExecute(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)

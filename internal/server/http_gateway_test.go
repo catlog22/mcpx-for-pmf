@@ -13,10 +13,11 @@ import (
 	"testing"
 	"time"
 
-	mcpclient "github.com/mark3labs/mcp-go/client"
-	mcptransport "github.com/mark3labs/mcp-go/client/transport"
-	"github.com/mark3labs/mcp-go/mcp"
-	mcpserver "github.com/mark3labs/mcp-go/server"
+	
+
+	"mcpx/internal/mcpresult"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 
 	"mcpx/internal/config"
 	"mcpx/internal/oauth"
@@ -64,38 +65,29 @@ func TestGatewayStreamableActionDiscovery(t *testing.T) {
 	cfg.Auth.Mode = "bearer"
 	cfg.Auth.Token = "static-secret"
 
-	protocol := mcpserver.NewMCPServer("mcpx-test", "0.1.0", mcpserver.WithToolCapabilities(true))
-	protocol.AddTool(mcp.NewTool("remote_session_list"), func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		return mcp.NewToolResultText("ok"), nil
+	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
+	protocol.AddTool(&mcp.Tool{Name: "remote_session_list", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return mcpresult.NewText("ok"), nil
 	})
-	protocol.AddTool(mcp.NewTool("screenshot_capture"), func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		return mcp.NewToolResultText("ok"), nil
+	protocol.AddTool(&mcp.Tool{Name: "screenshot_capture", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return mcpresult.NewText("ok"), nil
 	})
 
-	streamable := mcpserver.NewStreamableHTTPServer(protocol, mcpserver.WithDisableLocalhostProtection(true))
+	streamable := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return protocol }, &mcp.StreamableHTTPOptions{DisableLocalhostProtection: true})
 	gw := NewGateway(cfg, nil, streamable)
 	ts := httptest.NewServer(gw.Handler())
 	defer ts.Close()
 
-	client, err := mcpclient.NewStreamableHttpClient(ts.URL+"/mcp", mcptransport.WithHTTPHeaders(map[string]string{
-		"Authorization": "Bearer static-secret",
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := client.Start(ctx); err != nil {
-		t.Fatalf("start Streamable HTTP client: %v", err)
+	httpClient := &http.Client{Transport: roundTripperWithAuth(http.DefaultTransport, "Bearer static-secret")}
+	client := mcp.NewClient(&mcp.Implementation{Name: "streamable-discovery-test", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL + "/mcp", HTTPClient: httpClient}, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
 	}
-	initReq := mcp.InitializeRequest{}
-	initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-	initReq.Params.ClientInfo = mcp.Implementation{Name: "streamable-discovery-test", Version: "1.0.0"}
-	if _, err := client.Initialize(ctx, initReq); err != nil {
-		t.Fatalf("initialize: %v", err)
-	}
-	listed, err := client.ListTools(ctx, mcp.ListToolsRequest{})
+	defer session.Close()
+	listed, err := session.ListTools(ctx, nil)
 	if err != nil || len(listed.Tools) != 2 {
 		t.Fatalf("tools/list result=%+v err=%v", listed, err)
 	}

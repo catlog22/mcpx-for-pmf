@@ -1,6 +1,8 @@
 package server
 
 import (
+	"mcpx/internal/mcpresult"
+
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -10,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/changeset"
 	"mcpx/internal/remotesession"
@@ -32,20 +34,20 @@ func TestChangesetDigestIsVisibleInPrepareAndReadToolText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := mcp.CallToolRequest{}
-	request.Params.Arguments = map[string]any{
+	request := mcpresult.Request(map[string]any{
 		"intent":            "prepare a visible digest test",
 		"remote_session_id": created.Session.ID,
 		"summary":           "visible digest",
 		"operations": []any{map[string]any{
 			"operation": "create", "path": "visible-digest.txt", "content": "digest\n",
 		}},
-	}
+	})
+	
 	prepared, err := rt.toolHandlers["change_prepare"](context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	preparedText := prepared.Content[0].(mcp.TextContent).Text
+	preparedText := prepared.Content[0].(*mcp.TextContent).Text
 	preparedEnvelope := decodeARCEnvelope(t, prepared)
 	preparedData := preparedEnvelope["mcpx"].(map[string]any)["result"].(map[string]any)["data"].(map[string]any)
 	digest, _ := preparedData["digest"].(string)
@@ -57,17 +59,17 @@ func TestChangesetDigestIsVisibleInPrepareAndReadToolText(t *testing.T) {
 	}
 
 	changesetID, _ := preparedData["changeset_id"].(string)
-	readRequest := mcp.CallToolRequest{}
-	readRequest.Params.Arguments = map[string]any{
+	readRequest := mcpresult.Request(map[string]any{
 		"remote_session_id": created.Session.ID,
 		"view":              "diff",
 		"changeset_id":      changesetID,
-	}
+	})
+	
 	read, err := rt.toolHandlers["change_read"](context.Background(), readRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	readText := read.Content[0].(mcp.TextContent).Text
+	readText := read.Content[0].(*mcp.TextContent).Text
 	readEnvelope := decodeARCEnvelope(t, read)
 	readData := readEnvelope["mcpx"].(map[string]any)["result"].(map[string]any)["data"].(map[string]any)
 	if readData["digest"] != digest || readData["expected_digest"] != digest {
@@ -82,18 +84,18 @@ func TestChangesetDigestIsVisibleInPrepareAndReadToolText(t *testing.T) {
 		t.Fatalf("structured prepare payload lost digest: err=%v payload=%s", err, encoded)
 	}
 
-	conflictRequest := mcp.CallToolRequest{}
-	conflictRequest.Params.Arguments = map[string]any{
+	conflictRequest := mcpresult.Request(map[string]any{
 		"intent":            "verify digest recovery visibility",
 		"remote_session_id": created.Session.ID,
 		"changeset_id":      changesetID,
 		"expected_digest":   "sha256:wrong",
-	}
+	})
+	
 	conflict, err := rt.toolHandlers["change_apply"](context.Background(), conflictRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	conflictText := conflict.Content[0].(mcp.TextContent).Text
+	conflictText := conflict.Content[0].(*mcp.TextContent).Text
 	if !strings.Contains(conflictText, digest) {
 		t.Fatalf("model-facing conflict text missing exact expected digest %q: %s", digest, conflictText)
 	}
@@ -115,8 +117,7 @@ func TestPublicChangePrepareCanApplyInOneCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := mcp.CallToolRequest{}
-	request.Params.Arguments = map[string]any{
+	request := mcpresult.Request(map[string]any{
 		"intent":            "apply a one-call change",
 		"remote_session_id": created.Session.ID,
 		"summary":           "one-call change",
@@ -124,7 +125,8 @@ func TestPublicChangePrepareCanApplyInOneCall(t *testing.T) {
 		"operations": []any{map[string]any{
 			"operation": "create", "path": "one-call.txt", "content": "applied\n",
 		}},
-	}
+	})
+	
 	result, err := rt.toolHandlers["change_prepare"](context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -155,15 +157,15 @@ func TestChangeHistoryExposesDraftRecoveryActions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepare := mcp.CallToolRequest{}
-	prepare.Params.Arguments = map[string]any{
+	prepare := mcpresult.Request(map[string]any{
 		"intent":            "prepare a discardable change",
 		"remote_session_id": created.Session.ID,
 		"summary":           "discardable change",
 		"operations": []any{map[string]any{
 			"operation": "create", "path": "discardable.txt", "content": "draft\n",
 		}},
-	}
+	})
+	
 	prepared, err := rt.toolHandlers["change_prepare"](context.Background(), prepare)
 	if err != nil {
 		t.Fatal(err)
@@ -175,10 +177,10 @@ func TestChangeHistoryExposesDraftRecoveryActions(t *testing.T) {
 		t.Fatalf("prepared data = %+v", preparedData)
 	}
 
-	history := mcp.CallToolRequest{}
-	history.Params.Arguments = map[string]any{
+	history := mcpresult.Request(map[string]any{
 		"remote_session_id": created.Session.ID, "view": "history", "limit": 5,
-	}
+	})
+	
 	historyResult, err := rt.toolHandlers["change_read"](context.Background(), history)
 	if err != nil {
 		t.Fatal(err)
@@ -198,11 +200,11 @@ func TestChangeHistoryExposesDraftRecoveryActions(t *testing.T) {
 	if historyDigest == "" {
 		t.Fatalf("history digest missing: %+v", historyData)
 	}
-	unchanged := mcp.CallToolRequest{}
-	unchanged.Params.Arguments = map[string]any{
+	unchanged := mcpresult.Request(map[string]any{
 		"remote_session_id": created.Session.ID, "view": "history", "limit": 5,
 		"known_history_digest": historyDigest,
-	}
+	})
+	
 	unchangedResult, err := rt.toolHandlers["change_read"](context.Background(), unchanged)
 	if err != nil {
 		t.Fatal(err)
@@ -213,12 +215,12 @@ func TestChangeHistoryExposesDraftRecoveryActions(t *testing.T) {
 		t.Fatalf("unchanged history response = %+v", unchangedData)
 	}
 
-	discard := mcp.CallToolRequest{}
-	discard.Params.Arguments = map[string]any{
+	discard := mcpresult.Request(map[string]any{
 		"intent":            "discard the obsolete draft",
 		"remote_session_id": created.Session.ID,
 		"changeset_id":      changesetID,
-	}
+	})
+	
 	if _, err := rt.toolHandlers["change_discard"](context.Background(), discard); err != nil {
 		t.Fatal(err)
 	}
@@ -255,8 +257,7 @@ func TestPatchConflictExplainsLineEndingRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := sha256.Sum256(content)
-	request := mcp.CallToolRequest{}
-	request.Params.Arguments = map[string]any{
+	request := mcpresult.Request(map[string]any{
 		"intent":            "verify line ending patch recovery",
 		"remote_session_id": created.Session.ID,
 		"summary":           "overlapping Java patch",
@@ -264,12 +265,12 @@ func TestPatchConflictExplainsLineEndingRecovery(t *testing.T) {
 			"operation": "update", "path": "Demo.java", "base_sha256": fmt.Sprintf("sha256:%x", base[:]),
 			"patch": "@@ -1,3 +1,3 @@\n-class Demo {\n-    int value = 1;\n-}\n+class Demo {\n+    int value = 2;\n+}\n@@ -2,2 +2,2 @@\n-    int value = 1;\n+    int value = 2;\n }\n",
 		}},
-	}
+	})
 	result, err := rt.toolHandlers["change_prepare"](context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := result.Content[0].(mcp.TextContent).Text
+	text := result.Content[0].(*mcp.TextContent).Text
 	for _, want := range []string{"line_ending", "保留目标文件原有换行格式", "replace_exact", "base_sha256"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("patch recovery text missing %q: %s", want, text)
@@ -305,15 +306,15 @@ func TestChangeExecuteDoesNotWriteDiffFileToWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]any{
+	req := mcpresult.Request(map[string]any{
 		"intent":            "apply a file change",
 		"remote_session_id": created.Session.ID,
 		"summary":           "return diff without workspace artifact",
 		"operations": []map[string]any{
 			{"operation": "create", "path": "hello.go", "content": "package demo\n\nconst Hello = 1\n"},
 		},
-	}
+	})
+	
 	result, err := rt.toolChangeExecute(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -349,12 +350,12 @@ func TestChangeExecuteDeletesNonGitFileAfterSemanticConfirmation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deleteRequest := mcp.CallToolRequest{}
-	deleteRequest.Params.Arguments = map[string]any{
+	deleteRequest := mcpresult.Request(map[string]any{
 		"intent":            "delete the confirmed test file",
 		"remote_session_id": created.Session.ID, "summary": "remove test file",
 		"operations": []map[string]any{{"operation": "delete", "path": "remove-me.txt"}},
-	}
+	})
+	
 	deleteResult, err := rt.toolChangeExecute(context.Background(), deleteRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -368,12 +369,12 @@ func TestChangeExecuteDeletesNonGitFileAfterSemanticConfirmation(t *testing.T) {
 		t.Fatalf("delete confirmation should be semantic and not expose a separate action: %+v", pendingData)
 	}
 
-	confirmRequest := mcp.CallToolRequest{}
-	confirmRequest.Params.Arguments = map[string]any{
+	confirmRequest := mcpresult.Request(map[string]any{
 		"intent":            "用户已确认删除该文件",
 		"remote_session_id": created.Session.ID, "changeset_id": pendingData["changeset_id"],
 		"expected_digest": pendingData["digest"], "confirmation_token": pendingData["confirmation_token"],
-	}
+	})
+	
 	confirmedResult, err := rt.toolChangeExecute(context.Background(), confirmRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -414,13 +415,13 @@ func TestChangeExecuteDeletesDirectoryWithInitialSemanticConfirmation(t *testing
 		t.Fatal(err)
 	}
 
-	request := mcp.CallToolRequest{}
-	request.Params.Arguments = map[string]any{
+	request := mcpresult.Request(map[string]any{
 		"intent":            "清空旧项目目录",
 		"remote_session_id": created.Session.ID,
 		"summary":           "删除旧项目目录",
 		"operations":        []map[string]any{{"operation": "delete", "path": "old-project"}},
-	}
+	})
+	
 	result, err := rt.toolChangeExecute(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -430,12 +431,12 @@ func TestChangeExecuteDeletesDirectoryWithInitialSemanticConfirmation(t *testing
 		t.Fatalf("directory delete must wait for semantic confirmation: %+v", response)
 	}
 	pendingData, _ := response["data"].(map[string]any)
-	confirm := mcp.CallToolRequest{}
-	confirm.Params.Arguments = map[string]any{
+	confirm := mcpresult.Request(map[string]any{
 		"intent": "用户已确认删除旧项目目录", "remote_session_id": created.Session.ID,
 		"changeset_id": pendingData["changeset_id"], "expected_digest": pendingData["digest"],
 		"confirmation_token": pendingData["confirmation_token"],
-	}
+	})
+	
 	confirmedResult, err := rt.toolChangeExecute(context.Background(), confirm)
 	if err != nil {
 		t.Fatal(err)
@@ -529,8 +530,7 @@ func TestChangeApplyDigestConflictIncludesExactRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepare := mcp.CallToolRequest{}
-	prepare.Params.Arguments = map[string]any{
+	prepare := mcpresult.Request(map[string]any{
 		"intent":            "prepare a digest recovery test",
 		"remote_session_id": created.Session.ID,
 		"summary":           "digest recovery",
@@ -538,7 +538,8 @@ func TestChangeApplyDigestConflictIncludesExactRecovery(t *testing.T) {
 		"operations": []map[string]any{
 			{"operation": "create", "path": "digest-recovery.txt", "content": "content\n"},
 		},
-	}
+	})
+	
 	preparedResult, err := rt.toolChangeExecute(context.Background(), prepare)
 	if err != nil {
 		t.Fatal(err)
@@ -550,13 +551,13 @@ func TestChangeApplyDigestConflictIncludesExactRecovery(t *testing.T) {
 	if changesetID == "" || digest == "" {
 		t.Fatalf("prepared response missing digest contract: %+v", prepared)
 	}
-	apply := mcp.CallToolRequest{}
-	apply.Params.Arguments = map[string]any{
+	apply := mcpresult.Request(map[string]any{
 		"intent":            "apply with an intentionally invalid digest",
 		"remote_session_id": created.Session.ID,
 		"changeset_id":      changesetID,
 		"expected_digest":   "+211 −0",
-	}
+	})
+	
 	conflictResult, err := rt.toolChangeExecute(context.Background(), apply)
 	if err != nil {
 		t.Fatal(err)
@@ -615,15 +616,15 @@ func TestChangeExecutePatchTooLargeHasRecovery(t *testing.T) {
 	}
 
 	content := strings.Repeat("line\n", 20)
-	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]any{
+	req := mcpresult.Request(map[string]any{
 		"intent":            "apply an oversized patch",
 		"remote_session_id": created.Session.ID,
 		"summary":           "oversized patch",
 		"operations": []map[string]any{
 			{"operation": "create", "path": "big.txt", "content": content},
 		},
-	}
+	})
+	
 	result, err := rt.toolChangeExecute(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -663,15 +664,15 @@ func TestChangeExecuteMissingRevisionHasRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]any{
+	req := mcpresult.Request(map[string]any{
 		"intent":            "replace a file with a stale revision",
 		"remote_session_id": created.Session.ID,
 		"summary":           "replace without revision",
 		"operations": []map[string]any{
 			{"operation": "replace_range", "path": "demo.go", "range_start": 1, "range_end": 1, "content": "package demo\n"},
 		},
-	}
+	})
+	
 	result, err := rt.toolChangeExecute(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -712,12 +713,12 @@ func TestUpdateMissingRevisionSuggestsTargetFileRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := mcp.CallToolRequest{}
-	request.Params.Arguments = map[string]any{
+	request := mcpresult.Request(map[string]any{
 		"intent":            "update without a revision to test recovery",
 		"remote_session_id": created.Session.ID, "summary": "update without revision",
 		"operations": []map[string]any{{"operation": "update", "path": "update-me.txt", "patch": "@@ -1 +1 @@\n-update me\n+updated\n"}},
-	}
+	})
+	
 	result, err := rt.toolChangeExecute(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -752,8 +753,7 @@ func TestChangePrepareDuplicatePathHasRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]any{
+	req := mcpresult.Request(map[string]any{
 		"intent":            "prepare the duplicate-path change",
 		"remote_session_id": created.Session.ID,
 		"action":            "prepare",
@@ -762,7 +762,8 @@ func TestChangePrepareDuplicatePathHasRecovery(t *testing.T) {
 			{"operation": "create", "path": "a.txt", "content": "one\n"},
 			{"operation": "create", "path": "a.txt", "content": "two\n"},
 		},
-	}
+	})
+	
 	result, err := rt.toolChangeManage(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -800,8 +801,7 @@ func TestChangePrepareChainsExactEditsForSamePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]any{
+	req := mcpresult.Request(map[string]any{
 		"intent":            "prepare chained exact edits",
 		"remote_session_id": created.Session.ID,
 		"summary":           "chained exact edits",
@@ -817,7 +817,8 @@ func TestChangePrepareChainsExactEditsForSamePath(t *testing.T) {
 				"match":       "three", "replacement": "THREE",
 			},
 		},
-	}
+	})
+	
 	result, err := rt.toolHandlers["change_prepare"](context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -850,8 +851,7 @@ func TestChangePreparePatchFormatErrorExplainsUnifiedDiff(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]any{
+	req := mcpresult.Request(map[string]any{
 		"intent":            "prepare an apply_patch style update",
 		"remote_session_id": created.Session.ID,
 		"summary":           "patch format",
@@ -861,7 +861,8 @@ func TestChangePreparePatchFormatErrorExplainsUnifiedDiff(t *testing.T) {
 			"base_sha256": fmt.Sprintf("sha256:%x", sha256.Sum256([]byte("line one\nline two\n"))),
 			"patch":       "*** Begin Patch\n*** Update File: demo.txt\n@@\n line one\n+line three\n*** End Patch",
 		}},
-	}
+	})
+	
 	result, err := rt.toolHandlers["change_prepare"](context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -905,8 +906,7 @@ func TestChangePrepareHunkCountErrorExplainsHeaderCounts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]any{
+	req := mcpresult.Request(map[string]any{
 		"intent":            "prepare a hunk with wrong counts",
 		"remote_session_id": created.Session.ID,
 		"summary":           "hunk counts",
@@ -916,7 +916,8 @@ func TestChangePrepareHunkCountErrorExplainsHeaderCounts(t *testing.T) {
 			"base_sha256": fmt.Sprintf("sha256:%x", sha256.Sum256([]byte("line one\nline two\n"))),
 			"patch":       "@@ -1,2 +1,3 @@\n line one\n+line three\n",
 		}},
-	}
+	})
+	
 	result, err := rt.toolHandlers["change_prepare"](context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -940,6 +941,203 @@ func TestChangePrepareHunkCountErrorExplainsHeaderCounts(t *testing.T) {
 	}
 }
 
+func TestChangePrepareWrongBaseIsStaleNotPatchContext(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	if err := os.WriteFile(filepath.Join(registered.Path, "stale.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := mcpresult.Request(map[string]any{
+		"intent":            "wrong base revision",
+		"purpose":           "verify STALE_REVISION is only for base mismatch",
+		"remote_session_id": created.Session.ID,
+		"summary":           "wrong base",
+		"operations": []any{map[string]any{
+			"operation": "replace_exact", "path": "stale.txt",
+			"base_sha256": "sha256:" + strings.Repeat("0", 64),
+			"match":       "hello", "replacement": "world",
+		}},
+	})
+	
+	result, err := rt.toolHandlers["change_prepare"](context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arcEnvelope := decodeARCEnvelope(t, result)
+	resultData := arcEnvelope["mcpx"].(map[string]any)["result"].(map[string]any)
+	data, _ := resultData["data"].(map[string]any)
+	errorBody, _ := data["error"].(map[string]any)
+	if errorBody["code"] != "STALE_REVISION" {
+		t.Fatalf("wrong base must be STALE_REVISION, got %+v", errorBody)
+	}
+	message, _ := errorBody["message"].(string)
+	if !strings.Contains(message, "base_sha256") {
+		t.Fatalf("STALE message must mention base_sha256: %s", message)
+	}
+	if strings.Contains(message, "patch 上下文与实际文件不一致") {
+		t.Fatalf("STALE must not use patch-context wording: %s", message)
+	}
+	details, _ := errorBody["details"].(map[string]any)
+	if details["path"] != "stale.txt" {
+		t.Fatalf("details.path must be set: %+v", details)
+	}
+	if details["failed_ordinal"] != float64(0) && details["failed_ordinal"] != 0 {
+		// JSON numbers decode as float64 in map[string]any
+		if n, ok := details["failed_ordinal"].(float64); !ok || n != 0 {
+			if n, ok := details["failed_ordinal"].(int); !ok || n != 0 {
+				t.Fatalf("details.failed_ordinal want 0, got %#v", details["failed_ordinal"])
+			}
+		}
+	}
+	fieldMap, _ := details["field_map"].(map[string]any)
+	baseMap, _ := fieldMap["base_sha256"].(map[string]any)
+	if baseMap["from_field"] != "sha256" || baseMap["to_field"] != "operations[].base_sha256" {
+		t.Fatalf("field_map.base_sha256 must teach sha256→base_sha256 copy: %+v", baseMap)
+	}
+	nextAction, _ := details["next_action"].(map[string]any)
+	args, _ := nextAction["arguments"].(map[string]any)
+	if nextAction["tool"] != "source_read" || args["mode"] != "full" || args["path"] != "stale.txt" {
+		t.Fatalf("next_action must be source_read full path: %+v", details["next_action"])
+	}
+}
+
+func TestChangePreparePatchContextMismatchNotStale(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	content := []byte("one\ntwo\n")
+	if err := os.WriteFile(filepath.Join(registered.Path, "ctx.txt"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := mcpresult.Request(map[string]any{
+		"intent":            "patch context wrong but base correct",
+		"purpose":           "verify patch context is not STALE_REVISION",
+		"remote_session_id": created.Session.ID,
+		"summary":           "patch context",
+		"operations": []any{map[string]any{
+			"operation": "update", "path": "ctx.txt",
+			"base_sha256": fmt.Sprintf("sha256:%x", sha256.Sum256(content)),
+			"patch":       "@@ -1,2 +1,2 @@\n one\n-missing\n+three\n",
+		}},
+	})
+	
+	result, err := rt.toolHandlers["change_prepare"](context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arcEnvelope := decodeARCEnvelope(t, result)
+	resultData := arcEnvelope["mcpx"].(map[string]any)["result"].(map[string]any)
+	data, _ := resultData["data"].(map[string]any)
+	errorBody, _ := data["error"].(map[string]any)
+	if errorBody["code"] == "STALE_REVISION" {
+		t.Fatalf("correct base + bad patch context must not be STALE_REVISION: %+v", errorBody)
+	}
+	if errorBody["code"] != "PATCH_CONTEXT_MISMATCH" {
+		t.Fatalf("want PATCH_CONTEXT_MISMATCH, got %+v", errorBody)
+	}
+}
+
+func TestChangePrepareChainedMissingBaseIsRevisionRequired(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	principal, err := rt.principalFromContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	content := []byte("alpha\nbeta\n")
+	if err := os.WriteFile(filepath.Join(registered.Path, "chain.txt"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
+		WorkspaceName: "demo", WorkspacePath: registered.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := fmt.Sprintf("sha256:%x", sha256.Sum256(content))
+	req := mcpresult.Request(map[string]any{
+		"intent":            "chain without second base",
+		"purpose":           "missing base on chained op is REVISION_REQUIRED",
+		"remote_session_id": created.Session.ID,
+		"summary":           "chain missing base",
+		"operations": []any{
+			map[string]any{
+				"operation": "replace_exact", "path": "chain.txt", "base_sha256": base,
+				"match": "alpha", "replacement": "ALPHA",
+			},
+			map[string]any{
+				"operation": "replace_exact", "path": "chain.txt",
+				"match": "beta", "replacement": "BETA",
+			},
+		},
+	})
+	
+	result, err := rt.toolHandlers["change_prepare"](context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arcEnvelope := decodeARCEnvelope(t, result)
+	resultData := arcEnvelope["mcpx"].(map[string]any)["result"].(map[string]any)
+	data, _ := resultData["data"].(map[string]any)
+	errorBody, _ := data["error"].(map[string]any)
+	if errorBody["code"] != "REVISION_REQUIRED" {
+		t.Fatalf("chained missing base must be REVISION_REQUIRED, got %+v", errorBody)
+	}
+	if errorBody["code"] == "STALE_REVISION" {
+		t.Fatal("chained missing base must not be STALE_REVISION")
+	}
+	details, _ := errorBody["details"].(map[string]any)
+	reqFields, _ := details["required_fields"].([]any)
+	if len(reqFields) == 0 {
+		t.Fatalf("REVISION_REQUIRED must list required_fields: %+v", details)
+	}
+	fieldMap, _ := details["field_map"].(map[string]any)
+	if fieldMap["base_sha256"] == nil {
+		t.Fatalf("REVISION_REQUIRED must include field_map.base_sha256: %+v", details)
+	}
+	// failed_ordinal should be the second op (index 1)
+	switch v := details["failed_ordinal"].(type) {
+	case float64:
+		if v != 1 {
+			t.Fatalf("failed_ordinal want 1, got %v", v)
+		}
+	case int:
+		if v != 1 {
+			t.Fatalf("failed_ordinal want 1, got %v", v)
+		}
+	default:
+		t.Fatalf("failed_ordinal missing or wrong type: %#v", details["failed_ordinal"])
+	}
+}
+
 func TestChangePrepareDeleteCreateConflictRequiresSeparateCalls(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	principal, err := rt.principalFromContext(context.Background())
@@ -960,8 +1158,7 @@ func TestChangePrepareDeleteCreateConflictRequiresSeparateCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]any{
+	req := mcpresult.Request(map[string]any{
 		"intent":            "replace a file in separate audited steps",
 		"remote_session_id": created.Session.ID,
 		"action":            "prepare",
@@ -970,7 +1167,8 @@ func TestChangePrepareDeleteCreateConflictRequiresSeparateCalls(t *testing.T) {
 			{"operation": "delete", "path": "same.txt"},
 			{"operation": "create", "path": "same.txt", "content": "new\n"},
 		},
-	}
+	})
+	
 	result, err := rt.toolChangeManage(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)

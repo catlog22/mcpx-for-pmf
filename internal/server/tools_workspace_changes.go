@@ -5,13 +5,15 @@ import (
 	"database/sql"
 	"errors"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/mcpresult"
 
 	"mcpx/internal/envelope"
 	"mcpx/internal/workspacechanges"
 )
 
-func (r *Runtime) toolWorkspaceChanges(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolWorkspaceChanges(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, session, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil
@@ -42,5 +44,5 @@ func (r *Runtime) toolWorkspaceChanges(ctx context.Context, req mcp.CallToolRequ
 	} else {
 		fallback = "```diff\n" + fallback + "```"
 	}
-	return mcp.NewToolResultStructured(report, fallback), nil
+	return mcpresult.NewStructured(report, fallback), nil
 }

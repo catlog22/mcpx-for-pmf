@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/audit"
 	"mcpx/internal/instruction"
@@ -21,7 +21,7 @@ import (
 
 // toolSessionOpen creates or reuses a Remote Session and returns a full bootstrap bundle
 // so clients need only one MCP call to start developing.
-func (r *Runtime) toolSessionOpen(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
 		return fail, nil

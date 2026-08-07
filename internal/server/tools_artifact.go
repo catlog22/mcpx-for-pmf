@@ -2,19 +2,20 @@ package server
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"net/url"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/mcpresult"
 
 	"mcpx/internal/remotesession"
 	"mcpx/internal/security"
 )
 
-func (r *Runtime) toolArtifactRegister(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolArtifactRegister(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, remote, fail := r.changeRequest(ctx, req, true)
 	if fail != nil {
 		return fail, nil
@@ -35,16 +36,17 @@ func (r *Runtime) toolArtifactRegister(ctx context.Context, req mcp.CallToolRequ
 	}
 	_ = r.remote.AddEvent(ctx, principal, remotesession.Event{RemoteSessionID: remote.ID, Type: "artifact.registered", OperationID: registered.ID, Summary: registered.Name, ResourceURI: registered.ResourceURI})
 	result, err := r.remoteResult(envReq, remote.ID, remote.WorkspaceName, registered)
-	if err == nil {
-		link := mcp.NewResourceLink(registered.ResourceURI, registered.Name, "Registered MCPX development artifact", registered.MIMEType)
-		link.Size = &registered.Size
-		result.Content = append(result.Content, link)
-		result.StructuredContent = registered
+	if err != nil {
+		return result, err
 	}
-	return result, err
+	// Append resource link for hosts; keep wire structuredContent from remoteResult.
+	link := mcpresult.NewResourceLink(registered.ResourceURI, registered.Name, "Registered MCPX development artifact", registered.MIMEType)
+	link.Size = &registered.Size
+	result.Content = append(result.Content, link)
+	return result, nil
 }
 
-func (r *Runtime) toolArtifactList(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolArtifactList(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, remote, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil
@@ -57,7 +59,7 @@ func (r *Runtime) toolArtifactList(ctx context.Context, req mcp.CallToolRequest)
 	return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, map[string]any{"artifacts": items})
 }
 
-func (r *Runtime) toolArtifactRead(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolArtifactRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, remote, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil
@@ -79,7 +81,7 @@ func (r *Runtime) toolArtifactRead(ctx context.Context, req mcp.CallToolRequest)
 	return compactToolResult(data, fmt.Sprintf("Read artifact %s at byte offset %d.", artifactID, read.Offset)), nil
 }
 
-func (r *Runtime) resourceArtifact(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+func (r *Runtime) resourceArtifact(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 	remoteSessionID, artifactID, err := parseArtifactURI(req.Params.URI)
 	if err != nil {
 		return nil, err
@@ -97,9 +99,9 @@ func (r *Runtime) resourceArtifact(ctx context.Context, req mcp.ReadResourceRequ
 		return nil, err
 	}
 	if utf8.Valid(content) && artifactTextMIME(registered.MIMEType) {
-		return []mcp.ResourceContents{mcp.TextResourceContents{URI: req.Params.URI, MIMEType: registered.MIMEType, Text: string(content)}}, nil
+		return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: req.Params.URI, MIMEType: registered.MIMEType, Text: string(content)}}}, nil
 	}
-	return []mcp.ResourceContents{mcp.BlobResourceContents{URI: req.Params.URI, MIMEType: registered.MIMEType, Blob: base64.StdEncoding.EncodeToString(content)}}, nil
+	return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: req.Params.URI, MIMEType: registered.MIMEType, Blob: content}}}, nil
 }
 
 func parseArtifactURI(value string) (string, string, error) {

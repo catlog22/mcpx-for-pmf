@@ -5,11 +5,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/mcpresult"
 )
 
 func TestWrapToolResultProducesARCSearchEnvelope(t *testing.T) {
-	raw := mcp.NewToolResultStructured(map[string]any{
+	raw := mcpresult.NewStructured(map[string]any{
 		"files":     []map[string]any{{"path": "internal/server/runtime.go"}},
 		"truncated": true,
 		"next_action": map[string]any{
@@ -50,7 +52,7 @@ func TestWrapToolResultProducesARCSearchEnvelope(t *testing.T) {
 		t.Fatalf("actions = %+v", actions)
 	}
 
-	text := wrapped.Content[0].(mcp.TextContent).Text
+	text := wrapped.Content[0].(*mcp.TextContent).Text
 	for _, want := range []string{"Context query returned 1 file.", "`internal/server/runtime.go`"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("context query text missing %q: %q", want, text)
@@ -62,9 +64,9 @@ func TestWrapToolResultProducesARCSearchEnvelope(t *testing.T) {
 }
 
 func TestWrapToolResultRendersWorkspaceListInsteadOfOK(t *testing.T) {
-	raw := mcp.NewToolResultText(`{"request_id":"req_workspace","status":"ok","data":{"workspaces":[{"name":"fyy","path":"/workspaces/fyy","description":"ERP frontend"}]}}`)
+	raw := mcpresult.NewText(`{"request_id":"req_workspace","status":"ok","data":{"workspaces":[{"name":"fyy","path":"/workspaces/fyy","description":"ERP frontend"}]}}`)
 	wrapped := WrapToolResult("workspace_list", ResultContext{}, raw)
-	text := wrapped.Content[0].(mcp.TextContent).Text
+	text := wrapped.Content[0].(*mcp.TextContent).Text
 	for _, want := range []string{"Available workspaces:", "`fyy`", "`/workspaces/fyy`", "ERP frontend"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("workspace list text missing %q: %q", want, text)
@@ -73,13 +75,13 @@ func TestWrapToolResultRendersWorkspaceListInsteadOfOK(t *testing.T) {
 	if text == "ok" || strings.Contains(text, "\"workspaces\"") {
 		t.Fatalf("workspace list must not degrade to JSON/ok: %q", text)
 	}
-	if wrapped.Meta == nil || wrapped.Meta.AdditionalFields[ResultMetadataKey] == nil {
+	if wrapped.Meta == nil || wrapped.Meta[ResultMetadataKey] == nil {
 		t.Fatal("workspace list machine result must remain in metadata")
 	}
 }
 
 func TestWrapToolResultRendersSessionBootstrapAsMarkdown(t *testing.T) {
-	raw := mcp.NewToolResultStructured(map[string]any{
+	raw := mcpresult.NewStructured(map[string]any{
 		"remote_session": map[string]any{"id": "rs_demo", "role": "owner", "status": "active"},
 		"workspace":      map[string]any{"name": "fyy", "path": "/workspaces/fyy", "git_head": "abc123"},
 		"tools":          []map[string]any{{"name": "file_read"}, {"name": "change_execute"}},
@@ -89,7 +91,7 @@ func TestWrapToolResultRendersSessionBootstrapAsMarkdown(t *testing.T) {
 		},
 	}, "Session rs_demo opened for workspace fyy.")
 	written := WrapToolResult("session_open", ResultContext{}, raw)
-	text := written.Content[0].(mcp.TextContent).Text
+	text := written.Content[0].(*mcp.TextContent).Text
 	for _, want := range []string{"- Remote session: `rs_demo`", "`/workspaces/fyy`", "`file_read`", "Agent guidance", "Read before editing."} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("session bootstrap text missing %q: %q", want, text)
@@ -101,9 +103,9 @@ func TestWrapToolResultRendersSessionBootstrapAsMarkdown(t *testing.T) {
 }
 
 func TestWrapToolResultRendersPlanIdentityAndProgress(t *testing.T) {
-	raw := mcp.NewToolResultText(`{"status":"ok","data":{"plan_id":"pl_demo","goal":"修复工具可见性","status":"ready","tasks":[{"task_id":"pt_1"},{"task_id":"pt_2"}],"progress":{"completed":1,"total":2}}}`)
+	raw := mcpresult.NewText(`{"status":"ok","data":{"plan_id":"pl_demo","goal":"修复工具可见性","status":"ready","tasks":[{"task_id":"pt_1"},{"task_id":"pt_2"}],"progress":{"completed":1,"total":2}}}`)
 	written := WrapToolResult("plan_manage", ResultContext{}, raw)
-	text := written.Content[0].(mcp.TextContent).Text
+	text := written.Content[0].(*mcp.TextContent).Text
 	for _, want := range []string{"Plan ID: `pl_demo`", "Status: `ready`", "Goal: 修复工具可见性", "Progress: 1/2 completed", "`pt_1`", "`pt_2`"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("plan text missing %q: %q", want, text)
@@ -115,11 +117,11 @@ func TestWrapToolResultRendersPlanIdentityAndProgress(t *testing.T) {
 }
 
 func TestWrapToolResultRendersExtensionInventory(t *testing.T) {
-	raw := mcp.NewToolResultStructured(map[string]any{
+	raw := mcpresult.NewStructured(map[string]any{
 		"skills": []map[string]any{{"name": "ui-ux-pro-max", "description": "UI design"}},
 	}, "Extension inventory returned.")
 	written := WrapToolResult("extension_manage", ResultContext{}, raw)
-	text := written.Content[0].(mcp.TextContent).Text
+	text := written.Content[0].(*mcp.TextContent).Text
 	for _, want := range []string{"Extension inventory returned.", "Skills:", "`ui-ux-pro-max`"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("extension inventory missing %q: %q", want, text)
@@ -128,12 +130,12 @@ func TestWrapToolResultRendersExtensionInventory(t *testing.T) {
 }
 
 func TestWrapToolResultRendersSearchMatchesAndSourceSnippet(t *testing.T) {
-	raw := mcp.NewToolResultStructured(map[string]any{
+	raw := mcpresult.NewStructured(map[string]any{
 		"matches": []map[string]any{{"path": "src/pages/Sale.vue", "line": 42, "text": "const customer = await findCustomer()"}},
 		"files":   []map[string]any{{"path": "src/pages/Sale.vue", "content": "<template>\n  <CustomerSearch />\n</template>\n"}},
 	}, "Source search returned 1 match(es).")
 	written := WrapToolResult("context_query", ResultContext{}, raw)
-	text := written.Content[0].(mcp.TextContent).Text
+	text := written.Content[0].(*mcp.TextContent).Text
 	for _, want := range []string{"`src/pages/Sale.vue:42`", "const customer = await findCustomer()", "```vue", "<CustomerSearch />"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("search text missing %q: %q", want, text)
@@ -145,14 +147,14 @@ func TestWrapToolResultRendersSearchMatchesAndSourceSnippet(t *testing.T) {
 }
 
 func TestWrapToolResultRendersOverriddenStructuredContentWithoutJSON(t *testing.T) {
-	raw := mcp.NewToolResultText(`{"request_id":"req_project","status":"ok","data":{"stacks":["go"],"manifests":["go.mod"],"git_status":"## dev\n M internal/arc/arc.go"}}`)
+	raw := mcpresult.NewText(`{"request_id":"req_project","status":"ok","data":{"stacks":["go"],"manifests":["go.mod"],"git_status":"## dev\n M internal/arc/arc.go"}}`)
 	raw.StructuredContent = map[string]any{
 		"stacks":     []string{"go"},
 		"manifests":  []string{"go.mod"},
 		"git_status": "## dev\n M internal/arc/arc.go",
 	}
 	written := WrapToolResult("runtime_inspect", ResultContext{}, raw)
-	text := written.Content[0].(mcp.TextContent).Text
+	text := written.Content[0].(*mcp.TextContent).Text
 	for _, want := range []string{"Project summary:", "`go`", "`go.mod`", "internal/arc/arc.go"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("project summary missing %q: %q", want, text)
@@ -163,43 +165,44 @@ func TestWrapToolResultRendersOverriddenStructuredContentWithoutJSON(t *testing.
 	}
 }
 
-func TestWrapToolResultUsesHumanContentAndHidesARCJSONFromHost(t *testing.T) {
-	raw := mcp.NewToolResultStructured(map[string]any{
+func TestWrapToolResultKeepsHumanTextAndModelStructuredContent(t *testing.T) {
+	raw := mcpresult.NewStructured(map[string]any{
 		"status": "ok",
 		"value":  "ready",
 	}, "已完成检查：环境正常。")
 	written := WrapToolResult("runtime_inspect", ResultContext{}, raw)
 
-	text, ok := written.Content[0].(mcp.TextContent)
+	text, ok := written.Content[0].(*mcp.TextContent)
 	if !ok || text.Text != "已完成检查：环境正常。" {
-		t.Fatalf("host-visible content = %#v", written.Content[0])
+		t.Fatalf("human-visible content = %#v", written.Content[0])
 	}
-	if written.StructuredContent != nil || len(written.RawStructuredContent) != 0 {
-		t.Fatalf("ARC must not be exposed through structuredContent: structured=%#v raw=%q", written.StructuredContent, written.RawStructuredContent)
+	sc, ok := written.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("models need structuredContent, got %#v", written.StructuredContent)
 	}
-	if written.Meta == nil || written.Meta.AdditionalFields[ResultMetadataKey] == nil {
+	if sc["status"] == nil || sc["type"] == nil || sc["data"] == nil {
+		t.Fatalf("structuredContent must expose status/type/data: %#v", sc)
+	}
+	data, _ := sc["data"].(map[string]any)
+	if data["value"] != "ready" {
+		t.Fatalf("structured data.value = %#v", data)
+	}
+	if written.Meta == nil || written.Meta[ResultMetadataKey] == nil {
 		t.Fatalf("ARC metadata missing: %#v", written.Meta)
 	}
-
-	encoded, err := json.Marshal(written)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(encoded), `"structuredContent"`) {
-		t.Fatalf("serialized result still exposes structuredContent: %s", encoded)
-	}
-	if !strings.Contains(string(encoded), `"mcpx.result"`) {
-		t.Fatalf("serialized result does not preserve ARC metadata: %s", encoded)
+	// Human text must stay prose, not dump the machine envelope.
+	if strings.Contains(text.Text, `"mcpx"`) || strings.Contains(text.Text, `"structuredContent"`) {
+		t.Fatalf("human text must not dump machine JSON: %s", text.Text)
 	}
 }
 
 func TestWrapToolResultMapsSemanticConfirmationWithoutApprovalAction(t *testing.T) {
-	raw := mcp.NewToolResultText(`{"ok":false,"status":"need_confirmation","data":{"confirmation_required":true,"confirmation_message":"请确认后重试","command":"go test ./...","purpose":"运行测试","confirmation_token":"ct_full_token_1234567890abcdef"},"error":{"code":"USER_CONFIRMATION_REQUIRED","message":"命令执行等待用户语义确认"}}`)
+	raw := mcpresult.NewText(`{"ok":false,"status":"need_confirmation","data":{"confirmation_required":true,"confirmation_message":"请确认后重试","command":"go test ./...","purpose":"运行测试","confirmation_token":"ct_full_token_1234567890abcdef"},"error":{"code":"USER_CONFIRMATION_REQUIRED","message":"命令执行等待用户语义确认"}}`)
 	wrapped := WrapToolResult("command_execute", ResultContext{
 		RequestID: "req_confirmation", TraceID: "tr_confirmation", SpanID: "sp_confirmation",
 		Timing: Timing{ServerElapsedMs: 4},
 	}, raw)
-	text := wrapped.Content[0].(mcp.TextContent).Text
+	text := wrapped.Content[0].(*mcp.TextContent).Text
 	if !strings.Contains(text, "confirmation_token: `ct_full_token_1234567890abcdef`") {
 		t.Fatalf("confirmation display must carry the token in text: %s", text)
 	}
@@ -216,7 +219,7 @@ func TestWrapToolResultMapsSemanticConfirmationWithoutApprovalAction(t *testing.
 }
 
 func TestWrapToolResultRendersSemanticConfirmationCodeChangeDiff(t *testing.T) {
-	raw := mcp.NewToolResultText(`{"ok":false,"status":"need_confirmation","data":{"confirmation_required":true,"changeset_id":"chg_confirmation","files":[{"path":"demo.go","operation":"update","diff":"--- a/demo.go\n+++ b/demo.go\n@@ -1 +1 @@\n-const Value = 1\n+const Value = 2\n"}],"diff":{"mode":"inline"}},"error":{"code":"USER_CONFIRMATION_REQUIRED","message":"文件变更等待用户语义确认"}}`)
+	raw := mcpresult.NewText(`{"ok":false,"status":"need_confirmation","data":{"confirmation_required":true,"changeset_id":"chg_confirmation","files":[{"path":"demo.go","operation":"update","diff":"--- a/demo.go\n+++ b/demo.go\n@@ -1 +1 @@\n-const Value = 1\n+const Value = 2\n"}],"diff":{"mode":"inline"}},"error":{"code":"USER_CONFIRMATION_REQUIRED","message":"文件变更等待用户语义确认"}}`)
 	written := WrapToolResult("change_execute", ResultContext{}, raw)
 	result := decodeEnvelope(t, written)["mcpx"].(map[string]any)["result"].(map[string]any)
 	if result["type"] != "code_change" || result["schema"] != SchemaCodeChange {
@@ -225,7 +228,7 @@ func TestWrapToolResultRendersSemanticConfirmationCodeChangeDiff(t *testing.T) {
 	if result["hints"].(map[string]any)["preferred_behavior"] != "ask_confirm" {
 		t.Fatalf("hints = %+v", result["hints"])
 	}
-	text := written.Content[0].(mcp.TextContent).Text
+	text := written.Content[0].(*mcp.TextContent).Text
 	for _, want := range []string{"需要确认后才能应用", "```diff", "-const Value = 1", "+const Value = 2"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("confirmation diff missing %q: %s", want, text)
@@ -234,12 +237,12 @@ func TestWrapToolResultRendersSemanticConfirmationCodeChangeDiff(t *testing.T) {
 }
 
 func TestWrapToolResultShowsChangeConfirmationToken(t *testing.T) {
-	raw := mcp.NewToolResultText(`{"status":"waiting_confirmation","data":{"changeset_id":"chg_token","expected_digest":"sha256:abc123","confirmation_required":true,"confirmation_token":"ct_change_token","files":[{"path":"a.txt","operation":"update","diff":"--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n"}]},"error":{"code":"USER_CONFIRMATION_REQUIRED","message":"文件变更等待用户语义确认"}}`)
+	raw := mcpresult.NewText(`{"status":"waiting_confirmation","data":{"changeset_id":"chg_token","expected_digest":"sha256:abc123","confirmation_required":true,"confirmation_token":"ct_change_token","files":[{"path":"a.txt","operation":"update","diff":"--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n"}]},"error":{"code":"USER_CONFIRMATION_REQUIRED","message":"文件变更等待用户语义确认"}}`)
 	wrapped := WrapToolResult("change_apply", ResultContext{
 		RequestID: "req_change_token", TraceID: "tr_change_token", SpanID: "sp_change_token",
 		Timing: Timing{ServerElapsedMs: 4},
 	}, raw)
-	text := wrapped.Content[0].(mcp.TextContent).Text
+	text := wrapped.Content[0].(*mcp.TextContent).Text
 	for _, want := range []string{"`confirmation_token`: `ct_change_token`", "同一 changeset_id、expected_digest 和上述 confirmation_token"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("change confirmation display missing %q: %s", want, text)
@@ -248,12 +251,12 @@ func TestWrapToolResultShowsChangeConfirmationToken(t *testing.T) {
 }
 
 func TestWrapToolResultShowsOperationConfirmationToken(t *testing.T) {
-	raw := mcp.NewToolResultText(`{"status":"waiting_confirmation","data":{"operation_id":"op_wait","steps":[{"id":"main","tool":"command_run","state":"waiting_confirmation","confirmation_token":"ct_op_token"}],"confirmation_required":true},"error":{"code":"USER_CONFIRMATION_REQUIRED","message":"操作等待语义确认"}}`)
+	raw := mcpresult.NewText(`{"status":"waiting_confirmation","data":{"operation_id":"op_wait","steps":[{"id":"main","tool":"command_run","state":"waiting_confirmation","confirmation_token":"ct_op_token"}],"confirmation_required":true},"error":{"code":"USER_CONFIRMATION_REQUIRED","message":"操作等待语义确认"}}`)
 	wrapped := WrapToolResult("operation_manage", ResultContext{
 		RequestID: "req_op_wait", TraceID: "tr_op_wait", SpanID: "sp_op_wait",
 		Timing: Timing{ServerElapsedMs: 4},
 	}, raw)
-	text := wrapped.Content[0].(mcp.TextContent).Text
+	text := wrapped.Content[0].(*mcp.TextContent).Text
 	for _, want := range []string{"op_wait", "confirmation_token: `ct_op_token`", "action=resume"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("operation confirmation display missing %q: %s", want, text)
@@ -262,8 +265,8 @@ func TestWrapToolResultShowsOperationConfirmationToken(t *testing.T) {
 }
 
 func TestWrapToolResultPreservesNonTextContent(t *testing.T) {
-	resource := mcp.NewResourceLink("mcpx://test/resource", "resource", "test resource", "text/plain")
-	raw := mcp.NewToolResultText("plain")
+	resource := mcpresult.NewResourceLink("mcpx://test/resource", "resource", "test resource", "text/plain")
+	raw := mcpresult.NewText("plain")
 	raw.Content = append(raw.Content, resource)
 	wrapped := WrapToolResult("artifact_manage", ResultContext{
 		RequestID: "req_resource", TraceID: "tr_resource", SpanID: "sp_resource",
@@ -271,10 +274,10 @@ func TestWrapToolResultPreservesNonTextContent(t *testing.T) {
 	if len(wrapped.Content) != 2 {
 		t.Fatalf("content length = %d", len(wrapped.Content))
 	}
-	if _, ok := wrapped.Content[0].(mcp.TextContent); !ok {
+	if _, ok := wrapped.Content[0].(*mcp.TextContent); !ok {
 		t.Fatalf("first content = %T", wrapped.Content[0])
 	}
-	if _, ok := wrapped.Content[1].(mcp.ResourceLink); !ok {
+	if _, ok := wrapped.Content[1].(*mcp.ResourceLink); !ok {
 		t.Fatalf("second content = %T", wrapped.Content[1])
 	}
 }
@@ -324,7 +327,7 @@ func TestOutputSchemaAndRegistry(t *testing.T) {
 }
 
 func TestWrapToolResultAddsPresentationAndDiagramResult(t *testing.T) {
-	raw := mcp.NewToolResultStructured(map[string]any{
+	raw := mcpresult.NewStructured(map[string]any{
 		"text": "```mermaid\nflowchart TD\n  A --> B\n```",
 	}, "diagram")
 	wrapped := WrapToolResult("context_query", ResultContext{}, raw)
@@ -339,7 +342,7 @@ func TestWrapToolResultAddsPresentationAndDiagramResult(t *testing.T) {
 }
 
 func TestWrapToolResultKeepsTruncatedMermaidAsSearchResult(t *testing.T) {
-	raw := mcp.NewToolResultStructured(map[string]any{
+	raw := mcpresult.NewStructured(map[string]any{
 		"text":      "```mermaid\nflowchart TD\n  A --> B\n```",
 		"truncated": true,
 	}, "truncated diagram")
@@ -351,7 +354,7 @@ func TestWrapToolResultKeepsTruncatedMermaidAsSearchResult(t *testing.T) {
 }
 
 func TestWrapToolResultUsesDiagramCollectionForMultipleCompleteBlocks(t *testing.T) {
-	raw := mcp.NewToolResultStructured(map[string]any{
+	raw := mcpresult.NewStructured(map[string]any{
 		"markdown": "```mermaid\nflowchart TD\n  A --> B\n```\n\n```mermaid\ngraph LR\n  C --> D\n```",
 	}, "diagrams")
 	wrapped := WrapToolResult("context_query", ResultContext{}, raw)
@@ -380,7 +383,7 @@ func TestWrapToolResultUsesStableToolSemantics(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			wrapped := WrapToolResult(tt.tool, ResultContext{}, mcp.NewToolResultStructured(tt.data, "result"))
+			wrapped := WrapToolResult(tt.tool, ResultContext{}, mcpresult.NewStructured(tt.data, "result"))
 			result := decodeEnvelope(t, wrapped)["mcpx"].(map[string]any)["result"].(map[string]any)
 			if result["type"] != tt.wantType || result["schema"] != schemaForType(tt.wantType) {
 				t.Fatalf("result = %+v", result)
@@ -398,12 +401,13 @@ func TestWrapToolResultUsesStableToolSemantics(t *testing.T) {
 
 func decodeEnvelope(t *testing.T, result *mcp.CallToolResult) map[string]any {
 	t.Helper()
-	value := result.StructuredContent
-	if value == nil && result.Meta != nil {
-		value = result.Meta.AdditionalFields[ResultMetadataKey]
+	// ARC envelope lives in _meta; structuredContent is the model field payload.
+	var value any
+	if result.Meta != nil {
+		value = result.Meta[ResultMetadataKey]
 	}
 	if value == nil {
-		t.Fatal("missing structured content")
+		t.Fatal("missing ARC envelope in _meta")
 	}
 	encoded, err := json.Marshal(value)
 	if err != nil {

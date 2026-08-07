@@ -70,6 +70,10 @@ type FileChange struct {
 	ExpectedSHA256  string      `json:"expected_sha256,omitempty"`
 	OriginalSHA256  string      `json:"original_sha256,omitempty"`
 	ProposedSHA256  string      `json:"proposed_sha256,omitempty"`
+	// ChainRootSHA256 is the on-disk hash at the start of a same-path chain.
+	// Models may pass that base_sha256 on every chained exact/update op; it must
+	// remain valid for op 2..N, not only the first hop (see prepareOperation).
+	ChainRootSHA256 string      `json:"-"`
 	OriginalMode    uint32      `json:"-"`
 	Original        []byte      `json:"-"`
 	Proposed        []byte      `json:"-"`
@@ -381,15 +385,33 @@ func prepareOperation(workspaceRoot string, ordinal int, operation Operation, pr
 		if !chainableOperation(op) {
 			return FileChange{}, fmt.Errorf("path %q cannot chain operation %q", path, op)
 		}
-		// A chained operation may cite either the on-disk revision the model
-		// read (all exact edits in one batch) or the revision left by the
-		// previous chained edit (service-generated reverts).
-		if prepared.ExpectedSHA256 != previous.OriginalSHA256 && prepared.ExpectedSHA256 != previous.ProposedSHA256 {
+		// Exact/update ops always need an explicit base. Check this before the
+		// stale comparison so a missing base is REVISION_REQUIRED, not a false
+		// STALE_REVISION (empty string never matches original/proposed).
+		if (exactOps || op == "update") && prepared.ExpectedSHA256 == "" {
+			if op == "update" {
+				return FileChange{}, fmt.Errorf("base_sha256 (expected_sha256 alias) required for %s: %s", op, path)
+			}
+			return FileChange{}, fmt.Errorf("base_sha256 required for %s", op)
+		}
+		// A chained operation may cite either:
+		//   1) the on-disk revision the model read (chain root — same for every
+		//      op in the batch on this path), or
+		//   2) the revision left by the previous chained edit (proposed hash).
+		// Do NOT compare only against previous.OriginalSHA256 after hop 1: that
+		// field becomes the intermediate pre-image and is no longer the disk
+		// root, which falsely STALE'd ops 3+ when the model reused source_read.sha256.
+		root := previous.ChainRootSHA256
+		if root == "" {
+			root = previous.OriginalSHA256
+		}
+		if prepared.ExpectedSHA256 != root && prepared.ExpectedSHA256 != previous.ProposedSHA256 {
 			return FileChange{}, fmt.Errorf("%w: %s", ErrStaleRevision, path)
 		}
 		prepared.Original = append([]byte(nil), previous.Proposed...)
 		prepared.OriginalMode = previous.OriginalMode
 		prepared.OriginalSHA256 = hashBytes(prepared.Original)
+		prepared.ChainRootSHA256 = root
 	}
 	switch {
 	case exactOps:
@@ -403,6 +425,7 @@ func prepareOperation(workspaceRoot string, ordinal int, operation Operation, pr
 			}
 			prepared.Original, prepared.OriginalMode = content, mode
 			prepared.OriginalSHA256 = hashBytes(content)
+			prepared.ChainRootSHA256 = prepared.OriginalSHA256
 			if prepared.OriginalSHA256 != prepared.ExpectedSHA256 {
 				return FileChange{}, fmt.Errorf("%w: %s", ErrStaleRevision, path)
 			}
@@ -426,6 +449,7 @@ func prepareOperation(workspaceRoot string, ordinal int, operation Operation, pr
 			}
 			prepared.Original, prepared.OriginalMode = content, mode
 			prepared.OriginalSHA256 = hashBytes(content)
+			prepared.ChainRootSHA256 = prepared.OriginalSHA256
 			if prepared.OriginalSHA256 != prepared.ExpectedSHA256 {
 				return FileChange{}, fmt.Errorf("%w: %s", ErrStaleRevision, path)
 			}
@@ -503,7 +527,9 @@ func prepareOperation(workspaceRoot string, ordinal int, operation Operation, pr
 			}
 			proposed, err := applyUnifiedPatch(prepared.Original, operation.Patch)
 			if err != nil {
-				return FileChange{}, fmt.Errorf("%w: %s: %v", ErrStaleRevision, path, err)
+				// Patch syntax/context failures are not revision mismatches; do
+				// not wrap ErrStaleRevision or models will mis-retry as "stale base".
+				return FileChange{}, fmt.Errorf("patch apply failed: %s: %w", path, err)
 			}
 			prepared.Proposed = proposed
 		} else {

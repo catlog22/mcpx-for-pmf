@@ -250,7 +250,7 @@ func classifyError(status Status, code string) (category string, retryable bool,
 	if strings.Contains(code, "NOT_FOUND") || strings.Contains(code, "WORKSPACE_NOT_FOUND") {
 		return "not_found", false, "Check the identifier and refresh the relevant list."
 	}
-	if strings.Contains(code, "STALE") || strings.Contains(code, "CONFLICT") || strings.Contains(code, "VERSION") || strings.Contains(code, "PATCH_CONTEXT") || strings.Contains(code, "PATCH_HUNKS") || strings.Contains(code, "ROLLBACK") {
+	if strings.Contains(code, "STALE") || strings.Contains(code, "CONFLICT") || strings.Contains(code, "VERSION") || strings.Contains(code, "PATCH_CONTEXT") || strings.Contains(code, "PATCH_HUNKS") || strings.Contains(code, "PATCH_APPLY") || strings.Contains(code, "ROLLBACK") {
 		return "conflict", true, "Read the current revision and regenerate the operation."
 	}
 	if strings.Contains(code, "INVALID") || strings.Contains(code, "BAD_REQUEST") || strings.Contains(code, "VALIDATION") || strings.Contains(code, "UNSUPPORTED") || strings.Contains(code, "REQUIRED") || strings.Contains(code, "AMBIGUOUS") {

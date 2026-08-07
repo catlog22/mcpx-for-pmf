@@ -11,8 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/mcpresult"
 
 	"mcpx/internal/audit"
 	"mcpx/internal/auth"
@@ -41,19 +42,16 @@ func (r *Runtime) principalFromContext(ctx context.Context) (auth.Principal, err
 }
 
 func clientInfoFromContext(ctx context.Context) (name, version string) {
-	if session := mcpserver.ClientSessionFromContext(ctx); session != nil {
-		if withInfo, ok := session.(mcpserver.SessionWithClientInfo); ok {
-			info := withInfo.GetClientInfo()
-			return info.Name, info.Version
-		}
-	}
+	// Official go-sdk does not expose client info via the same context helpers as
+	// mark3labs; keep a stable fallback until session-level client metadata is wired.
+	_ = ctx
 	return "unknown", ""
 }
 
-func (r *Runtime) remoteRequest(ctx context.Context, req mcp.CallToolRequest) (envelope.Request, auth.Principal, *mcp.CallToolResult) {
+func (r *Runtime) remoteRequest(ctx context.Context, req *mcp.CallToolRequest) (envelope.Request, auth.Principal, *mcp.CallToolResult) {
 	envReq, err := r.parseEnv(ctx, req)
 	if err != nil {
-		return envReq, auth.Principal{}, mcp.NewToolResultError(err.Error())
+		return envReq, auth.Principal{}, mcpresult.NewError(err.Error())
 	}
 	principal, err := r.principalFromContext(ctx)
 	if err != nil {
@@ -163,7 +161,7 @@ func (r *Runtime) createRemoteSession(ctx context.Context, principal auth.Princi
 	return result, nil
 }
 
-func (r *Runtime) toolRemoteSessionList(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolRemoteSessionList(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
 		return fail, nil
@@ -189,7 +187,7 @@ func (r *Runtime) toolRemoteSessionList(ctx context.Context, req mcp.CallToolReq
 	return r.remoteResult(envReq, "", workspaceName, result)
 }
 
-func (r *Runtime) toolRemoteSessionGet(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolRemoteSessionGet(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
 		return fail, nil
@@ -220,7 +218,7 @@ func (r *Runtime) toolRemoteSessionGet(ctx context.Context, req mcp.CallToolRequ
 	return r.remoteResult(envReq, remoteSessionID, session.WorkspaceName, data)
 }
 
-func (r *Runtime) toolRemoteSessionEvents(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolRemoteSessionEvents(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
 		return fail, nil
@@ -244,7 +242,7 @@ func (r *Runtime) toolRemoteSessionEvents(ctx context.Context, req mcp.CallToolR
 	return r.remoteResult(envReq, remoteSessionID, "", data)
 }
 
-func (r *Runtime) toolRemoteSessionUpdate(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolRemoteSessionUpdate(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
 		return fail, nil
@@ -263,7 +261,7 @@ func (r *Runtime) toolRemoteSessionUpdate(ctx context.Context, req mcp.CallToolR
 	return r.remoteResult(envReq, remoteSessionID, session.WorkspaceName, session)
 }
 
-func (r *Runtime) toolRemoteSessionHandoff(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolRemoteSessionHandoff(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
 		return fail, nil
@@ -281,7 +279,7 @@ func (r *Runtime) toolRemoteSessionHandoff(ctx context.Context, req mcp.CallTool
 	return r.remoteResult(envReq, remoteSessionID, "", result)
 }
 
-func (r *Runtime) toolRemoteSessionAttach(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolRemoteSessionAttach(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
 		return fail, nil
@@ -298,7 +296,7 @@ func (r *Runtime) toolRemoteSessionAttach(ctx context.Context, req mcp.CallToolR
 	})
 }
 
-func (r *Runtime) toolRemoteSessionClose(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolRemoteSessionClose(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
 		return fail, nil

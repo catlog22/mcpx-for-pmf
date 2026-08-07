@@ -5,13 +5,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/mcpresult"
 )
 
 func TestInstrumentToolPublishesARCPresentationAndPreservesAttachments(t *testing.T) {
-	resource := mcp.NewResourceLink("mcpx://test/artifact", "artifact", "artifact", "text/plain")
-	handler := func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		result := mcp.NewToolResultStructured(map[string]any{
+	resource := mcpresult.NewResourceLink("mcpx://test/artifact", "artifact", "artifact", "text/plain")
+	handler := func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		result := mcpresult.NewStructured(map[string]any{
 			"changeset_id": "chg_test",
 			"status":       "prepared",
 		}, "Changeset prepared.")
@@ -19,18 +21,18 @@ func TestInstrumentToolPublishesARCPresentationAndPreservesAttachments(t *testin
 		return result, nil
 	}
 
-	wrapped, err := (&Runtime{}).instrumentTool("change_execute", handler)(context.Background(), mcp.CallToolRequest{})
+	wrapped, err := (&Runtime{}).instrumentTool("change_execute", handler)(context.Background(), mcpresult.Request(map[string]any{}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(wrapped.Content) != 2 {
 		t.Fatalf("content length = %d", len(wrapped.Content))
 	}
-	if _, ok := wrapped.Content[1].(mcp.ResourceLink); !ok {
+	if _, ok := wrapped.Content[1].(*mcp.ResourceLink); !ok {
 		t.Fatalf("attachment type = %T", wrapped.Content[1])
 	}
 
-	text, ok := wrapped.Content[0].(mcp.TextContent)
+	text, ok := wrapped.Content[0].(*mcp.TextContent)
 	if !ok {
 		t.Fatalf("first content type = %T", wrapped.Content[0])
 	}

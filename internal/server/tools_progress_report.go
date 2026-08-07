@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/envelope"
 )
@@ -14,7 +14,7 @@ import (
 // when the agent will not immediately call another workspace tool. This is
 // intentionally a no-op for the workspace: the instrumented tool lifecycle
 // persists the summary and the observer renders it like any other call.
-func (r *Runtime) toolProgressReport(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolProgressReport(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, session, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil

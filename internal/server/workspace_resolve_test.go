@@ -1,14 +1,14 @@
 package server
 
 import (
+	"mcpx/internal/mcpresult"
+
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/config"
 	"mcpx/internal/envelope"
@@ -81,28 +81,32 @@ func TestResolveRemoteSessionWorkspaceWithoutTransportBinding(t *testing.T) {
 
 func TestWorkspaceInfoDoesNotAutoSelectSingleWorkspace(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	var req mcp.CallToolRequest
-	req.Params.Arguments = map[string]any{"intent": "inspect the project workspace", "action": "project"}
+	req := mcpresult.Request(map[string]any{"intent": "inspect the project workspace", "action": "project"})
+	
 	out, err := rt.toolRuntimeInspect(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := out.Content[0].(mcp.TextContent).Text
-	var env map[string]any
-	if err := json.Unmarshal([]byte(text), &env); err != nil {
-		t.Fatal(err)
-	}
+	env := decodeToolResult(t, out)
 	errObj, _ := env["error"].(map[string]any)
 	if env["status"] != "failed" || errObj["code"] != "REMOTE_SESSION_REQUIRED" {
-		t.Fatalf("expected explicit workspace error, got %s", text)
+		// code may live on wire error or nested data depending on wrap path
+		if data, _ := env["data"].(map[string]any); data != nil {
+			if nested, _ := data["error"].(map[string]any); nested != nil {
+				errObj = nested
+			}
+		}
+		if env["status"] != "failed" || errObj["code"] != "REMOTE_SESSION_REQUIRED" {
+			t.Fatalf("expected explicit workspace error, got %+v", env)
+		}
 	}
 }
 
 func TestRegisteredToolsExcludeCompatibilityInterfaces(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	protocol := mcpserver.NewMCPServer("mcpx-test", "0.1.0")
+	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
 	rt.registerTools(protocol)
-	tools := protocol.ListTools()
+	tools := rt.listedToolMap()
 	for _, removed := range []string{"workspace_select", "code_read", "file_patch"} {
 		if _, exists := tools[removed]; exists {
 			t.Fatalf("removed compatibility tool %q is still registered", removed)

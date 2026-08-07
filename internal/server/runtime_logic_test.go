@@ -1,18 +1,16 @@
 package server
 
 import (
+	"mcpx/internal/mcpresult"
+
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/mark3labs/mcp-go/mcp"
-
 	"mcpx/internal/auth"
 	"mcpx/internal/config"
-	"mcpx/internal/envelope"
 	"mcpx/internal/remotesession"
 	"mcpx/internal/security"
 	"mcpx/internal/terminal"
@@ -98,14 +96,14 @@ func TestTerminalExecRunsAfterSemanticConfirmation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var req mcp.CallToolRequest
-	req.Params.Arguments = map[string]any{
+	req := mcpresult.Request(map[string]any{
 		"intent":            "request an approved command",
 		"remote_session_id": created.Session.ID,
 		"command":           "echo approved-run",
 		"purpose":           "run the command test",
 		"scope":             "workspace",
-	}
+	})
+	
 	out, err := rt.toolCommandExecute(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -118,12 +116,12 @@ func TestTerminalExecRunsAfterSemanticConfirmation(t *testing.T) {
 	if data["confirmation_required"] != true || data["command"] != "echo approved-run" {
 		t.Fatalf("confirmation response missing semantic prompt: %+v", response)
 	}
-	confirmReq := mcp.CallToolRequest{}
-	confirmReq.Params.Arguments = map[string]any{
+	confirmReq := mcpresult.Request(map[string]any{
 		"intent":            "用户已确认执行该命令",
 		"remote_session_id": created.Session.ID, "command": "echo approved-run",
 		"purpose": "run the command test", "scope": "workspace", "confirmation_token": data["confirmation_token"],
-	}
+	})
+	
 	approved, err := rt.toolCommandExecute(context.Background(), confirmReq)
 	if err != nil {
 		t.Fatal(err)
@@ -170,25 +168,26 @@ func TestTerminalStartUsesCommandPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var req mcp.CallToolRequest
-	req.Params.Arguments = map[string]any{
+	req := mcpresult.Request(map[string]any{
 		"intent":            "verify command policy",
 		"remote_session_id": created.Session.ID,
 		"command":           "echo must-not-start",
 		"purpose":           "verify denied command policy",
 		"scope":             "workspace",
-	}
+	})
+	
 	out, err := rt.toolCommandExecute(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var response envelope.Response
-	text := out.Content[0].(mcp.TextContent).Text
-	if err := json.Unmarshal([]byte(text), &response); err != nil {
-		t.Fatal(err)
+	response := decodeToolResult(t, out)
+	if response["status"] != "failed" {
+		t.Fatalf("got %+v", response)
 	}
-	if response.Status != envelope.StatusDenied {
-		t.Fatalf("got %s: %s", response.Status, text)
+	errBody, _ := response["error"].(map[string]any)
+	// Denied commands must not start; status failed with a policy/denied style error.
+	if code, _ := errBody["code"].(string); code == "" && response["data"] == nil {
+		t.Fatalf("denied response missing error body: %+v", response)
 	}
 }
 

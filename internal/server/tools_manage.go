@@ -5,31 +5,31 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/mcpresult"
 
 	"mcpx/internal/envelope"
 	"mcpx/internal/skill"
 )
 
-func toolAction(req mcp.CallToolRequest) string {
-	action, _ := req.GetArguments()["action"].(string)
+func toolAction(req *mcp.CallToolRequest) string {
+	action, _ := mcpresult.Arguments(req)["action"].(string)
 	return strings.ToLower(strings.TrimSpace(action))
 }
 
-func forwardedRequest(req mcp.CallToolRequest, updates map[string]any) mcp.CallToolRequest {
-	out := req
-	args := make(map[string]any, len(req.GetArguments())+len(updates))
-	for key, value := range req.GetArguments() {
+func forwardedRequest(req *mcp.CallToolRequest, updates map[string]any) *mcp.CallToolRequest {
+	args := make(map[string]any, len(mcpresult.Arguments(req))+len(updates))
+	for key, value := range mcpresult.Arguments(req) {
 		args[key] = value
 	}
 	for key, value := range updates {
 		args[key] = value
 	}
-	out.Params.Arguments = args
-	return out
+	return mcpresult.Request(args)
 }
 
-func (r *Runtime) invalidAction(ctx context.Context, req mcp.CallToolRequest, tool, action string) (*mcp.CallToolResult, error) {
+func (r *Runtime) invalidAction(ctx context.Context, req *mcp.CallToolRequest, tool, action string) (*mcp.CallToolResult, error) {
 	envReq, _, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
 		return fail, nil
@@ -42,7 +42,7 @@ func (r *Runtime) invalidAction(ctx context.Context, req mcp.CallToolRequest, to
 	return r.resultJSON(response)
 }
 
-func (r *Runtime) toolSessionManage(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolSessionManage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	switch toolAction(req) {
 	case "list":
 		return r.toolRemoteSessionList(ctx, req)
@@ -63,7 +63,7 @@ func (r *Runtime) toolSessionManage(ctx context.Context, req mcp.CallToolRequest
 	}
 }
 
-func (r *Runtime) toolChangeManage(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolChangeManage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	switch toolAction(req) {
 	case "prepare":
 		return r.toolChangePrepare(ctx, req)
@@ -78,7 +78,7 @@ func (r *Runtime) toolChangeManage(ctx context.Context, req mcp.CallToolRequest)
 	}
 }
 
-func (r *Runtime) toolRuntimeInspect(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolRuntimeInspect(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	switch toolAction(req) {
 	case "capabilities":
 		return r.toolCapabilityList(ctx, req)
@@ -91,7 +91,7 @@ func (r *Runtime) toolRuntimeInspect(ctx context.Context, req mcp.CallToolReques
 	}
 }
 
-func (r *Runtime) toolWorkspaceState(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolWorkspaceState(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	switch toolAction(req) {
 	case "changes":
 		return r.toolWorkspaceChanges(ctx, req)
@@ -108,7 +108,7 @@ func (r *Runtime) toolWorkspaceState(ctx context.Context, req mcp.CallToolReques
 	}
 }
 
-func (r *Runtime) toolArtifactManage(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolArtifactManage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	switch toolAction(req) {
 	case "list":
 		return r.toolArtifactList(ctx, req)
@@ -124,11 +124,11 @@ func (r *Runtime) toolArtifactManage(ctx context.Context, req mcp.CallToolReques
 // extension_manage intentionally lists both extension families in a single
 // result. Calls still use the existing specialised handlers so their security,
 // upstream errors, and audit events are preserved.
-func (r *Runtime) toolExtensionManage(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolExtensionManage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	action := toolAction(req)
-	kind, _ := req.GetArguments()["kind"].(string)
+	kind, _ := mcpresult.Arguments(req)["kind"].(string)
 	kind = strings.ToLower(strings.TrimSpace(kind))
-	query, _ := req.GetArguments()["query"].(string)
+	query, _ := mcpresult.Arguments(req)["query"].(string)
 	query = strings.TrimSpace(query)
 	switch action {
 	case "list":
@@ -153,7 +153,7 @@ func (r *Runtime) toolExtensionManage(ctx context.Context, req mcp.CallToolReque
 			}
 			servers := manager.List()
 			servers = filterExtensionItemsByQuery(servers, query)
-			if include, _ := req.GetArguments()["include_tools"].(bool); include && effective.Discovery.MCP.Enabled {
+			if include, _ := mcpresult.Arguments(req)["include_tools"].(bool); include && effective.Discovery.MCP.Enabled {
 				servers = r.enrichServersWithTools(ctx, manager, servers)
 			}
 			data["upstream_mcp"] = servers
@@ -167,9 +167,9 @@ func (r *Runtime) toolExtensionManage(ctx context.Context, req mcp.CallToolReque
 		return compactToolResult(data, "Extension inventory returned."), nil
 	case "describe":
 		if kind == "mcp" {
-			name, _ := req.GetArguments()["name"].(string)
+			name, _ := mcpresult.Arguments(req)["name"].(string)
 			if name == "" {
-				name, _ = req.GetArguments()["server"].(string)
+				name, _ = mcpresult.Arguments(req)["server"].(string)
 			}
 			return r.toolMCPList(ctx, forwardedRequest(req, map[string]any{"server": name, "include_tools": true}))
 		}
@@ -182,7 +182,7 @@ func (r *Runtime) toolExtensionManage(ctx context.Context, req mcp.CallToolReque
 			if err != nil {
 				return r.remoteError(envReq, remoteID, workspace.Name, err)
 			}
-			name, _ := req.GetArguments()["name"].(string)
+			name, _ := mcpresult.Arguments(req)["name"].(string)
 			item, found := skill.Find(skill.LoadAll(r.effectiveConfig(workspace.Path).Discovery.Skills.Dirs, workspace.Path), name)
 			if !found {
 				return r.skillNotFound(envReq, remoteID, workspace.Name, name)

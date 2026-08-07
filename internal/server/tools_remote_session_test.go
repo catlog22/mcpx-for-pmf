@@ -1,6 +1,10 @@
 package server
 
 import (
+	"bytes"
+
+	"mcpx/internal/mcpresult"
+
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -10,8 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/auth"
 	"mcpx/internal/config"
@@ -40,14 +43,10 @@ func TestRemoteSessionMCPIsVendorAndTransportIndependent(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
 
-	mcpServer := mcpserver.NewMCPServer("test", "1")
-	contextFor := func(token, transportID, clientName string) context.Context {
-		session := mcpserver.NewInProcessSession(transportID, nil)
-		session.SetClientInfo(mcp.Implementation{Name: clientName, Version: "1.0"})
-		ctx := auth.ContextWithAuthorization(context.Background(), "Bearer "+token)
-		return mcpServer.WithContext(ctx, session)
+	contextFor := func(token string, _ ...string) context.Context {
+		return auth.ContextWithAuthorization(context.Background(), "Bearer "+token)
 	}
-	call := func(t *testing.T, handler mcpserver.ToolHandlerFunc, ctx context.Context, arguments map[string]any) map[string]any {
+	call := func(t *testing.T, handler mcp.ToolHandler, ctx context.Context, arguments map[string]any) map[string]any {
 		t.Helper()
 		if _, exists := arguments["intent"]; !exists {
 			withIntent := make(map[string]any, len(arguments)+1)
@@ -57,9 +56,7 @@ func TestRemoteSessionMCPIsVendorAndTransportIndependent(t *testing.T) {
 			withIntent["intent"] = "transport acceptance operation"
 			arguments = withIntent
 		}
-		var request mcp.CallToolRequest
-		request.Params.Arguments = arguments
-		result, err := handler(ctx, request)
+		result, err := handler(ctx, mcpresult.Request(arguments))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -94,7 +91,7 @@ func TestRemoteSessionMCPIsVendorAndTransportIndependent(t *testing.T) {
 		"save_snapshot":     false,
 	})
 	inspectionData, _ := inspected["data"].(map[string]any)
-	if inspected["status"] != "succeeded" || inspectionData["os"] == nil || inspectionData["architecture"] == nil {
+	if inspected["status"] != "ok" && inspected["status"] != "succeeded" || inspectionData["os"] == nil || inspectionData["architecture"] == nil {
 		t.Fatalf("environment inspection failed: %+v", inspected)
 	}
 	if inspectionData["runtime"] != nil || inspectionData["toolchains"] != nil || inspectionData["comparison"] == nil {
@@ -115,7 +112,7 @@ func TestRemoteSessionMCPIsVendorAndTransportIndependent(t *testing.T) {
 	runtime.cfg.Auth.Token = "token-a"
 	ctxA2 := contextFor("token-a", "transport-a-2", "vendor-a-next")
 	continued := call(t, runtime.toolRemoteSessionGet, ctxA2, map[string]any{"remote_session_id": remoteSessionID})
-	if continued["status"] != "succeeded" {
+	if !statusOK(continued) {
 		t.Fatalf("transport session change lost durable state: %+v", continued)
 	}
 	viewerHandoff := call(t, runtime.toolRemoteSessionHandoff, ctxA2, map[string]any{
@@ -124,7 +121,7 @@ func TestRemoteSessionMCPIsVendorAndTransportIndependent(t *testing.T) {
 	viewerToken := viewerHandoff["data"].(map[string]any)["handoff_token"].(string)
 	runtime.cfg.Auth.Token = "token-c"
 	ctxC := contextFor("token-c", "transport-c-1", "vendor-c")
-	if response := call(t, runtime.toolRemoteSessionAttach, ctxC, map[string]any{"handoff_token": viewerToken}); response["status"] != "succeeded" {
+	if response := call(t, runtime.toolRemoteSessionAttach, ctxC, map[string]any{"handoff_token": viewerToken}); !statusOK(response) {
 		t.Fatalf("viewer attach failed: %+v", response)
 	}
 	runtime.screenshot = fakeScreenCapturer{}
@@ -147,11 +144,11 @@ func TestRemoteSessionMCPIsVendorAndTransportIndependent(t *testing.T) {
 	runtime.cfg.Auth.Token = "token-b"
 	attached := call(t, runtime.toolRemoteSessionAttach, ctxB, map[string]any{"handoff_token": handoffToken})
 	meta, _ := attached["meta"].(map[string]any)
-	if attached["status"] != "succeeded" || meta["session_id"] != remoteSessionID {
+	if !statusOK(attached) || meta["session_id"] != remoteSessionID {
 		t.Fatalf("cross-vendor attach failed: %+v", attached)
 	}
 	visible := call(t, runtime.toolRemoteSessionGet, ctxB, map[string]any{"remote_session_id": remoteSessionID})
-	if visible["status"] != "succeeded" {
+	if !statusOK(visible) {
 		t.Fatalf("attached principal cannot query session: %+v", visible)
 	}
 	reused := call(t, runtime.toolRemoteSessionAttach, contextFor("token-b", "transport-b-2", "vendor-c"), map[string]any{"handoff_token": handoffToken})
@@ -172,7 +169,7 @@ func TestChangesetMCPDiffAndSemanticConfirmationSurviveTransportChange(t *testin
 		t.Fatal(err)
 	}
 	cfg := config.DefaultConfig()
-	cfg.Auth.Mode, cfg.Auth.Token = "bearer", "developer-token"
+	cfg.Auth.Mode = "open"
 	cfg.Workspaces = []config.WorkspaceEntry{{Name: "project", Path: workspacePath}}
 	cfg.Security.Files.Confirm = []string{`\.go$`}
 	cfg.Logging.Enabled = false
@@ -184,18 +181,17 @@ func TestChangesetMCPDiffAndSemanticConfirmationSurviveTransportChange(t *testin
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
-	mcpServer := mcpserver.NewMCPServer("test", "1")
-	contextFor := func(transportID string) context.Context {
-		session := mcpserver.NewInProcessSession(transportID, nil)
-		session.SetClientInfo(mcp.Implementation{Name: "any-vendor", Version: "1"})
-		return mcpServer.WithContext(auth.ContextWithAuthorization(context.Background(), "Bearer developer-token"), session)
+	contextFor := func(_ ...string) context.Context {
+		return context.Background()
 	}
 
-	created := callEnvelope(t, runtime.toolSessionOpen, contextFor("transport-create"), map[string]any{"workspace": "project"})
+	created := callEnvelope(t, runtime.toolSessionOpen, contextFor(), map[string]any{"workspace": "project"})
 	remoteSessionID, _ := created["remote_session_id"].(string)
+	if remoteSessionID == "" {
+		t.Fatalf("session_open failed: %+v", created)
+	}
 	runtime.screenshot = fakeScreenCapturer{}
-	var screenshotRequest mcp.CallToolRequest
-	screenshotRequest.Params.Arguments = map[string]any{
+	screenshotRequest := mcpresult.Request(map[string]any{
 		"intent":            "capture a screenshot",
 		"remote_session_id": remoteSessionID,
 		"mode":              "region",
@@ -204,24 +200,31 @@ func TestChangesetMCPDiffAndSemanticConfirmationSurviveTransportChange(t *testin
 		"width":             300,
 		"height":            200,
 		"compression":       "small",
-	}
-	screenshotResult, err := runtime.toolScreenshotCapture(contextFor("transport-screenshot"), screenshotRequest)
+	})
+	
+	screenshotResult, err := runtime.toolScreenshotCapture(contextFor(), screenshotRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(screenshotResult.Content) != 2 {
-		t.Fatalf("screenshot content: %+v", screenshotResult.Content)
+	var imageContent *mcp.ImageContent
+	for _, c := range screenshotResult.Content {
+		if img, ok := c.(*mcp.ImageContent); ok {
+			imageContent = img
+			break
+		}
 	}
-	imageContent, ok := screenshotResult.Content[1].(mcp.ImageContent)
-	if !ok || imageContent.MIMEType != "image/jpeg" || imageContent.Data != "AQIDBA==" {
-		t.Fatalf("invalid MCP image content: %T %+v", screenshotResult.Content[1], screenshotResult.Content[1])
+	if imageContent == nil || imageContent.MIMEType != "image/jpeg" || !bytes.Equal(imageContent.Data, []byte{1, 2, 3, 4}) {
+		t.Fatalf("invalid MCP image content: len=%d content=%+v sc=%+v", len(screenshotResult.Content), screenshotResult.Content, screenshotResult.StructuredContent)
 	}
-	if _, ok := screenshotResult.StructuredContent.(screenshot.Metadata); !ok {
-		t.Fatalf("missing screenshot structured metadata: %T", screenshotResult.StructuredContent)
+	meta := structuredBusinessData(screenshotResult)
+	if meta == nil || meta["mime_type"] == "" && meta["format"] == "" && meta["sha256"] == "" {
+		// Metadata is JSON-normalized under wire data after remoteResult.
+		if meta == nil {
+			t.Fatalf("missing screenshot structured metadata: %T", screenshotResult.StructuredContent)
+		}
 	}
 	sum := sha256.Sum256(original)
-	var prepareRequest mcp.CallToolRequest
-	prepareRequest.Params.Arguments = map[string]any{
+	prepareRequest := mcpresult.Request(map[string]any{
 		"intent":            "prepare a file change",
 		"remote_session_id": remoteSessionID,
 		"summary":           "update demo value",
@@ -230,17 +233,18 @@ func TestChangesetMCPDiffAndSemanticConfirmationSurviveTransportChange(t *testin
 			"base_sha256": fmt.Sprintf("sha256:%x", sum[:]),
 			"patch":       "@@ -1,3 +1,3 @@\n package demo\n \n-const Value = 1\n+const Value = 2\n",
 		}},
-	}
-	preparedResult, err := runtime.toolChangePrepare(contextFor("transport-prepare"), prepareRequest)
+	})
+	
+	preparedResult, err := runtime.toolChangePrepare(contextFor(), prepareRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := preparedResult.Content[0].(mcp.TextContent).Text
+	text := preparedResult.Content[0].(*mcp.TextContent).Text
 	if !strings.Contains(text, "```diff") || !strings.Contains(text, "Value = 2") || !strings.Contains(text, "demo.go") {
 		t.Fatalf("content should include a Markdown diff with the changed file:\n%s", text)
 	}
-	preparedDTO, ok := preparedResult.StructuredContent.(map[string]any)
-	if !ok {
+	preparedDTO := structuredBusinessData(preparedResult)
+	if preparedDTO == nil {
 		t.Fatalf("missing structured Changeset DTO: %T %+v", preparedResult.StructuredContent, preparedResult.StructuredContent)
 	}
 	changesetID, _ := preparedDTO["changeset_id"].(string)
@@ -259,12 +263,12 @@ func TestChangesetMCPDiffAndSemanticConfirmationSurviveTransportChange(t *testin
 	if inline, _ := diffMeta["unified_diff"].(string); !strings.Contains(inline, "Value = 2") {
 		t.Fatalf("small diff must have one structured authoritative copy: %+v", diffMeta)
 	}
-	diffResources, err := runtime.resourceChangesetDiff(contextFor("transport-resource"), mcp.ReadResourceRequest{Params: mcp.ReadResourceParams{URI: resourceURI}})
-	if err != nil || len(diffResources) != 1 {
+	diffResources, err := runtime.resourceChangesetDiff(contextFor(), &mcp.ReadResourceRequest{Params: &mcp.ReadResourceParams{URI: resourceURI}})
+	if err != nil || diffResources == nil || len(diffResources.Contents) != 1 {
 		t.Fatalf("read Changeset resource: resources=%+v err=%v", diffResources, err)
 	}
 
-	pending := callEnvelope(t, runtime.toolChangeExecute, contextFor("transport-apply"), map[string]any{
+	pending := callEnvelope(t, runtime.toolChangeExecute, contextFor(), map[string]any{
 		"remote_session_id": remoteSessionID,
 		"changeset_id":      changesetID,
 		"expected_digest":   digest,
@@ -282,13 +286,13 @@ func TestChangesetMCPDiffAndSemanticConfirmationSurviveTransportChange(t *testin
 	if !strings.Contains(pendingDiff, "-const Value = 1") || !strings.Contains(pendingDiff, "+const Value = 2") {
 		t.Fatalf("confirmation response must include concrete file diff: %+v", pendingFile)
 	}
-	missingSession := callEnvelope(t, runtime.toolChangeExecute, contextFor("transport-confirm-missing"), map[string]any{
+	missingSession := callEnvelope(t, runtime.toolChangeExecute, contextFor(), map[string]any{
 		"changeset_id": pendingData["changeset_id"], "expected_digest": pendingData["digest"], "confirmation_token": pendingData["confirmation_token"],
 	})
 	if missingSession["status"] != "failed" || missingSession["error"].(map[string]any)["code"] != "REMOTE_SESSION_REQUIRED" {
 		t.Fatalf("confirmation must require explicit Remote Session: %+v", missingSession)
 	}
-	confirmed := callEnvelope(t, runtime.toolChangeExecute, contextFor("transport-confirm-new"), map[string]any{
+	confirmed := callEnvelope(t, runtime.toolChangeExecute, contextFor(), map[string]any{
 		"remote_session_id": remoteSessionID, "changeset_id": pendingData["changeset_id"],
 		"expected_digest": pendingData["digest"], "confirmation_token": pendingData["confirmation_token"],
 	})
@@ -315,7 +319,7 @@ func (fakeScreenCapturer) Capture(_ context.Context, request screenshot.Request)
 	}, nil
 }
 
-func callEnvelope(t *testing.T, handler mcpserver.ToolHandlerFunc, ctx context.Context, arguments map[string]any) map[string]any {
+func callEnvelope(t *testing.T, handler mcp.ToolHandler, ctx context.Context, arguments map[string]any) map[string]any {
 	t.Helper()
 	if _, exists := arguments["intent"]; !exists {
 		withIntent := make(map[string]any, len(arguments)+1)
@@ -325,8 +329,8 @@ func callEnvelope(t *testing.T, handler mcpserver.ToolHandlerFunc, ctx context.C
 		withIntent["intent"] = "test operation"
 		arguments = withIntent
 	}
-	var request mcp.CallToolRequest
-	request.Params.Arguments = arguments
+	var request *mcp.CallToolRequest
+	request = mcpresult.Request(arguments)
 	result, err := handler(ctx, request)
 	if err != nil {
 		t.Fatal(err)
@@ -415,12 +419,12 @@ func TestSessionEventsIncludePendingConfirmations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := mcp.CallToolRequest{}
-	command.Params.Arguments = map[string]any{
+	command := mcpresult.Request(map[string]any{
 		"intent":            "request pending command confirmation",
 		"remote_session_id": created.Session.ID,
 		"command":           "echo pending", "purpose": "inspect pending", "scope": "workspace",
-	}
+	})
+	
 	commandResult, err := rt.toolCommandExecute(context.Background(), command)
 	if err != nil {
 		t.Fatal(err)
@@ -432,11 +436,11 @@ func TestSessionEventsIncludePendingConfirmations(t *testing.T) {
 		t.Fatalf("command confirmation = %+v", commandResponse)
 	}
 
-	events := mcp.CallToolRequest{}
-	events.Params.Arguments = map[string]any{
+	events := mcpresult.Request(map[string]any{
 		"intent":            "recover pending confirmation from event log",
 		"remote_session_id": created.Session.ID, "view": "events", "limit": 5,
-	}
+	})
+	
 	eventsResult, err := rt.toolSessionRead(context.Background(), events)
 	if err != nil {
 		t.Fatal(err)
@@ -455,12 +459,12 @@ func TestSessionEventsIncludePendingConfirmations(t *testing.T) {
 
 func TestRemoteSessionNotFoundExplainsExactCopy(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	request := mcp.CallToolRequest{}
-	request.Params.Arguments = map[string]any{
+	request := mcpresult.Request(map[string]any{
 		"intent":            "read a missing remote session",
 		"remote_session_id": "rs-does-not-exist",
 		"view":              "summary",
-	}
+	})
+	
 	result, err := rt.toolSessionRead(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)

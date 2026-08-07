@@ -13,8 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/mcpresult"
 
 	"mcpx/internal/approval"
 	"mcpx/internal/artifact"
@@ -82,7 +83,7 @@ type Runtime struct {
 	// For schema revision and capability catalog.
 	toolIndex    map[string]mcp.Tool
 	toolIndexMu  sync.RWMutex
-	toolHandlers map[string]mcpserver.ToolHandlerFunc
+	toolHandlers map[string]mcp.ToolHandler
 	toolMeta     map[string]toolAnnotation
 	// changeExecuteRequests is only a short-lived lookup accelerator. The
 	// durable Changeset/idempotency record remains the source of truth.
@@ -229,7 +230,7 @@ func New(opts Options) (*Runtime, error) {
 		retention:             retentionService,
 		screenshot:            screenshot.NewService(),
 		toolIndex:             map[string]mcp.Tool{},
-		toolHandlers:          map[string]mcpserver.ToolHandlerFunc{},
+		toolHandlers:          map[string]mcp.ToolHandler{},
 		toolMeta:              map[string]toolAnnotation{},
 		changeExecuteRequests: map[string]changeExecuteRequest{},
 		projectConfigs:        map[string]projectConfigCacheEntry{},
@@ -239,11 +240,15 @@ func New(opts Options) (*Runtime, error) {
 			Date:    firstNonEmpty(opts.Date, "unknown"),
 		},
 	}
-	runtime.observation = &observationBridge{
-		store:   observation.NewStore(stateStore.DB()),
-		broker:  observation.NewBroker(),
+	obsStore := observation.NewStore(stateStore.DB())
+	obsBroker := observation.NewBroker()
+	bridge := &observationBridge{
+		store:   obsStore,
+		broker:  obsBroker,
 		resolve: runtime.observationTarget,
 	}
+	bridge.async = observation.NewAsyncRecorder(0, bridge.Record)
+	runtime.observation = bridge
 	operations, err := operation.New(stateStore.DB(), operation.DefaultWorkers, runtime.observeOperationEvent)
 	if err != nil {
 		_ = stateStore.Close()
@@ -261,7 +266,7 @@ func New(opts Options) (*Runtime, error) {
 	runtime.remote.SetEventObserver(runtime.observeRemoteEvent)
 	// Build the catalog snapshot once at construction time so direct service
 	// calls and the real MCP server observe the same registered schema.
-	catalog := mcpserver.NewMCPServer("mcpx", runtime.build.Version, mcpserver.WithToolCapabilities(true))
+	catalog := mcp.NewServer(&mcp.Implementation{Name: "mcpx", Version: runtime.build.Version}, nil)
 	runtime.registerTools(catalog)
 	return runtime, nil
 }
@@ -369,13 +374,12 @@ func buildOAuthServer(cfg *config.Config) (*oauth.Server, error) {
 // Start serves MCP over Streamable HTTP behind the auth/OAuth gateway.
 func (r *Runtime) Start() error {
 	defer r.Close()
-	s := mcpserver.NewMCPServer(
-		"mcpx",
-		firstNonEmpty(r.build.Version, buildversion.Current),
-		mcpserver.WithToolCapabilities(true),
-		mcpserver.WithResourceCapabilities(false, false),
-		mcpserver.WithInstructions(agentGuidanceInstructions()),
-	)
+	s := mcp.NewServer(&mcp.Implementation{
+		Name:    "mcpx",
+		Version: firstNonEmpty(r.build.Version, buildversion.Current),
+	}, &mcp.ServerOptions{
+		Instructions: agentGuidanceInstructions(),
+	})
 	r.registerTools(s)
 	if r.observerSocket != nil {
 		if err := r.observerSocket.Start(); err != nil {
@@ -384,15 +388,7 @@ func (r *Runtime) Start() error {
 		}
 	}
 	r.startRetention()
-	// Snapshot registered tools for schema revision / client refresh (A01).
-	if listed := s.ListTools(); listed != nil {
-		r.toolIndexMu.Lock()
-		r.toolIndex = make(map[string]mcp.Tool, len(listed))
-		for name, st := range listed {
-			r.toolIndex[name] = st.Tool
-		}
-		r.toolIndexMu.Unlock()
-	}
+	// toolIndex is filled by addTool during registerTools.
 
 	addr := r.opts.AddrOverride
 	if addr == "" {
@@ -402,16 +398,12 @@ func (r *Runtime) Start() error {
 	// DNS-rebinding protection: rejects non-loopback Host when TCP is on loopback.
 	// Public IP / reverse-proxy access needs this disabled (see server.disable_localhost_protection).
 	disableHostGuard := r.cfg.Server.DisableLocalhostProtection || shouldAutoDisableHostGuard(addr, r.cfg.Server.Host)
-	httpOpts := []mcpserver.StreamableHTTPOption{
-		mcpserver.WithHTTPContextFunc(func(ctx context.Context, req *http.Request) context.Context {
-			ctx = auth.ContextWithAuthorization(ctx, req.Header.Get("Authorization"))
-			ctx, _ = ensureRuntimeContext(ctx, req.Header, time.Now())
-			return ctx
-		}),
-		mcpserver.WithDisableLocalhostProtection(disableHostGuard),
-		mcpserver.WithSessionIdleTTL(config.TransportSessionIdleTTL(r.cfg.Transport)),
-	}
-	streamable := mcpserver.NewStreamableHTTPServer(s, httpOpts...)
+	streamable := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		return s
+	}, &mcp.StreamableHTTPOptions{
+		DisableLocalhostProtection: disableHostGuard,
+		SessionTimeout:             config.TransportSessionIdleTTL(r.cfg.Transport),
+	})
 	gw := NewGateway(r.cfg, r.oauth, streamable)
 
 	log := logging.With("component", "server")
@@ -458,6 +450,9 @@ func (r *Runtime) Close() error {
 	}
 	r.closeOnce.Do(func() {
 		r.stopRetention()
+		if r.observation != nil && r.observation.async != nil {
+			r.observation.async.Close(2 * time.Second)
+		}
 		if r.observerSocket != nil {
 			if err := r.observerSocket.Close(); err != nil {
 				r.closeErr = err
@@ -725,8 +720,8 @@ func uniqueStrings(in []string) []string {
 	return out
 }
 
-func (r *Runtime) parseEnv(ctx context.Context, req mcp.CallToolRequest) (envelope.Request, error) {
-	args := req.GetArguments()
+func (r *Runtime) parseEnv(ctx context.Context, req *mcp.CallToolRequest) (envelope.Request, error) {
+	args := mcpresult.Arguments(req)
 	raw, err := json.Marshal(args)
 	if err != nil {
 		return envelope.Request{}, err
@@ -748,14 +743,90 @@ func (r *Runtime) parseEnv(ctx context.Context, req mcp.CallToolRequest) (envelo
 	return parsed, nil
 }
 
-// resultJSON serializes an internal handler payload. Registered public tools pass
-// this through instrumentTool, which replaces it with the ARC Envelope.
+// resultJSON serializes an internal handler payload into the unified tool result
+// contract used before ARC instrumentation:
+//
+//	content[0].text     — short human summary only
+//	structuredContent   — machine wire {status, data, meta, error?}
+//
+// instrumentTool/WrapToolResult then rewrites text into a richer host display and
+// exposes model-facing {status, type, data, error?} on structuredContent.
 func (r *Runtime) resultJSON(resp envelope.Response) (*mcp.CallToolResult, error) {
 	b, err := envelope.Marshal(resp)
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return mcpresult.NewError(err.Error()), nil
 	}
-	return mcp.NewToolResultText(string(b)), nil
+	var wire map[string]any
+	if err := json.Unmarshal(b, &wire); err != nil {
+		return mcpresult.NewError(err.Error()), nil
+	}
+	return mcpresult.NewStructured(wire, envelopeHumanSummary(resp)), nil
+}
+
+func envelopeHumanSummary(resp envelope.Response) string {
+	// Confirmation tokens must appear early in host-visible text before ARC wrap,
+	// so previews that truncate content still leave a usable retry key.
+	if token := confirmationTokenFromData(resp.Data); token != "" {
+		return "confirmation_token: `" + token + "`"
+	}
+	if resp.Error != nil {
+		if msg := strings.TrimSpace(resp.Error.Message); msg != "" {
+			return msg
+		}
+		if code := strings.TrimSpace(resp.Error.Code); code != "" {
+			return code
+		}
+	}
+	switch resp.Status {
+	case envelope.StatusOK:
+		return "succeeded"
+	case envelope.StatusAccepted:
+		return "accepted"
+	case envelope.StatusNeedConfirmation:
+		return "waiting confirmation"
+	case envelope.StatusInterrupted:
+		return "interrupted"
+	case envelope.StatusError: // also StatusDenied / Unauthorized / NeedSecret (same wire value)
+		return "failed"
+	default:
+		if resp.Status != "" {
+			return string(resp.Status)
+		}
+		return "completed"
+	}
+}
+
+func confirmationTokenFromData(data any) string {
+	if data == nil {
+		return ""
+	}
+	m, ok := data.(map[string]any)
+	if !ok {
+		// Typed DTOs (e.g. commandConfirmationData) are common in Fail payloads.
+		encoded, err := json.Marshal(data)
+		if err != nil {
+			return ""
+		}
+		if err := json.Unmarshal(encoded, &m); err != nil || m == nil {
+			return ""
+		}
+	}
+	if token, _ := m["confirmation_token"].(string); strings.TrimSpace(token) != "" {
+		return strings.TrimSpace(token)
+	}
+	// operation-style payloads nest tokens under steps.
+	if steps, ok := m["steps"].([]any); ok {
+		for _, step := range steps {
+			sm, _ := step.(map[string]any)
+			if sm == nil {
+				continue
+			}
+			if token, _ := sm["confirmation_token"].(string); strings.TrimSpace(token) != "" {
+				return strings.TrimSpace(token)
+			}
+		}
+	}
+	return ""
 }
 
 func (r *Runtime) logAudit(event audit.Event) {
@@ -799,7 +870,7 @@ func bearerFromCtx(ctx context.Context) string {
 	return ""
 }
 
-func (r *Runtime) toolCapabilityList(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
 		return fail, nil
@@ -894,14 +965,10 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req mcp.CallToolReques
 	}
 	data["revision"] = capabilityRevision(data)
 	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remoteID, Workspace: ws.Name, Tool: "capability_list", Status: "ok"})
-	result, resultErr := r.remoteResult(envReq, remoteID, ws.Name, data)
-	if resultErr == nil {
-		result.StructuredContent = data
-	}
-	return result, resultErr
+	return r.remoteResult(envReq, remoteID, ws.Name, data)
 }
 
-func (r *Runtime) toolWorkspaceList(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolWorkspaceList(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
 		return fail, nil

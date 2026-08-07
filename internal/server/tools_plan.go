@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/envelope"
 	"mcpx/internal/plan"
@@ -53,7 +53,7 @@ func planOperationSchema() map[string]any {
 	}
 }
 
-func (r *Runtime) toolPlanManage(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolPlanManage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	action := toolAction(req)
 	edit := action != "get"
 	envReq, principal, session, fail := r.changeRequest(ctx, req, edit)

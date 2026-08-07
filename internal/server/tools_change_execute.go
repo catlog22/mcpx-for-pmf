@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/approval"
 	"mcpx/internal/audit"
@@ -23,7 +23,7 @@ import (
 )
 
 // toolChangeExecute prepares and optionally applies a Changeset in one call (A10/A15).
-func (r *Runtime) toolChangeExecute(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) toolChangeExecute(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, session, fail := r.changeRequest(ctx, req, true)
 	if fail != nil {
 		return fail, nil

@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/mcpresult"
 )
 
 func TestRuntimeContextComesFromTransportHeaders(t *testing.T) {
@@ -46,10 +47,10 @@ func TestRuntimeContextGeneratesValuesWithoutHeaders(t *testing.T) {
 
 func TestRegisteredToolSchemasExcludeRuntimeContext(t *testing.T) {
 	runtime := newWorkspaceRuntime(t, "demo")
-	protocol := mcpserver.NewMCPServer("mcpx-test", "0.1.0")
+	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
 	runtime.registerTools(protocol)
-	for name, registered := range protocol.ListTools() {
-		encoded, err := json.Marshal(registered.Tool)
+	for name, registered := range runtime.listedToolMap() {
+		encoded, err := json.Marshal(registered)
 		if err != nil {
 			t.Fatalf("marshal %s: %v", name, err)
 		}
@@ -71,18 +72,18 @@ func TestInstrumentToolUsesRuntimeContextWithoutArgumentMetadata(t *testing.T) {
 		RequestID: "req_context", TraceID: "trace_context", SpanID: "span_context", StartedAtMs: started,
 	})
 	called := false
-	handler := func(handlerCtx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	handler := func(handlerCtx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		called = true
-		if _, exists := req.GetArguments()["started_at_ms"]; exists {
+		if _, exists := mcpresult.Arguments(req)["started_at_ms"]; exists {
 			t.Fatal("runtime metadata reached tool arguments")
 		}
 		if runtime, ok := runtimeContextFrom(handlerCtx); !ok || runtime.RequestID != "req_context" {
 			t.Fatalf("handler runtime context = %+v, %v", runtime, ok)
 		}
-		return mcp.NewToolResultStructured(map[string]any{"value": "ok"}, "ok"), nil
+		return mcpresult.NewStructured(map[string]any{"value": "ok"}, "ok"), nil
 	}
-	request := mcp.CallToolRequest{}
-	request.Params.Arguments = map[string]any{"action": "list"}
+	request := mcpresult.Request(map[string]any{"action": "list"})
+	
 	result, err := (&Runtime{}).instrumentTool("runtime_context_test", handler)(ctx, request)
 	if err != nil || !called {
 		t.Fatalf("instrumented call err=%v called=%v", err, called)

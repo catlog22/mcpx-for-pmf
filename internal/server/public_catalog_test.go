@@ -1,18 +1,20 @@
 package server
 
 import (
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"mcpx/internal/mcpresult"
+
 	"encoding/json"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
 
-	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
 func TestPublicCatalogIsExactlyTheV2Contract(t *testing.T) {
 	runtime := &Runtime{}
-	protocol := mcpserver.NewMCPServer("mcpx-test", "0.1.0")
+	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
 	runtime.registerTools(protocol)
 
 	want := []string{
@@ -22,8 +24,8 @@ func TestPublicCatalogIsExactlyTheV2Contract(t *testing.T) {
 		"progress_report", "plan_create", "plan_read", "plan_transition", "runtime_read", "environment_read", "environment_snapshot_create",
 		"extension_discover", "skill_call", "mcp_call", "artifact_read", "artifact_register", "screenshot_capture", "secret_provide",
 	}
-	got := make([]string, 0, len(protocol.ListTools()))
-	for name := range protocol.ListTools() {
+	got := make([]string, 0, len(runtime.listedToolMap()))
+	for name := range runtime.listedToolMap() {
 		got = append(got, name)
 	}
 	sort.Strings(got)
@@ -32,13 +34,13 @@ func TestPublicCatalogIsExactlyTheV2Contract(t *testing.T) {
 		t.Fatalf("public tool catalog = %v, want %v", got, want)
 	}
 
-	for name, registered := range protocol.ListTools() {
+	for name, registered := range runtime.listedToolMap() {
 		var schema map[string]any
-		if err := json.Unmarshal(registered.Tool.RawInputSchema, &schema); err != nil {
+		if err := json.Unmarshal(mcpresult.ToolSchemaJSON(registered), &schema); err != nil {
 			t.Fatalf("%s schema: %v", name, err)
 		}
 		if schema["additionalProperties"] != false {
-			t.Fatalf("%s must reject unknown arguments: %s", name, registered.Tool.RawInputSchema)
+			t.Fatalf("%s must reject unknown arguments: %s", name, mcpresult.ToolSchemaJSON(registered))
 		}
 		properties, _ := schema["properties"].(map[string]any)
 		if properties["remote_session_id"] != nil {
@@ -51,13 +53,13 @@ func TestPublicCatalogIsExactlyTheV2Contract(t *testing.T) {
 				continue
 			}
 			if properties[field] == nil {
-				t.Fatalf("%s required field %q is missing from properties: %s", name, field, registered.Tool.RawInputSchema)
+				t.Fatalf("%s required field %q is missing from properties: %s", name, field, mcpresult.ToolSchemaJSON(registered))
 			}
 		}
 	}
-	changeApply := protocol.ListTools()["change_apply"].Tool
+	changeApply := runtime.listedToolMap()["change_apply"]
 	var changeSchema map[string]any
-	if err := json.Unmarshal(changeApply.RawInputSchema, &changeSchema); err != nil {
+	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(changeApply), &changeSchema); err != nil {
 		t.Fatal(err)
 	}
 	changeProperties, _ := changeSchema["properties"].(map[string]any)
@@ -68,9 +70,9 @@ func TestPublicCatalogIsExactlyTheV2Contract(t *testing.T) {
 			t.Fatalf("change_apply expected_digest description missing %q: %s", phrase, description)
 		}
 	}
-	operationManage := protocol.ListTools()["operation_manage"].Tool
+	operationManage := runtime.listedToolMap()["operation_manage"]
 	var operationSchema map[string]any
-	if err := json.Unmarshal(operationManage.RawInputSchema, &operationSchema); err != nil {
+	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(operationManage), &operationSchema); err != nil {
 		t.Fatal(err)
 	}
 	operationProperties, _ := operationSchema["properties"].(map[string]any)
@@ -80,7 +82,7 @@ func TestPublicCatalogIsExactlyTheV2Contract(t *testing.T) {
 	}
 	for _, raw := range operationSchema["required"].([]any) {
 		if raw == "operation_id" {
-			t.Fatalf("operation_manage must make operation_id conditional: %s", operationManage.RawInputSchema)
+			t.Fatalf("operation_manage must make operation_id conditional: %s", mcpresult.ToolSchemaJSON(operationManage))
 		}
 	}
 	branches, ok := operationSchema["oneOf"].([]any)
@@ -105,7 +107,7 @@ func TestPublicCatalogIsExactlyTheV2Contract(t *testing.T) {
 		}
 	}
 	if !sawSingle || !sawBatch {
-		t.Fatalf("operation_manage schema branches missing single=%v batch=%v: %s", sawSingle, sawBatch, operationManage.RawInputSchema)
+		t.Fatalf("operation_manage schema branches missing single=%v batch=%v: %s", sawSingle, sawBatch, mcpresult.ToolSchemaJSON(operationManage))
 	}
 }
 

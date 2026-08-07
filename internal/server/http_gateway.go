@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"mcpx/internal/auth"
 	"mcpx/internal/config"
@@ -105,7 +106,11 @@ func (g *Gateway) wrapMCP(next http.Handler) http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		next.ServeHTTP(w, r)
+		// Inject auth + runtime context for tool handlers (official SDK has no
+		// WithHTTPContextFunc equivalent on StreamableHTTPHandler).
+		ctx := auth.ContextWithAuthorization(r.Context(), r.Header.Get("Authorization"))
+		ctx, _ = ensureRuntimeContext(ctx, r.Header, time.Now())
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
