@@ -63,13 +63,13 @@ type Operation struct {
 }
 
 type FileChange struct {
-	Ordinal         int         `json:"ordinal"`
-	Operation       string      `json:"operation"`
-	Path            string      `json:"path"`
-	NewPath         string      `json:"new_path,omitempty"`
-	ExpectedSHA256  string      `json:"expected_sha256,omitempty"`
-	OriginalSHA256  string      `json:"original_sha256,omitempty"`
-	ProposedSHA256  string      `json:"proposed_sha256,omitempty"`
+	Ordinal        int    `json:"ordinal"`
+	Operation      string `json:"operation"`
+	Path           string `json:"path"`
+	NewPath        string `json:"new_path,omitempty"`
+	ExpectedSHA256 string `json:"expected_sha256,omitempty"`
+	OriginalSHA256 string `json:"original_sha256,omitempty"`
+	ProposedSHA256 string `json:"proposed_sha256,omitempty"`
 	// ChainRootSHA256 is the on-disk hash at the start of a same-path chain.
 	// Models may pass that base_sha256 on every chained exact/update op; it must
 	// remain valid for op 2..N, not only the first hop (see prepareOperation).
