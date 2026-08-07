@@ -374,8 +374,9 @@ func (s *Server) ValidateAccessTokenIdentity(token, issuer, audience string) (st
 	if cid == "" {
 		return "", false
 	}
-	_, exists := s.Registry.Get(cid)
-	if !exists {
+	// Accept DCR clients and CIMD clients (ChatGPT uses HTTPS client_id URLs).
+	// Requiring Registry.Get only caused 401 after successful OAuth for CIMD.
+	if _, err := s.ResolveClient(cid); err != nil {
 		return "", false
 	}
 	return cid, true

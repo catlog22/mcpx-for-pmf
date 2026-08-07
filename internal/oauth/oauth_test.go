@@ -3,6 +3,9 @@ package oauth
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -102,5 +105,50 @@ func TestCheckPassword(t *testing.T) {
 	s := NewServer("secret", "", make([]byte, 32), 60)
 	if !s.CheckPassword("secret") || s.CheckPassword("wrong") {
 		t.Fatal("password")
+	}
+}
+
+func TestCIMDAccessTokenValidatesWithoutDCR(t *testing.T) {
+	// Regression: ChatGPT OAuth issues tokens with client_id = CIMD URL; validation
+	// must not require a DCR registry entry (would 401 after successful login).
+	mux := http.NewServeMux()
+	ts := httptest.NewTLSServer(mux)
+	defer ts.Close()
+	docURL := ts.URL + "/oauth/ok.json"
+	mux.HandleFunc("/oauth/ok.json", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"client_id":   docURL,
+			"client_name": "ChatGPT",
+			"redirect_uris": []string{
+				"https://chatgpt.com/connector_platform_oauth_redirect",
+			},
+			"token_endpoint_auth_method":            "none",
+			"token_endpoint_auth_methods_supported": []string{"none"},
+		})
+	})
+	secret := make([]byte, 32)
+	for i := range secret {
+		secret[i] = byte(i + 3)
+	}
+	s := NewServer("pw", "https://mcp.example.com", secret, 3600)
+	s.CIMD = NewCIMDResolver()
+	s.CIMD.client = ts.Client()
+
+	issuer := "https://mcp.example.com"
+	aud := "https://mcp.example.com/mcp"
+	tok, err := s.CreateAccessToken(docURL, aud, issuer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.ValidateAccessToken(tok, issuer, aud) {
+		t.Fatal("CIMD-issued token must validate without DCR registration")
+	}
+	// Opaque / unknown client must still fail
+	tok2, err := s.CreateAccessToken("unknown-client-id", aud, issuer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.ValidateAccessToken(tok2, issuer, aud) {
+		t.Fatal("unknown client token must not validate")
 	}
 }
