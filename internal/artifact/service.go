@@ -35,6 +35,8 @@ type Artifact struct {
 	Kind            string    `json:"kind"`
 	Path            string    `json:"path"`
 	MIMEType        string    `json:"mime_type"`
+	SourceEncoding  string    `json:"source_encoding"`
+	SourceBOM       string    `json:"source_bom"`
 	Size            int64     `json:"size"`
 	SHA256          string    `json:"sha256"`
 	ResourceURI     string    `json:"resource_uri"`
@@ -42,13 +44,17 @@ type Artifact struct {
 }
 
 type ReadResult struct {
-	Artifact Artifact       `json:"artifact"`
-	Offset   int64          `json:"offset"`
-	Next     int64          `json:"next_offset"`
-	EOF      bool           `json:"eof"`
-	Encoding string         `json:"encoding"`
-	Data     string         `json:"data"`
-	Format   map[string]any `json:"format,omitempty"`
+	Artifact         Artifact `json:"artifact"`
+	SourceEncoding   string   `json:"source_encoding"`
+	SourceBOM        string   `json:"source_bom"`
+	DeliveryEncoding string   `json:"delivery_encoding"`
+	MIMEType         string   `json:"mime_type"`
+	SourceOffset     int64    `json:"source_offset"`
+	NextSourceOffset int64    `json:"next_source_offset"`
+	EOF              bool     `json:"eof"`
+	SHA256           string   `json:"sha256"`
+	Text             string   `json:"text,omitempty"`
+	Base64           string   `json:"base64,omitempty"`
 }
 
 func NewService(db *sql.DB) *Service { return &Service{db: db, now: time.Now} }
@@ -79,14 +85,20 @@ func (s *Service) Register(ctx context.Context, remoteSessionID, principalID, wo
 	if err != nil {
 		return Artifact{}, err
 	}
+	probe, err := readProbe(absolute, 64<<10)
+	if err != nil {
+		return Artifact{}, err
+	}
+	source := DetectSourceEncoding(relativePath, probe, mimeType)
 	id := randomID()
 	now := s.now().UTC()
 	artifact := Artifact{ID: id, RemoteSessionID: remoteSessionID, Name: name, Kind: kind, Path: relativePath,
-		MIMEType: mimeType, Size: info.Size(), SHA256: digest, ResourceURI: ResourceURI(remoteSessionID, id), CreatedAt: now}
+		MIMEType: mimeType, SourceEncoding: source.Encoding, SourceBOM: source.BOM, Size: info.Size(), SHA256: digest,
+		ResourceURI: ResourceURI(remoteSessionID, id), CreatedAt: now}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO artifacts
-        (id, remote_session_id, name, kind, path, mime_type, size, sha256, created_by, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, artifact.ID, artifact.RemoteSessionID, artifact.Name,
-		artifact.Kind, artifact.Path, artifact.MIMEType, artifact.Size, artifact.SHA256, principalID, now.UnixMilli())
+        (id, remote_session_id, name, kind, path, mime_type, source_encoding, source_bom, size, sha256, created_by, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, artifact.ID, artifact.RemoteSessionID, artifact.Name,
+		artifact.Kind, artifact.Path, artifact.MIMEType, artifact.SourceEncoding, artifact.SourceBOM, artifact.Size, artifact.SHA256, principalID, now.UnixMilli())
 	if err != nil {
 		return Artifact{}, err
 	}
@@ -96,10 +108,10 @@ func (s *Service) Register(ctx context.Context, remoteSessionID, principalID, wo
 func (s *Service) Get(ctx context.Context, remoteSessionID, artifactID string) (Artifact, error) {
 	var artifact Artifact
 	var createdAt int64
-	err := s.db.QueryRowContext(ctx, `SELECT id, remote_session_id, name, kind, path, mime_type, size, sha256, created_at
+	err := s.db.QueryRowContext(ctx, `SELECT id, remote_session_id, name, kind, path, mime_type, source_encoding, source_bom, size, sha256, created_at
         FROM artifacts WHERE id = ? AND remote_session_id = ?`, artifactID, remoteSessionID).Scan(
 		&artifact.ID, &artifact.RemoteSessionID, &artifact.Name, &artifact.Kind, &artifact.Path,
-		&artifact.MIMEType, &artifact.Size, &artifact.SHA256, &createdAt)
+		&artifact.MIMEType, &artifact.SourceEncoding, &artifact.SourceBOM, &artifact.Size, &artifact.SHA256, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Artifact{}, ErrNotFound
 	}
@@ -115,7 +127,7 @@ func (s *Service) List(ctx context.Context, remoteSessionID, kind string, limit 
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	query := `SELECT id, name, kind, path, mime_type, size, sha256, created_at
+	query := `SELECT id, name, kind, path, mime_type, source_encoding, source_bom, size, sha256, created_at
         FROM artifacts WHERE remote_session_id = ?`
 	args := []any{remoteSessionID}
 	if kind != "" {
@@ -134,7 +146,7 @@ func (s *Service) List(ctx context.Context, remoteSessionID, kind string, limit 
 		var artifact Artifact
 		var createdAt int64
 		if err := rows.Scan(&artifact.ID, &artifact.Name, &artifact.Kind, &artifact.Path,
-			&artifact.MIMEType, &artifact.Size, &artifact.SHA256, &createdAt); err != nil {
+			&artifact.MIMEType, &artifact.SourceEncoding, &artifact.SourceBOM, &artifact.Size, &artifact.SHA256, &createdAt); err != nil {
 			return nil, err
 		}
 		artifact.RemoteSessionID = remoteSessionID
@@ -154,37 +166,50 @@ func (s *Service) Read(ctx context.Context, remoteSessionID, artifactID, workspa
 	if err != nil {
 		return ReadResult{}, err
 	}
-	if offset < 0 {
-		offset = 0
+	currentDigest, err := fileDigest(absolute)
+	if err != nil {
+		return ReadResult{}, err
+	}
+	if currentDigest != artifact.SHA256 {
+		return ReadResult{}, ErrChanged
 	}
 	if limit <= 0 || limit > 1<<20 {
 		limit = 256 << 10
 	}
-	handle, err := os.Open(absolute)
-	if err != nil {
-		return ReadResult{}, err
+	source := SourceEncoding{Encoding: artifact.SourceEncoding, BOM: artifact.SourceBOM}
+	start, end := AlignSourceWindow(offset, limit, artifact.Size, source)
+	buffer := make([]byte, end-start)
+	if len(buffer) > 0 {
+		handle, err := os.Open(absolute)
+		if err != nil {
+			return ReadResult{}, err
+		}
+		defer handle.Close()
+		read, readErr := handle.ReadAt(buffer, start)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return ReadResult{}, readErr
+		}
+		buffer = buffer[:read]
+		end = start + int64(read)
 	}
-	defer handle.Close()
-	buffer := make([]byte, limit)
-	read, readErr := handle.ReadAt(buffer, offset)
-	if readErr != nil && !errors.Is(readErr, io.EOF) {
-		return ReadResult{}, readErr
+	result := ReadResult{
+		Artifact: artifact, SourceEncoding: artifact.SourceEncoding, SourceBOM: artifact.SourceBOM,
+		MIMEType: stripCharset(artifact.MIMEType), SourceOffset: start, NextSourceOffset: end,
+		EOF: end >= artifact.Size, SHA256: artifact.SHA256,
 	}
-	buffer = buffer[:read]
-	window := AlignReadWindow(buffer)
-	pres := PresentText(artifact.Path, window, artifact.MIMEType)
-	formatMap := map[string]any{
-		"charset": pres.Format.Charset, "bom": pres.Format.BOM, "line_ending": pres.Format.LineEnding,
+	if decoded, ok := DecodeSourceWindow(buffer, start, source); ok {
+		result.DeliveryEncoding = DeliveryEncodingUTF8
+		base := stripCharset(artifact.MIMEType)
+		if !isTextMIME(base) {
+			base = "text/plain"
+		}
+		result.MIMEType = withCharset(base, "utf-8")
+		result.Text = string(decoded)
+		return result, nil
 	}
-	encoding, data := "base64", base64.StdEncoding.EncodeToString(buffer)
-	if pres.OK {
-		encoding, data = "utf-8", string(pres.UTF8)
-	}
-	next := offset + int64(read)
-	return ReadResult{
-		Artifact: artifact, Offset: offset, Next: next, EOF: next >= artifact.Size,
-		Encoding: encoding, Data: data, Format: formatMap,
-	}, nil
+	result.DeliveryEncoding = DeliveryEncodingBase64
+	result.Base64 = base64.StdEncoding.EncodeToString(buffer)
+	return result, nil
 }
 
 func (s *Service) ReadAll(ctx context.Context, remoteSessionID, artifactID, workspaceRoot string, maxBytes int64) (Artifact, []byte, error) {
@@ -212,6 +237,23 @@ func (s *Service) ReadAll(ctx context.Context, remoteSessionID, artifactID, work
 
 func ResourceURI(remoteSessionID, artifactID string) string {
 	return fmt.Sprintf("mcpx://remote-sessions/%s/artifacts/%s", remoteSessionID, artifactID)
+}
+
+func readProbe(path string, limit int) ([]byte, error) {
+	handle, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer handle.Close()
+	if limit <= 0 {
+		limit = 64 << 10
+	}
+	buffer := make([]byte, limit)
+	n, err := handle.Read(buffer)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return buffer[:n], nil
 }
 
 func fileDigest(path string) (string, error) {

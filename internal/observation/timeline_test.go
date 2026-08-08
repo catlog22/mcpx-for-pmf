@@ -230,8 +230,8 @@ func TestTextRendererShowsProgressBeforeCompletionOnce(t *testing.T) {
 	progress := "已完成定位，下一步运行测试"
 	for _, event := range []Event{
 		{Sequence: 0, RequestID: "req_previous", Tool: "read", Type: TypeToolCompleted, Status: "succeeded", Output: []byte(`{"status":"succeeded"}`)},
-		{Sequence: 1, RequestID: "req_progress", Tool: "execute", Type: TypeToolStarted, Goal: "验证变更", Purpose: "运行测试", ReasoningSummary: "先验证最小闭环", ProgressSummary: progress, NextStep: "检查失败日志", PlanID: "pl_progress", TaskID: "pt_progress", OperationID: "op_progress"},
-		{Sequence: 2, RequestID: "req_progress", Tool: "execute", Type: TypeToolCompleted, Status: "succeeded", DurationMs: 27, Goal: "验证变更", Purpose: "运行测试", ReasoningSummary: "先验证最小闭环", ProgressSummary: progress, NextStep: "检查失败日志", PlanID: "pl_progress", TaskID: "pt_progress", OperationID: "op_progress", Input: []byte(`{"command":"go test ./..."}`), Output: []byte(`{"status":"succeeded"}`)},
+		{Sequence: 1, RequestID: "req_progress", Tool: "execute", Type: TypeToolStarted, Goal: "验证变更", Purpose: "运行测试", ReasoningSummary: "先验证最小闭环", ProgressSummary: progress, NextStep: "检查失败日志", PlanID: "pl_progress", PlanTaskID: "pt_progress", ExecutionTaskID: "task_progress", OperationID: "op_progress"},
+		{Sequence: 2, RequestID: "req_progress", Tool: "execute", Type: TypeToolCompleted, Status: "succeeded", DurationMs: 27, Goal: "验证变更", Purpose: "运行测试", ReasoningSummary: "先验证最小闭环", ProgressSummary: progress, NextStep: "检查失败日志", PlanID: "pl_progress", PlanTaskID: "pt_progress", ExecutionTaskID: "task_progress", OperationID: "op_progress", Input: []byte(`{"command":"go test ./..."}`), Output: []byte(`{"status":"succeeded"}`)},
 	} {
 		if err := renderer.RenderEvent(&output, event); err != nil {
 			t.Fatal(err)
@@ -246,7 +246,7 @@ func TestTextRendererShowsProgressBeforeCompletionOnce(t *testing.T) {
 			t.Fatalf("semantic context missing %q: %q", want, text)
 		}
 	}
-	if !strings.Contains(text, "goal: 验证变更 · purpose: 运行测试") || !strings.Contains(text, "plan: pl_progress · task: pt_progress") || !strings.Contains(text, "── execute · started · operation=op_progress · duration=27ms") {
+	if !strings.Contains(text, "goal: 验证变更 · purpose: 运行测试") || !strings.Contains(text, "plan: pl_progress · plan task: pt_progress · execution task: task_progress") || !strings.Contains(text, "── execute · started · operation=op_progress · duration=27ms") {
 		t.Fatalf("semantic context was not grouped: %q", text)
 	}
 	if strings.Contains(text, "↳ operation: op_progress") {

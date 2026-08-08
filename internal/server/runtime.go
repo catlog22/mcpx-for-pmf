@@ -944,6 +944,7 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 	}
 
 	guidance := agentGuidance()
+	toolSchemaRevision := r.currentToolSchemaRevision()
 	data := map[string]any{
 		"capability_version":    cleanCoreCapabilityVersion,
 		"capability_groups":     capabilityGroups(),
@@ -955,6 +956,14 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 		"tool_manifest":         toolManifest,
 		"workspace":             map[string]any{"name": ws.Name},
 		"tools":                 tools,
+		"runtime": map[string]any{
+			"version":              r.build.Version,
+			"build_commit":         r.build.Commit,
+			"build_time":           r.build.Date,
+			"tool_schema_revision": toolSchemaRevision,
+			"capability_version":   cleanCoreCapabilityVersion,
+			"capability_groups":    capabilityGroups(),
+		},
 		"instructions": map[string]any{
 			"order": []string{"global", "project", "directory"}, "documents": r.agentInstructions(wsPath),
 			"list_action": nextAction("runtime_read", map[string]any{"view": "instructions"}),
@@ -964,7 +973,7 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 			"enabled": effective.Discovery.MCP.Enabled, "servers": servers, "manage_tool": "discover",
 		},
 		"resources": []map[string]any{
-			{"kind": "task_logs", "uri_template": "mcpx://remote-sessions/{remote_session_id}/tasks/{task_id}/logs", "mime_type": "text/plain"},
+			{"kind": "task_logs", "uri_template": "mcpx://remote-sessions/{remote_session_id}/tasks/{execution_task_id}/logs", "mime_type": "text/plain"},
 			{"kind": "artifact", "uri_template": "mcpx://remote-sessions/{remote_session_id}/artifacts/{artifact_id}"},
 		},
 		"recommended_workflows": map[string]any{
@@ -980,7 +989,7 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 	}
 	instrDocs := r.agentInstructions(wsPath)
 	data["revisions"] = map[string]any{
-		"tool_schema_revision":         r.currentToolSchemaRevision(),
+		"tool_schema_revision":         toolSchemaRevision,
 		"capability_manifest_revision": capabilityManifestRevision(fullToolManifest, fullSkills, servers, instrDocs, guidance),
 		"guidance_revision":            agentGuidanceRevision(),
 		"skill_revision":               skillRevision(fullSkills),
@@ -990,12 +999,8 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 		"skill_manifest_revision":      skillRevision(fullSkills),
 		"mcp_manifest_revision":        mcpRevision(servers),
 	}
-	// Keep deprecated top-level keys for one release.
 	revs := data["revisions"].(map[string]any)
 	data["client_refresh"] = clientRefreshPayload(envReq.Payload, revs)
-	data["tool_schema_revision"] = revs["tool_schema_revision"]
-	data["skill_revision"] = revs["skill_manifest_revision"]
-	data["mcp_revision"] = revs["mcp_manifest_revision"]
 	if session != nil {
 		data["remote_session"] = map[string]any{"id": session.ID, "role": session.Role, "status": session.Status}
 	}

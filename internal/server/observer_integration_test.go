@@ -241,7 +241,7 @@ func TestObservationRecordsRuntimeTaskOutput(t *testing.T) {
 	streams := map[string]string{}
 	offsets := map[string]int64{}
 	for _, event := range events {
-		if event.Type != "command.output" || event.OperationID != task.ID {
+		if event.Type != "command.output" || event.ExecutionTaskID != task.ID {
 			continue
 		}
 		if event.Workspace != "demo" || event.RemoteSessionID != created.Session.ID || event.RequestID != requestID || event.Tool != tool {

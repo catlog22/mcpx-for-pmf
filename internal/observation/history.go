@@ -11,21 +11,22 @@ import (
 // HistoryQuery is the typed filter set exposed by workspace_history_read.
 // Scalar filters are ANDed; values inside one slice are ORed.
 type HistoryQuery struct {
-	Workspace     string
-	SessionID     string
-	CallID        string
-	EventIDs      []string
-	RequestIDs    []string
-	OperationIDs  []string
-	TaskIDs       []string
-	ChangesetIDs  []string
-	CreatedAfter  time.Time
-	CreatedBefore time.Time
-	Keyword       string
-	Kinds         []string
-	Statuses      []string
-	Limit         int
-	Cursor        string
+	Workspace        string
+	SessionID        string
+	CallID           string
+	EventIDs         []string
+	RequestIDs       []string
+	OperationIDs     []string
+	PlanTaskIDs      []string
+	ExecutionTaskIDs []string
+	ChangesetIDs     []string
+	CreatedAfter     time.Time
+	CreatedBefore    time.Time
+	Keyword          string
+	Kinds            []string
+	Statuses         []string
+	Limit            int
+	Cursor           string
 }
 
 // Query returns newest-first events and a sequence cursor for the next page.
@@ -60,7 +61,8 @@ func (s *Store) Query(ctx context.Context, query HistoryQuery) ([]Event, string,
 	}
 	appendStringFilter(&where, &args, "request_id", query.RequestIDs)
 	appendStringFilter(&where, &args, "operation_id", query.OperationIDs)
-	appendStringFilter(&where, &args, "operation_id", query.TaskIDs)
+	appendStringFilter(&where, &args, "plan_task_id", query.PlanTaskIDs)
+	appendStringFilter(&where, &args, "execution_task_id", query.ExecutionTaskIDs)
 	appendStringFilter(&where, &args, "operation_id", query.ChangesetIDs)
 	appendKindFilter(&where, &args, query.Kinds)
 	appendStringFilter(&where, &args, "status", query.Statuses)
@@ -91,7 +93,7 @@ func (s *Store) Query(ctx context.Context, query HistoryQuery) ([]Event, string,
 
 	statement := `SELECT sequence, workspace_name,
 	        remote_session_id, request_id, call_id, operation_id, tool_name, event_type, phase,
-		intent, progress_summary, input_json, output_json, summary, status, purpose, goal, reasoning_summary, next_step, plan_id, task_id, parent_operation_id, step_id,
+		intent, progress_summary, input_json, output_json, summary, status, purpose, goal, reasoning_summary, next_step, plan_id, plan_task_id, execution_task_id, parent_operation_id, step_id,
         command, working_directory, exit_code, duration_ms, skill_name, mcp_server, mcp_tool, path,
         resource_uri, stream, stream_offset, truncated, created_at
         FROM observation_events WHERE ` + strings.Join(where, " AND ") + `

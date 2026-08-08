@@ -103,7 +103,7 @@ func TestWrapToolResultRendersSessionBootstrapAsMarkdown(t *testing.T) {
 }
 
 func TestWrapToolResultRendersPlanIdentityAndProgress(t *testing.T) {
-	raw := mcpresult.NewText(`{"status":"ok","data":{"plan_id":"pl_demo","goal":"修复工具可见性","status":"ready","tasks":[{"task_id":"pt_1"},{"task_id":"pt_2"}],"progress":{"completed":1,"total":2}}}`)
+	raw := mcpresult.NewText(`{"status":"ok","data":{"plan_id":"pl_demo","goal":"修复工具可见性","status":"ready","tasks":[{"plan_task_id":"pt_1"},{"plan_task_id":"pt_2"}],"progress":{"completed":1,"total":2}}}`)
 	written := WrapToolResult("plan_manage", ResultContext{}, raw)
 	text := written.Content[0].(*mcp.TextContent).Text
 	for _, want := range []string{"Plan ID: `pl_demo`", "Status: `ready`", "Goal: 修复工具可见性", "Progress: 1/2 completed", "`pt_1`", "`pt_2`"} {
@@ -212,7 +212,8 @@ func TestWrapToolResultExposesSemanticContextToARCAndHumanText(t *testing.T) {
 			ProgressSummary:  "已定位相关渲染入口",
 			NextStep:         "运行单元测试",
 			PlanID:           "pl_context",
-			TaskID:           "pt_context",
+			PlanTaskID:       "pt_context",
+			ExecutionTaskID:  "task_context",
 			OperationID:      "op_context",
 		},
 	}, raw)
@@ -232,7 +233,8 @@ func TestWrapToolResultExposesSemanticContextToARCAndHumanText(t *testing.T) {
 		"progress_summary":  "已定位相关渲染入口",
 		"next_step":         "运行单元测试",
 		"plan_id":           "pl_context",
-		"task_id":           "pt_context",
+		"plan_task_id":      "pt_context",
+		"execution_task_id": "task_context",
 		"operation_id":      "op_context",
 	} {
 		if context[key] != want {
@@ -240,7 +242,10 @@ func TestWrapToolResultExposesSemanticContextToARCAndHumanText(t *testing.T) {
 		}
 	}
 	text := written.Content[0].(*mcp.TextContent).Text
-	for _, want := range []string{"Context:", "- goal: 修复观测体验 · purpose: 读取目标文件", "next: 运行单元测试", "- plan: pl_context · task: pt_context · operation: op_context"} {
+	if _, exists := context["task_id"]; exists {
+		t.Fatalf("ambiguous task_id must not appear in ARC context: %+v", context)
+	}
+	for _, want := range []string{"Context:", "- goal: 修复观测体验 · purpose: 读取目标文件", "next: 运行单元测试", "- plan: pl_context · plan task: pt_context · execution task: task_context · operation: op_context"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("human text missing %q: %s", want, text)
 		}

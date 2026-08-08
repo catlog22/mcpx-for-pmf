@@ -66,7 +66,8 @@ type Context struct {
 	ProgressSummary  string `json:"progress_summary,omitempty"`
 	NextStep         string `json:"next_step,omitempty"`
 	PlanID           string `json:"plan_id,omitempty"`
-	TaskID           string `json:"task_id,omitempty"`
+	PlanTaskID       string `json:"plan_task_id,omitempty"`
+	ExecutionTaskID  string `json:"execution_task_id,omitempty"`
 	OperationID      string `json:"operation_id,omitempty"`
 }
 
@@ -204,7 +205,8 @@ func contextData(context Context) map[string]any {
 		"progress_summary":  context.ProgressSummary,
 		"next_step":         context.NextStep,
 		"plan_id":           context.PlanID,
-		"task_id":           context.TaskID,
+		"plan_task_id":      context.PlanTaskID,
+		"execution_task_id": context.ExecutionTaskID,
 		"operation_id":      context.OperationID,
 	} {
 		if value != "" {
@@ -254,8 +256,11 @@ func mergeContextMap(context *Context, values map[string]any) {
 	if context.PlanID == "" {
 		context.PlanID = stringValue(values, "plan_id")
 	}
-	if context.TaskID == "" {
-		context.TaskID = stringValue(values, "task_id")
+	if context.PlanTaskID == "" {
+		context.PlanTaskID = stringValue(values, "plan_task_id")
+	}
+	if context.ExecutionTaskID == "" {
+		context.ExecutionTaskID = stringValue(values, "execution_task_id")
 	}
 	if context.OperationID == "" {
 		context.OperationID = stringValue(values, "operation_id")
@@ -269,7 +274,8 @@ func normalizeContext(context Context) Context {
 	context.ProgressSummary = strings.TrimSpace(context.ProgressSummary)
 	context.NextStep = strings.TrimSpace(context.NextStep)
 	context.PlanID = strings.TrimSpace(context.PlanID)
-	context.TaskID = strings.TrimSpace(context.TaskID)
+	context.PlanTaskID = strings.TrimSpace(context.PlanTaskID)
+	context.ExecutionTaskID = strings.TrimSpace(context.ExecutionTaskID)
 	context.OperationID = strings.TrimSpace(context.OperationID)
 	return context
 }
@@ -371,7 +377,7 @@ func classify(tool string, isError bool, data map[string]any, summary string) (s
 	switch {
 	case (tool == "plan_manage" || tool == "plan_create" || tool == "plan_read" || tool == "plan_transition") && hasAnyKey(inner, "ready", "checks", "blockers"):
 		resultType = "delivery"
-	case (tool == "plan_manage" || tool == "plan_create" || tool == "plan_read" || tool == "plan_transition") && hasAnyKey(inner, "task_id", "task"):
+	case (tool == "plan_manage" || tool == "plan_create" || tool == "plan_read" || tool == "plan_transition" || tool == "plan") && hasAnyKey(inner, "plan_task_id", "task"):
 		resultType = "plan_task"
 	case tool == "plan_manage" || tool == "plan_create" || tool == "plan_read" || tool == "plan_transition":
 		resultType = "plan"
@@ -710,7 +716,7 @@ func resultDataSchema(name string) map[string]any {
 		return object(map[string]any{"tree": map[string]any{"type": "object"}, "entries": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}})
 	case SchemaLog:
 		return object(map[string]any{
-			"task_id": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"},
+			"execution_task_id": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"},
 			"stdout": map[string]any{"type": "string"}, "stderr": map[string]any{"type": "string"},
 			"stdout_next_offset": map[string]any{"type": "integer"}, "stderr_next_offset": map[string]any{"type": "integer"},
 		})
@@ -742,7 +748,7 @@ func resultDataSchema(name string) map[string]any {
 		})
 	case SchemaPlanTask:
 		return object(map[string]any{
-			"plan_id": map[string]any{"type": "string"}, "task_id": map[string]any{"type": "string"},
+			"plan_id": map[string]any{"type": "string"}, "plan_task_id": map[string]any{"type": "string"},
 			"status": map[string]any{"type": "string"}, "task": map[string]any{"type": "object"},
 			"evidence": map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
 		})
@@ -793,7 +799,7 @@ func buildOutputSchema() json.RawMessage {
 					"goal": map[string]any{"type": "string"}, "purpose": map[string]any{"type": "string"},
 					"reasoning_summary": map[string]any{"type": "string"}, "progress_summary": map[string]any{"type": "string"},
 					"next_step": map[string]any{"type": "string"}, "plan_id": map[string]any{"type": "string"},
-					"task_id": map[string]any{"type": "string"}, "operation_id": map[string]any{"type": "string"},
+					"plan_task_id": map[string]any{"type": "string"}, "execution_task_id": map[string]any{"type": "string"}, "operation_id": map[string]any{"type": "string"},
 				},
 			},
 			"data":  map[string]any{"type": "object", "additionalProperties": true, "description": "按 type 返回的业务结果；ID、SHA、路径、命令输出和分页游标均原样位于此处"},

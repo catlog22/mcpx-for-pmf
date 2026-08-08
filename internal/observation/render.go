@@ -153,7 +153,8 @@ func semanticContextLines(event Event) []string {
 		},
 		{
 			{label: "plan", value: event.PlanID},
-			{label: "task", value: event.TaskID},
+			{label: "plan task", value: event.PlanTaskID},
+			{label: "execution task", value: event.ExecutionTaskID},
 		},
 	})
 }
@@ -521,7 +522,7 @@ func summaryEventOutput(event Event, value map[string]any) string {
 		return ""
 	}
 	parts := make([]string, 0, 3)
-	for _, key := range []string{"changeset_id", "task_id", "status", "exit_code"} {
+	for _, key := range []string{"changeset_id", "plan_task_id", "execution_task_id", "status", "exit_code"} {
 		if text := strings.TrimSpace(formatNumber(metadata[key])); text != "" {
 			parts = append(parts, key+"="+text)
 		}
@@ -627,7 +628,7 @@ func toolAction(tool string, raw []byte) (string, string) {
 			label += "/" + toolName
 		}
 	default:
-		for _, key := range []string{"workspace", "path", "changeset_id", "task_id", "artifact_id", "remote_session_id"} {
+		for _, key := range []string{"workspace", "path", "changeset_id", "plan_task_id", "execution_task_id", "artifact_id", "remote_session_id"} {
 			if value, ok := input[key].(string); ok && strings.TrimSpace(value) != "" {
 				label = value
 				break
@@ -1392,7 +1393,7 @@ func planManageOutputSummary(data map[string]any) string {
 		return ""
 	}
 	details := make([]string, 0, 3)
-	if taskID, _ := data["task_id"].(string); strings.TrimSpace(taskID) != "" {
+	if taskID, _ := data["plan_task_id"].(string); strings.TrimSpace(taskID) != "" {
 		details = append(details, "任务 "+strings.TrimSpace(taskID))
 	}
 	if status, _ := data["status"].(string); strings.TrimSpace(status) != "" {
@@ -1429,7 +1430,7 @@ func planTaskIDs(tasks []any, limit int) []string {
 	ids := make([]string, 0, minInt(len(tasks), limit))
 	for _, raw := range tasks {
 		task, _ := raw.(map[string]any)
-		id, _ := task["task_id"].(string)
+		id, _ := task["plan_task_id"].(string)
 		if id = strings.TrimSpace(id); id != "" {
 			ids = append(ids, id)
 			if len(ids) == limit {

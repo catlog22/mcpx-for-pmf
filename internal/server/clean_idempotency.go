@@ -220,7 +220,7 @@ func (r *Runtime) cleanIdempotencyFailureWithDetails(envReq envelope.Request, se
 		}
 		response.Error.Details["idempotency_key_scope"] = "remote_session_id + principal_id + operation + idempotency_key"
 		arguments := map[string]any{"remote_session_id": session.ID, "note": "使用新的 idempotency_key；不要重放未知状态的请求"}
-		for _, key := range []string{"action", "task_id", "plan_id", "artifact_id", "name", "server", "tool"} {
+		for _, key := range []string{"action", "plan_task_id", "execution_task_id", "plan_id", "artifact_id", "name", "server", "tool"} {
 			if value, ok := payload[key]; ok {
 				arguments[key] = value
 			}

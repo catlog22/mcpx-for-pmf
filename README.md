@@ -36,9 +36,10 @@ MCPX 同时处理两类 Session：
 | `Mcp-Session-Id` | Streamable HTTP 传输层临时标识 | 连接和协议状态，重连或换客户端后可能变化 |
 | `remote_session_id` | SQLite 持久化业务标识 | Workspace、角色、Edit、Task、Plan、操作、快照和产物的主键 |
 
-客户端应始终原样保存并复用服务端返回的 `remote_session_id`、`edit_id`、`task_id`、
-`plan_id`、`artifact_id`、`discovery_id` 和 `discovery_revision`，不能自行缩写、
-猜测或从历史日志重建这些标识。
+客户端应始终原样保存并复用服务端返回的 `remote_session_id`、`edit_id`、`plan_id`、
+`plan_task_id`、`execution_task_id`、`operation_id`、`artifact_id`、`discovery_id` 和
+`discovery_revision`，不能自行缩写、猜测或从历史日志重建这些标识。Plan Task 与
+执行 Task 是不同命名空间，不存在兼容的通用 `task_id` 字段。
 
 MCPX 只提供 Streamable HTTP 的 `/mcp` 端点，不提供旧版 HTTP+SSE 的 `/sse`
 或 `/message` 兼容端点。
@@ -351,7 +352,7 @@ bootstrap、capability manifest 和 recovery action 使用同一组名称与 Sch
 
 每次重要调用都可以提供统一的语义上下文：`goal` 表示总体目标，`purpose` 表示本次
 操作作用，`reasoning_summary` 表示可公开的简短判断依据，`progress_summary` 表示
-已验证进展，`next_step` 表示下一项具体计划；`plan_id`、`task_id`、`operation_id` 用于绑定执行上下文。
+已验证进展，`next_step` 表示下一项具体计划；`plan_id`、`plan_task_id`、`execution_task_id`、`operation_id` 用于绑定执行上下文。
 `reasoning_summary` 不是隐藏思维链，不得写入私有推理过程。上述字段会原样进入 ARC
 `structuredContent.context`、`_meta["mcpx.result"].mcpx.result.context` 和持久化观测事件。
 没有下一次工具调用、需要等待用户或发生阻塞时，直接在响应中说明状态和下一步。
@@ -361,7 +362,7 @@ durable Store，再通过本地 JSONL 帧推送；`observe --format=json`、终�
 其他 JSONL 客户端消费同一事件。事件的 `phase` 表示 `action_started`、`output`、
 `result` 或 `error`，语义上下文字段会在 JSONL、历史和 text observer 中保留。`call_id` 缺省回退为
 `request_id` 用于内部请求关联；不同客户端接力时使用同一个 `remote_session_id`，并可结合
-`workspace` 调用 `observe(view="history")` 查询历史操作。`task_id`、`operation_id` 负责执行归属。
+`workspace` 调用 `observe(view="history")` 查询历史操作。`plan_task_id`、`execution_task_id`、`operation_id` 负责各自的计划、执行和操作归属。
 
 ### 2. 读取源码
 
@@ -484,13 +485,13 @@ absolute path、`..` 越界和中间 symlink 仍拒绝。`submit_move_out`
 }
 ```
 
-`execute(action="run")` 默认等待短命令完成；超过等待窗口时返回 `task_id`。后续
+`execute(action="run")` 默认等待短命令完成；超过等待窗口时返回 `execution_task_id`。后续
 使用已知 ID：
 
 ```text
-observe(view="status", task_id="task_...")
-observe(view="logs", task_id="task_...", stdout_offset=0, stderr_offset=0)
-execute(action="attach", task_id="task_...", yield_time_ms=30000)
+observe(view="status", execution_task_id="task_...")
+observe(view="logs", execution_task_id="task_...", stdout_offset=0, stderr_offset=0)
+execute(action="attach", execution_task_id="task_...", yield_time_ms=30000)
 ```
 
 长命令的状态和日志使用 observe 的 offset/next offset 续读；输出被截断时响应会
@@ -498,21 +499,22 @@ execute(action="attach", task_id="task_...", yield_time_ms=30000)
 完成，并重新执行权限与 Workspace 校验。
 
 `execution_mode="async"` 只表示把本次工具调用提交为异步 Operation，不保证立即返回
-`task_id`。命令是否脱离为持久化 Task 由 `yield_time_ms` 决定：命令在等待窗口内结束时，
+`execution_task_id`。命令是否脱离为持久化执行 Task 由 `yield_time_ms` 决定：命令在等待窗口内结束时，
 Operation 结果直接包含 `completed_in_call=true`；需要 Task 生命周期时，应设置小于预期
-运行时长的 `yield_time_ms`，再使用返回的 `task_id` 调用 `observe` 或 `execute(action="attach")`。
+运行时长的 `yield_time_ms`，再使用返回的 `execution_task_id` 调用 `observe` 或 `execute(action="attach")`。
 
 ### 5. Plan、Artifact 与扩展
 
 `plan(action="create|read|advance|complete|block|replan|deliver")` 只引用服务端
-返回的 `plan_id`、`task_id` 和结构化 evidence。典型路径是：
+返回的 `plan_id`、`plan_task_id` 和结构化 evidence；`create.tasks[].local_id` 仅在创建请求内解析依赖。典型路径是：
 
 ```text
 plan(create) → plan(advance) → edit/execute → artifact(register) → plan(complete) → plan(deliver)
 ```
 
-产物使用 `artifact(action="register|list|read")`；大文件按 byte offset 分片，
-文本响应保持 UTF-8 边界。
+产物使用 `artifact(action="register|list|read")`；注册时持久化 `source_encoding`/`source_bom`，读取时
+`source_offset`/`next_source_offset` 始终使用源文件 byte 坐标。UTF-8/UTF-16 文本通过
+`delivery_encoding=utf-8` 返回 `text`，二进制通过 `delivery_encoding=base64` 返回 `base64`，不会把任意字节伪装成文本。
 
 Skill/MCP 必须先显式发现：
 
@@ -551,7 +553,9 @@ operation_manage(action="result", operation_id="op_...")
 
 `tools/list` 同时为 MCPX 工具公布 `outputSchema`，其描述的是实际返回的
 `structuredContent` 公共结构（`status`、`type`、`context`、`data`、`error`、`hints`、`actions`），
-而不是包含 trace 的完整 ARC metadata。`data` 按 `type` 承载具体业务结果，工具调用返回值仍是最终事实来源。
+并对有硬上限的工具通过 `x-mcpx-limits` 发布与 `runtime_read(view="capabilities").limits` 同源的限制。
+`runtime_read(view="capabilities")` 的 `runtime` 同时给出 `version`、`build_commit`、`build_time`、
+`tool_schema_revision` 和 capability 版本信息；旧的顶层 revision alias 不再返回。
 
 | 状态 | 含义 |
 | --- | --- |
@@ -565,7 +569,7 @@ operation_manage(action="result", operation_id="op_...")
 读取；Edit Diff 使用 `observe(view="diff")` 分页：
 
 ```text
-mcpx://remote-sessions/{remote_session_id}/tasks/{task_id}/logs
+mcpx://remote-sessions/{remote_session_id}/tasks/{execution_task_id}/logs
 mcpx://remote-sessions/{remote_session_id}/artifacts/{artifact_id}
 ```
 
@@ -580,7 +584,8 @@ ARC 的机器结果固定包含 `context`：
     "progress_summary": "命令已完成并返回 exit_code=0",
     "next_step": "检查异常任务恢复",
     "plan_id": "pl_...",
-    "task_id": "pt_...",
+    "plan_task_id": "pt_...",
+    "execution_task_id": "task_...",
     "operation_id": "op_..."
   }
 }
@@ -634,8 +639,8 @@ ARC 人类展示层会按工具使用稳定的动作色（读取/发现、编辑
 可显式指定终端宽度。
 
 机器处理日志时使用 `--format json`，不要解析文本中的颜色、缩进或装饰边框。
-事件中保留 `event_id`、`sequence`、`request_id`、`operation_id`、`task_id`、
-`edit_id`、状态、耗时、路径、命令和截断标志等字段。
+事件中保留 `event_id`、`sequence`、`request_id`、`operation_id`、`plan_task_id`、
+`execution_task_id`、`edit_id`、状态、耗时、路径、命令和截断标志等字段。
 
 ## 安全与数据边界
 

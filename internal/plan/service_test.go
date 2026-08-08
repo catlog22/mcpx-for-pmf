@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -140,7 +141,8 @@ func TestServiceEnforcesDependenciesAndCompletionEvidence(t *testing.T) {
 	if _, err := service.StartTask(ctx, remoteSessionID, created.ID, second, "principal-test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CompleteTask(ctx, remoteSessionID, created.ID, second, "principal-test", []EvidenceInput{{Kind: "verification", ReferenceID: "test-run", Metadata: map[string]any{"status": "passed"}}}); err != nil {
+	verificationID := seedEvidenceEvent(t, store.DB(), remoteSessionID, "execute", "succeeded")
+	if _, err := service.CompleteTask(ctx, remoteSessionID, created.ID, second, "principal-test", []EvidenceInput{{Kind: EvidenceVerification, ReferenceID: verificationID, Metadata: map[string]any{"status": "passed"}}}); err != nil {
 		t.Fatal(err)
 	}
 	delivery, err := service.Deliver(ctx, remoteSessionID, created.ID, "principal-test")
@@ -213,7 +215,8 @@ func TestServiceDeliveryBlocksDraftChangesetAndInvalidEvidence(t *testing.T) {
 	if _, err := service.StartTask(ctx, remoteSessionID, created.ID, apply, "principal-test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CompleteTask(ctx, remoteSessionID, created.ID, apply, "principal-test", []EvidenceInput{{Kind: "changeset", ReferenceID: "chg_test"}, {Kind: "verification", ReferenceID: "verify", Metadata: map[string]any{"status": "failed"}}}); err != nil {
+	verificationID := seedEvidenceEvent(t, store.DB(), remoteSessionID, "execute", "succeeded")
+	if _, err := service.CompleteTask(ctx, remoteSessionID, created.ID, apply, "principal-test", []EvidenceInput{{Kind: EvidenceVerification, ReferenceID: verificationID, Metadata: map[string]any{"status": "failed"}}}); err != nil {
 		t.Fatal(err)
 	}
 	blocked, err := service.Deliver(ctx, remoteSessionID, created.ID, "principal-test")
@@ -249,6 +252,19 @@ func openPlanStore(t *testing.T) *state.Store {
 		t.Fatal(err)
 	}
 	return store
+}
+
+func seedEvidenceEvent(t *testing.T, db *sql.DB, remoteSessionID, tool, status string) string {
+	t.Helper()
+	result, err := db.Exec(`INSERT INTO observation_events (workspace_name, remote_session_id, tool_name, event_type, status, created_at) VALUES ('test', ?, ?, 'tool.completed', ?, 1)`, remoteSessionID, tool, status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strconv.FormatInt(id, 10)
 }
 
 func seedPlanSession(t *testing.T, db *sql.DB) string {

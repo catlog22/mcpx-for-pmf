@@ -129,7 +129,7 @@ func TestCleanCorePlanEvidenceAndArtifactWorkflow(t *testing.T) {
 
 	created := callEnvelope(t, rt.toolPlanClean, context.Background(), map[string]any{
 		"action": "create", "remote_session_id": remoteID, "purpose": "track the workflow",
-		"goal": "complete the clean core workflow", "tasks": []any{map[string]any{"task_id": "main", "title": "apply and verify"}},
+		"goal": "complete the clean core workflow", "tasks": []any{map[string]any{"local_id": "main", "title": "apply and verify"}},
 		"idempotency_key": "plan-create-1",
 	})
 	if !statusOK(created) {
@@ -139,16 +139,16 @@ func TestCleanCorePlanEvidenceAndArtifactWorkflow(t *testing.T) {
 	planID := createdData["plan_id"].(string)
 	replay := callEnvelope(t, rt.toolPlanClean, context.Background(), map[string]any{
 		"action": "create", "remote_session_id": remoteID, "purpose": "same plan, rephrased",
-		"goal": "complete the clean core workflow", "tasks": []any{map[string]any{"task_id": "main", "title": "apply and verify"}},
+		"goal": "complete the clean core workflow", "tasks": []any{map[string]any{"local_id": "main", "title": "apply and verify"}},
 		"idempotency_key": "plan-create-1",
 	})
 	if replay["data"].(map[string]any)["idempotent_replay"] != true {
 		t.Fatalf("plan create replay=%+v", replay)
 	}
 	tasks := asMapSlice(createdData["tasks"])
-	taskID := tasks[0]["task_id"].(string)
+	taskID := tasks[0]["plan_task_id"].(string)
 	advanced := callEnvelope(t, rt.toolPlanClean, context.Background(), map[string]any{
-		"action": "advance", "remote_session_id": remoteID, "purpose": "start the tracked task", "plan_id": planID, "task_id": taskID,
+		"action": "advance", "remote_session_id": remoteID, "purpose": "start the tracked task", "plan_id": planID, "plan_task_id": taskID,
 	})
 	if !statusOK(advanced) {
 		t.Fatalf("plan advance=%+v", advanced)
@@ -173,12 +173,12 @@ func TestCleanCorePlanEvidenceAndArtifactWorkflow(t *testing.T) {
 		t.Fatalf("execute=%+v", executed)
 	}
 	executeData := executed["data"].(map[string]any)
-	taskIDForEvidence, _ := executeData["task_id"].(string)
+	taskIDForEvidence, _ := executeData["execution_task_id"].(string)
 	if taskIDForEvidence == "" {
 		t.Fatalf("expected a task for execution evidence=%+v", executeData)
 	}
 	attached := callEnvelope(t, rt.toolExecute, context.Background(), map[string]any{
-		"action": "attach", "remote_session_id": remoteID, "purpose": "collect verification output", "task_id": taskIDForEvidence, "yield_time_ms": 1000,
+		"action": "attach", "remote_session_id": remoteID, "purpose": "collect verification output", "execution_task_id": taskIDForEvidence, "yield_time_ms": 1000,
 	})
 	if !statusOK(attached) || attached["data"].(map[string]any)["status"] != "exited" {
 		t.Fatalf("attach=%+v", attached)
@@ -193,7 +193,7 @@ func TestCleanCorePlanEvidenceAndArtifactWorkflow(t *testing.T) {
 	artifactID := artifact["data"].(map[string]any)["artifact_id"].(string)
 
 	completed := callEnvelope(t, rt.toolPlanClean, context.Background(), map[string]any{
-		"action": "complete", "remote_session_id": remoteID, "purpose": "record verifiable completion", "plan_id": planID, "task_id": taskID,
+		"action": "complete", "remote_session_id": remoteID, "purpose": "record verifiable completion", "plan_id": planID, "plan_task_id": taskID,
 		"evidence": []any{
 			map[string]any{"kind": "edit", "reference_id": editID},
 			map[string]any{"kind": "execute", "reference_id": taskIDForEvidence},

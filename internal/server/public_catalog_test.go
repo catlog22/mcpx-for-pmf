@@ -41,6 +41,14 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 		if registered.OutputSchema == nil {
 			t.Fatalf("%s must expose the ARC structuredContent output schema", name)
 		}
+		if _, limited := publishedLimits()[name]; limited {
+			var output map[string]any
+			encoded, _ := json.Marshal(registered.OutputSchema)
+			_ = json.Unmarshal(encoded, &output)
+			if output["x-mcpx-limits"] == nil {
+				t.Fatalf("%s outputSchema must publish hard limits", name)
+			}
+		}
 		var schema map[string]any
 		if err := json.Unmarshal(mcpresult.ToolSchemaJSON(registered), &schema); err != nil {
 			t.Fatalf("%s schema: %v", name, err)
@@ -52,6 +60,9 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 			t.Fatalf("%s must reject unknown arguments: %s", name, mcpresult.ToolSchemaJSON(registered))
 		}
 		properties, _ := schema["properties"].(map[string]any)
+		if properties["task_id"] != nil {
+			t.Fatalf("%s must not expose ambiguous task_id: %s", name, mcpresult.ToolSchemaJSON(registered))
+		}
 		if _, clean := map[string]bool{"session": true, "read": true, "edit": true, "observe": true}[name]; clean && properties["remote_session_id"] == nil {
 			t.Fatalf("%s must expose remote_session_id", name)
 		}
@@ -67,8 +78,8 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 		}
 	}
 	editTool := runtime.listedToolMap()["edit"]
-	if editTool.Annotations == nil || editTool.Annotations.ReadOnlyHint || editTool.Annotations.DestructiveHint == nil || !*editTool.Annotations.DestructiveHint || !editTool.Annotations.IdempotentHint || editTool.Annotations.OpenWorldHint == nil || *editTool.Annotations.OpenWorldHint {
-		t.Fatalf("edit must expose the constrained destructive annotation: %+v", editTool.Annotations)
+	if editTool.Annotations == nil || editTool.Annotations.ReadOnlyHint || editTool.Annotations.DestructiveHint == nil || *editTool.Annotations.DestructiveHint || !editTool.Annotations.IdempotentHint || editTool.Annotations.OpenWorldHint == nil || *editTool.Annotations.OpenWorldHint {
+		t.Fatalf("edit must expose constrained non-destructive workspace mutation: %+v", editTool.Annotations)
 	}
 	if editTool.Title != "Workspace 文件变更（不提供删除）" || editTool.Annotations.Title != editTool.Title {
 		t.Fatalf("edit title=%q annotations=%+v", editTool.Title, editTool.Annotations)
@@ -100,11 +111,32 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 		}
 	}
 	moveOutTool := runtime.listedToolMap()["submit_move_out"]
-	if moveOutTool.Annotations == nil || moveOutTool.Annotations.ReadOnlyHint || moveOutTool.Annotations.DestructiveHint == nil || *moveOutTool.Annotations.DestructiveHint || !moveOutTool.Annotations.IdempotentHint || moveOutTool.Annotations.OpenWorldHint == nil || *moveOutTool.Annotations.OpenWorldHint {
+	if moveOutTool.Annotations == nil || moveOutTool.Annotations.ReadOnlyHint || moveOutTool.Annotations.DestructiveHint == nil || !*moveOutTool.Annotations.DestructiveHint || !moveOutTool.Annotations.IdempotentHint || moveOutTool.Annotations.OpenWorldHint == nil || *moveOutTool.Annotations.OpenWorldHint {
 		t.Fatalf("submit_move_out annotations=%+v", moveOutTool.Annotations)
 	}
 	if safety := toolSafetyMetadata(map[string]any{"_meta": moveOutTool.Meta}); safety["approval"] != "web_model_user_confirmation_required" || safety["filesystem_only"] != true || safety["registered_workspace"] != true || safety["confirmation_credential"] != "server_generated_confirmation_uuid" || safety["no_symlink_following"] != true || safety["symlink_entry_move"] != true || safety["reversible"] != true {
 		t.Fatalf("submit_move_out safety metadata=%+v", safety)
+	}
+	for toolName, actions := range map[string][]string{
+		"plan":     {"create", "read", "advance", "complete", "block", "replan", "deliver"},
+		"artifact": {"register", "list", "read"},
+	} {
+		tool := runtime.listedToolMap()[toolName]
+		if tool.Annotations == nil || tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint || tool.Annotations.OpenWorldHint == nil || *tool.Annotations.OpenWorldHint {
+			t.Fatalf("%s top-level annotations must be non-destructive and closed-world: %+v", toolName, tool.Annotations)
+		}
+		risk, _ := tool.Meta["mcpx/action_risk"].(map[string]any)
+		for _, action := range actions {
+			entry, ok := risk[action].(map[string]any)
+			if !ok || entry["destructive"] != false || entry["open_world"] != false {
+				t.Fatalf("%s action risk %s=%+v", toolName, action, entry)
+			}
+			if (toolName == "artifact" && (action == "list" || action == "read")) || (toolName == "plan" && action == "read") {
+				if entry["read_only"] != true {
+					t.Fatalf("%s %s must be read-only: %+v", toolName, action, entry)
+				}
+			}
+		}
 	}
 	observeTool := runtime.listedToolMap()["observe"]
 	var observeSchema map[string]any
@@ -112,13 +144,26 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	observeProperties, _ := observeSchema["properties"].(map[string]any)
-	for _, field := range []string{"workspace", "view", "event_ids", "request_ids", "operation_ids", "task_ids", "changeset_ids", "keyword", "kinds", "statuses", "created_after", "created_before"} {
+	for _, field := range []string{"workspace", "view", "event_ids", "request_ids", "operation_ids", "plan_task_ids", "execution_task_ids", "plan_task_id", "execution_task_id", "changeset_ids", "keyword", "kinds", "statuses", "created_after", "created_before"} {
 		if observeProperties[field] == nil {
 			t.Fatalf("observe history schema missing %q: %s", field, mcpresult.ToolSchemaJSON(observeTool))
 		}
 	}
-	if observeProperties["room_id"] != nil {
-		t.Fatalf("observe schema must not expose room_id: %s", mcpresult.ToolSchemaJSON(observeTool))
+	if observeProperties["room_id"] != nil || observeProperties["task_id"] != nil || observeProperties["task_ids"] != nil {
+		t.Fatalf("observe schema exposes removed fields: %s", mcpresult.ToolSchemaJSON(observeTool))
+	}
+	for _, toolName := range []string{"plan", "execute"} {
+		var schema map[string]any
+		if err := json.Unmarshal(mcpresult.ToolSchemaJSON(runtime.listedToolMap()[toolName]), &schema); err != nil {
+			t.Fatal(err)
+		}
+		properties, _ := schema["properties"].(map[string]any)
+		if toolName == "plan" && properties["plan_task_id"] == nil {
+			t.Fatalf("plan must expose plan_task_id: %s", mcpresult.ToolSchemaJSON(runtime.listedToolMap()[toolName]))
+		}
+		if toolName == "execute" && properties["execution_task_id"] == nil {
+			t.Fatalf("execute must expose execution_task_id: %s", mcpresult.ToolSchemaJSON(runtime.listedToolMap()[toolName]))
+		}
 	}
 	operationManage := runtime.listedToolMap()["operation_manage"]
 	var operationSchema map[string]any

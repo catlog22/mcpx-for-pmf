@@ -65,7 +65,8 @@ type Event struct {
 	ProgressSummary   string          `json:"progress_summary,omitempty"`
 	NextStep          string          `json:"next_step,omitempty"`
 	PlanID            string          `json:"plan_id,omitempty"`
-	TaskID            string          `json:"task_id,omitempty"`
+	PlanTaskID        string          `json:"plan_task_id,omitempty"`
+	ExecutionTaskID   string          `json:"execution_task_id,omitempty"`
 	Input             json.RawMessage `json:"input,omitempty"`
 	Output            json.RawMessage `json:"output,omitempty"`
 	Summary           string          `json:"summary,omitempty"`

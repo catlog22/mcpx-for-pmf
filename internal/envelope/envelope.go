@@ -43,7 +43,8 @@ type Request struct {
 	ProgressSummary   string         `json:"progress_summary,omitempty"`
 	NextStep          string         `json:"next_step,omitempty"`
 	PlanID            string         `json:"plan_id,omitempty"`
-	TaskID            string         `json:"task_id,omitempty"`
+	PlanTaskID        string         `json:"plan_task_id,omitempty"`
+	ExecutionTaskID   string         `json:"execution_task_id,omitempty"`
 	CallID            string         `json:"call_id,omitempty"`
 	RemoteSessionID   string         `json:"remote_session_id,omitempty"`
 	Workspace         string         `json:"workspace,omitempty"`
@@ -392,7 +393,8 @@ func ParseRequest(raw json.RawMessage) (Request, error) {
 	req.ProgressSummary = strings.TrimSpace(req.ProgressSummary)
 	req.NextStep = strings.TrimSpace(req.NextStep)
 	req.PlanID = strings.TrimSpace(req.PlanID)
-	req.TaskID = strings.TrimSpace(req.TaskID)
+	req.PlanTaskID = strings.TrimSpace(req.PlanTaskID)
+	req.ExecutionTaskID = strings.TrimSpace(req.ExecutionTaskID)
 	// Runtime metadata is deliberately discarded from the business payload.
 	// The server repopulates it from Gateway Runtime Context after parsing.
 	for key := range req.Payload {

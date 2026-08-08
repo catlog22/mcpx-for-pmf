@@ -3,6 +3,7 @@ package source
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -70,6 +71,47 @@ func TestSmartQueryNaturalLanguageUsesSynonyms(t *testing.T) {
 	}
 	if !containsString(paths, "配送流程.md") || !containsString(paths, "StockService.java") {
 		t.Fatalf("synonym results missed business or code file: %+v", paths)
+	}
+}
+
+func TestSmartQueryRanksChineseTargetWindowAndExplainsRanking(t *testing.T) {
+	root := t.TempDir()
+	writeSmartFiles(t, root, map[string]string{
+		"docs/player.md": strings.Join([]string{
+			"# 播放器说明",
+			"这是文件开头的泛化介绍。",
+			"还有一些与交互无关的背景。",
+			"继续描述页面结构。",
+			"键盘控制可以暂停播放、重置进度和调整速度。",
+			"最后补充其他说明。",
+		}, "\n") + "\n",
+		"docs/keyboard.md": "# 键盘说明\n键盘控制用于页面导航和焦点移动。\n",
+		"docs/speed.md":    "# 速度说明\n速度设置会影响动画。\n",
+	})
+
+	first, err := SmartQueryPage(root, SmartQueryOptions{
+		Query: "键盘控制暂停播放、重置和速度", Mode: "smart", MaxResults: 3,
+		ContextBefore: 1, ContextAfter: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := first["files"].([]map[string]any)
+	if len(files) == 0 || files[0]["path"] != "docs/player.md" {
+		t.Fatalf("Chinese target paragraph was not ranked first: %+v", files)
+	}
+	if !strings.Contains(files[0]["content"].(string), "键盘控制可以暂停播放、重置进度和调整速度") {
+		t.Fatalf("first window did not center the target paragraph: %+v", files[0])
+	}
+	if files[0]["offset"].(int) == 0 {
+		t.Fatalf("context window still starts at the file head: %+v", files[0])
+	}
+	if files[0]["rank"] != 1 {
+		t.Fatalf("rank=%v, want 1: %+v", files[0]["rank"], files[0])
+	}
+	matchReason, _ := files[0]["match_reason"].(string)
+	if files[0]["rank"] != 1 || matchReason == "" {
+		t.Fatalf("rank explanation missing: %+v", files[0])
 	}
 }
 

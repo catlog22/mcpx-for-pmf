@@ -33,12 +33,40 @@ var cleanEditSafetyMeta = mcp.Meta{
 	},
 }
 
-// cleanEditToolAnnotation reflects the edit contract: the operation changes
-// files, but a successful idempotency-key replay is safe to repeat. Delete is
-// intentionally still marked destructive so a host can request approval.
+// edit only supports create/update/rename inside the registered workspace.
+// Removal is a separate confirmed workflow, so edit itself is non-destructive.
 var cleanEditToolAnnotation = toolAnnotation{
-	ReadOnly: false, Destructive: true, Idempotent: true, OpenWorld: false,
+	ReadOnly: false, Destructive: false, Idempotent: true, OpenWorld: false,
 	Title: "Workspace 文件变更（不提供删除）", Meta: cleanEditSafetyMeta,
+}
+
+var planToolAnnotation = toolAnnotation{
+	ReadOnly: false, Destructive: false, Idempotent: true, OpenWorld: false,
+	Meta: mcp.Meta{"mcpx/action_risk": map[string]any{
+		"create":   riskDescriptor(false, false, true, false, "server_state_write"),
+		"read":     riskDescriptor(true, false, true, false, "server_state_read"),
+		"advance":  riskDescriptor(false, false, true, false, "server_state_write"),
+		"complete": riskDescriptor(false, false, true, false, "server_state_write"),
+		"block":    riskDescriptor(false, false, true, false, "server_state_write"),
+		"replan":   riskDescriptor(false, false, true, false, "server_state_write"),
+		"deliver":  riskDescriptor(false, false, true, false, "server_state_write"),
+	}},
+}
+
+var artifactToolAnnotation = toolAnnotation{
+	ReadOnly: false, Destructive: false, Idempotent: true, OpenWorld: false,
+	Meta: mcp.Meta{"mcpx/action_risk": map[string]any{
+		"register": riskDescriptor(false, false, true, false, "workspace_artifact_registration"),
+		"list":     riskDescriptor(true, false, true, false, "workspace_artifact_read"),
+		"read":     riskDescriptor(true, false, true, false, "workspace_artifact_read"),
+	}},
+}
+
+func riskDescriptor(readOnly, destructive, idempotent, openWorld bool, classification string) map[string]any {
+	return map[string]any{
+		"read_only": readOnly, "destructive": destructive, "idempotent": idempotent,
+		"open_world": openWorld, "classification": classification,
+	}
 }
 
 // cleanCoreTool keeps remote_session_id visible. The old publicTool helper
@@ -187,29 +215,31 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 	}, []string{"remote_session_id", "confirmation_uuid"}, workspaceMoveOutCommitAnnotation), r.toolWorkspaceMoveOutCommit)
 
 	r.addTool(s, cleanCoreTool("observe", desc["observe"], map[string]any{
-		"remote_session_id": remoteSession,
-		"workspace":         workspace,
-		"view":              enumSchema("观察视图", "status", "history", "changes", "logs", "diff"),
-		"limit":             numberSchema("返回数量限制"),
-		"offset":            numberSchema("diff 视图的字节偏移"),
-		"cursor":            stringSchema("分页游标"),
-		"call_id":           stringSchema("按调用关联 ID 过滤 history"),
-		"session_id":        stringSchema("按 Remote Session 过滤 history；通常使用 remote_session_id 即可"),
-		"event_ids":         arraySchema(map[string]any{"type": "string"}, "按事件 sequence ID 过滤 history"),
-		"request_ids":       arraySchema(map[string]any{"type": "string"}, "按多个请求 ID 过滤 history"),
-		"operation_ids":     arraySchema(map[string]any{"type": "string"}, "按 Operation ID 过滤 history"),
-		"task_ids":          arraySchema(map[string]any{"type": "string"}, "按 Task ID 过滤 history"),
-		"changeset_ids":     arraySchema(map[string]any{"type": "string"}, "按 Changeset ID 过滤 history"),
-		"keyword":           stringSchema("在摘要、用途、工具、命令、路径和输入输出中搜索 history"),
-		"kinds":             arraySchema(map[string]any{"type": "string"}, "事件类型过滤，如 tool、command、skill、mcp、file_change、session、error"),
-		"statuses":          arraySchema(map[string]any{"type": "string"}, "按事件状态过滤 history"),
-		"created_after":     stringSchema("仅返回此时间之后的事件；支持 RFC3339、YYYY-MM-DD 或 Unix 毫秒"),
-		"created_before":    stringSchema("仅返回此时间之前的事件；支持 RFC3339、YYYY-MM-DD 或 Unix 毫秒"),
-		"edit_id":           stringSchema("edit 返回的变更 ID；view=diff 时使用"),
-		"task_id":           stringSchema("任务 ID；view=logs 时使用"),
-		"include_diff":      booleanSchema("是否包含完整 Unified Diff"),
-		"path":              path,
+		"remote_session_id":  remoteSession,
+		"workspace":          workspace,
+		"view":               enumSchema("观察视图", "session", "status", "plan", "history", "changes", "logs", "diff"),
+		"limit":              numberSchema("返回数量限制"),
+		"offset":             numberSchema("diff 视图的字节偏移"),
+		"cursor":             stringSchema("分页游标"),
+		"call_id":            stringSchema("按调用关联 ID 过滤 history"),
+		"session_id":         stringSchema("按 Remote Session 过滤 history；通常使用 remote_session_id 即可"),
+		"event_ids":          arraySchema(map[string]any{"type": "string"}, "按事件 sequence ID 过滤 history"),
+		"request_ids":        arraySchema(map[string]any{"type": "string"}, "按多个请求 ID 过滤 history"),
+		"operation_ids":      arraySchema(map[string]any{"type": "string"}, "按 Operation ID 过滤 history"),
+		"plan_task_ids":      arraySchema(map[string]any{"type": "string"}, "按 Plan Task ID 过滤 history"),
+		"execution_task_ids": arraySchema(map[string]any{"type": "string"}, "按执行 Task ID 过滤 history"),
+		"changeset_ids":      arraySchema(map[string]any{"type": "string"}, "按 Changeset ID 过滤 history"),
+		"keyword":            stringSchema("在摘要、用途、工具、命令、路径和输入输出中搜索 history"),
+		"kinds":              arraySchema(map[string]any{"type": "string"}, "事件类型过滤，如 tool、command、skill、mcp、file_change、session、error"),
+		"statuses":           arraySchema(map[string]any{"type": "string"}, "按事件状态过滤 history"),
+		"created_after":      stringSchema("仅返回此时间之后的事件；支持 RFC3339、YYYY-MM-DD 或 Unix 毫秒"),
+		"created_before":     stringSchema("仅返回此时间之前的事件；支持 RFC3339、YYYY-MM-DD 或 Unix 毫秒"),
+		"edit_id":            stringSchema("edit 返回的变更 ID；view=diff 时使用"),
+		"plan_task_id":       stringSchema("Plan Task ID；view=plan 时使用，也可用于 history 过滤"),
+		"execution_task_id":  stringSchema("执行 Task ID；view=status/logs 时使用，也可用于 history 过滤"),
+		"include_diff":       booleanSchema("是否包含完整 Unified Diff"),
+		"path":               path,
 	}, []string{"remote_session_id", "view"}, readOnlyToolAnnotation), r.toolObserve)
 
-	r.registerConsolidatedToolsCatalog(s, true)
+	r.registerConsolidatedToolsCatalog(s)
 }

@@ -119,7 +119,7 @@ func renderContextBlock(display string, context Context) string {
 	}{
 		{{label: "goal", value: context.Goal}, {label: "purpose", value: context.Purpose}},
 		{{label: "reasoning", value: context.ReasoningSummary}, {label: "progress", value: context.ProgressSummary}, {label: "next", value: context.NextStep}},
-		{{label: "plan", value: context.PlanID}, {label: "task", value: context.TaskID}, {label: "operation", value: context.OperationID}},
+		{{label: "plan", value: context.PlanID}, {label: "plan task", value: context.PlanTaskID}, {label: "execution task", value: context.ExecutionTaskID}, {label: "operation", value: context.OperationID}},
 	} {
 		if index == 2 && !hasNarrative {
 			// Internal IDs are useful alongside a model-authored context, but an
@@ -409,7 +409,7 @@ func renderContextQuery(summary string, data map[string]any) (string, bool) {
 
 func renderPlanData(summary string, data map[string]any) (string, bool) {
 	planID := humanField(data, "plan_id")
-	taskID := humanField(data, "task_id")
+	taskID := humanField(data, "plan_task_id")
 	if planID == "" && taskID == "" {
 		return summary, false
 	}
@@ -454,7 +454,7 @@ func renderPlanData(summary string, data map[string]any) (string, bool) {
 	if len(tasks) > 0 {
 		builder.WriteString("\n- Tasks:")
 		for _, task := range tasks {
-			id := humanField(task, "task_id")
+			id := humanField(task, "plan_task_id")
 			if id == "" {
 				id = humanField(task, "id")
 			}
@@ -1062,7 +1062,7 @@ func humanCollectionTitle(key string) string {
 
 func humanCollectionItem(item map[string]any) string {
 	label := "item"
-	for _, key := range []string{"name", "id", "session_id", "task_id", "artifact_id", "changeset_id", "path", "type", "summary"} {
+	for _, key := range []string{"name", "id", "session_id", "plan_task_id", "execution_task_id", "artifact_id", "changeset_id", "path", "type", "summary"} {
 		if value := humanField(item, key); value != "" {
 			label = value
 			break

@@ -137,19 +137,20 @@ func (r *Runtime) toolWorkspaceHistoryRead(ctx context.Context, req *mcp.CallToo
 		return r.terminalError(envReq, remoteID, "", "workspace_required", "workspace is required for history query")
 	}
 	query := observation.HistoryQuery{
-		Workspace:    workspaceName,
-		SessionID:    firstString(envReq.RemoteSessionID, stringPayload(envReq.Payload, "session_id")),
-		CallID:       firstString(envReq.CallID, stringPayload(envReq.Payload, "call_id")),
-		EventIDs:     stringSlicePayload(envReq.Payload, "event_ids"),
-		RequestIDs:   append(stringSlicePayload(envReq.Payload, "request_ids"), stringPayload(envReq.Payload, "request_id")),
-		OperationIDs: stringSlicePayload(envReq.Payload, "operation_ids"),
-		TaskIDs:      stringSlicePayload(envReq.Payload, "task_ids"),
-		ChangesetIDs: stringSlicePayload(envReq.Payload, "changeset_ids"),
-		Keyword:      stringPayload(envReq.Payload, "keyword"),
-		Kinds:        stringSlicePayload(envReq.Payload, "kinds"),
-		Statuses:     stringSlicePayload(envReq.Payload, "statuses"),
-		Limit:        intPayload(envReq.Payload, "limit"),
-		Cursor:       stringPayload(envReq.Payload, "cursor"),
+		Workspace:        workspaceName,
+		SessionID:        firstString(envReq.RemoteSessionID, stringPayload(envReq.Payload, "session_id")),
+		CallID:           firstString(envReq.CallID, stringPayload(envReq.Payload, "call_id")),
+		EventIDs:         stringSlicePayload(envReq.Payload, "event_ids"),
+		RequestIDs:       append(stringSlicePayload(envReq.Payload, "request_ids"), stringPayload(envReq.Payload, "request_id")),
+		OperationIDs:     stringSlicePayload(envReq.Payload, "operation_ids"),
+		PlanTaskIDs:      append(stringSlicePayload(envReq.Payload, "plan_task_ids"), stringPayload(envReq.Payload, "plan_task_id")),
+		ExecutionTaskIDs: append(stringSlicePayload(envReq.Payload, "execution_task_ids"), stringPayload(envReq.Payload, "execution_task_id")),
+		ChangesetIDs:     stringSlicePayload(envReq.Payload, "changeset_ids"),
+		Keyword:          stringPayload(envReq.Payload, "keyword"),
+		Kinds:            stringSlicePayload(envReq.Payload, "kinds"),
+		Statuses:         stringSlicePayload(envReq.Payload, "statuses"),
+		Limit:            intPayload(envReq.Payload, "limit"),
+		Cursor:           stringPayload(envReq.Payload, "cursor"),
 	}
 	var parseErr error
 	query.CreatedAfter, parseErr = historyTimePayload(envReq.Payload, "created_after")
@@ -179,7 +180,7 @@ func historyEventView(event observation.Event) map[string]any {
 		"name": event.Tool, "tool": event.Tool, "phase": event.Phase, "status": event.Status,
 		"goal": event.Goal, "purpose": event.Purpose, "reasoning_summary": event.ReasoningSummary,
 		"progress_summary": event.ProgressSummary, "next_step": event.NextStep, "plan_id": event.PlanID,
-		"task_id": event.TaskID, "summary": event.Summary, "command": event.Command,
+		"plan_task_id": event.PlanTaskID, "execution_task_id": event.ExecutionTaskID, "summary": event.Summary, "command": event.Command,
 		"working_directory": event.WorkingDirectory, "duration_ms": event.DurationMs,
 		"skill_name": event.SkillName, "mcp_server": event.MCPServer, "mcp_tool": event.MCPTool,
 		"path": event.Path, "resource_uri": event.ResourceURI, "stream": event.Stream,

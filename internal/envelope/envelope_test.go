@@ -124,15 +124,15 @@ func TestParseRequest(t *testing.T) {
 }
 
 func TestParseRequestMergesFlatArgumentsIntoPayload(t *testing.T) {
-	req, err := ParseRequest(json.RawMessage(`{"intent":"inspect workspace","progress_summary":"已完成定位，下一步读取文件","callId":"call-1","workspace":"demo","command":"pwd","payload":{"command":"echo legacy"},"task_id":"t1"}`))
+	req, err := ParseRequest(json.RawMessage(`{"intent":"inspect workspace","progress_summary":"已完成定位，下一步读取文件","callId":"call-1","workspace":"demo","command":"pwd","payload":{"command":"echo legacy"},"execution_task_id":"t1"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if req.Payload["command"] != "echo legacy" {
 		t.Fatalf("payload should win: %+v", req.Payload)
 	}
-	if req.Payload["task_id"] != "t1" {
-		t.Fatalf("flat argument missing: %+v", req.Payload)
+	if req.ExecutionTaskID != "t1" || req.Payload["execution_task_id"] != "t1" {
+		t.Fatalf("execution task argument missing: request=%+v payload=%+v", req, req.Payload)
 	}
 	if req.Intent != "inspect workspace" {
 		t.Fatalf("intent missing: %q", req.Intent)

@@ -543,7 +543,7 @@ func (r *Runtime) runVerifySteps(ctx context.Context, envReq envelope.Request, s
 		completed := task.Wait(waitCtx)
 		cancel()
 		view := task.StatusView()
-		item["task_id"] = task.ID
+		item["execution_task_id"] = task.ID
 		item["status"] = view["status"]
 		item["exit_code"] = view["exit_code"]
 		item["duration_ms"] = view["runtime_ms"]
@@ -554,7 +554,7 @@ func (r *Runtime) runVerifySteps(ctx context.Context, envReq envelope.Request, s
 			}
 		} else {
 			item["next_action"] = nextAction("task_manage", map[string]any{
-				"remote_session_id": session.ID, "action": "attach", "task_id": task.ID,
+				"remote_session_id": session.ID, "action": "attach", "execution_task_id": task.ID,
 				"stdout_offset": 0, "stderr_offset": 0, "yield_time_ms": int(defaultCommandYield / time.Millisecond),
 			})
 		}

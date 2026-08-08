@@ -145,7 +145,7 @@ func TestAsyncCommandOperationWaitsForTerminalTask(t *testing.T) {
 	if err := json.Unmarshal(record.Result, &resultValue); err != nil {
 		t.Fatal(err)
 	}
-	taskID := findStringValue(resultValue, "task_id")
+	taskID := findStringValue(resultValue, "execution_task_id")
 	if taskID == "" {
 		if wrapper, ok := resultValue.(map[string]any); ok {
 			if content, ok := wrapper["content"].([]any); ok {
@@ -157,7 +157,7 @@ func TestAsyncCommandOperationWaitsForTerminalTask(t *testing.T) {
 					text, _ := contentItem["text"].(string)
 					var nested any
 					if json.Unmarshal([]byte(text), &nested) == nil {
-						taskID = findStringValue(nested, "task_id")
+						taskID = findStringValue(nested, "execution_task_id")
 						if taskID != "" {
 							break
 						}
@@ -228,6 +228,56 @@ func TestOperationBatchRunsAndRecordsChildSteps(t *testing.T) {
 	}
 	if !seenSteps["list_a"] || !seenSteps["list_b"] {
 		t.Fatalf("missing operation step events: %+v", seenSteps)
+	}
+}
+
+func TestOperationBatchPublishesBoundedStatisticsForMaxSteps(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	session := operationTestSession(t, rt, "demo")
+	steps := make([]any, 0, operation.MaxSteps)
+	for index := 0; index < operation.MaxSteps; index++ {
+		steps = append(steps, map[string]any{
+			"id": fmt.Sprintf("read_%02d", index), "tool": "read",
+			"arguments": map[string]any{"view": "list", "limit": 1},
+		})
+	}
+	accepted := callOperationTool(t, rt, "operation_batch", map[string]any{
+		"remote_session_id": session.ID, "purpose": "验证最大批次统计", "operations": steps,
+	})
+	if accepted["status"] != "accepted" {
+		t.Fatalf("batch accepted=%+v", accepted)
+	}
+	operationID := accepted["data"].(map[string]any)["operation_id"].(string)
+	completed := callOperationTool(t, rt, "operation_manage", map[string]any{
+		"remote_session_id": session.ID, "operation_id": operationID, "action": "wait", "timeout_ms": 5000,
+	})
+	if completed["status"] != "succeeded" {
+		t.Fatalf("batch completion=%+v", completed)
+	}
+	data := completed["data"].(map[string]any)
+	stats, ok := data["stats"].(map[string]any)
+	if !ok {
+		t.Fatalf("batch stats missing: %+v", data)
+	}
+	if stats["step_count"] != float64(operation.MaxSteps) || stats["success_count"] != float64(operation.MaxSteps) || stats["failure_count"] != float64(0) {
+		t.Fatalf("batch step counts=%+v", stats)
+	}
+	maxConcurrency, ok := stats["max_concurrency"].(float64)
+	if !ok || maxConcurrency < 1 || maxConcurrency > float64(operation.MaxSteps) {
+		t.Fatalf("batch max concurrency=%+v", stats)
+	}
+	for _, field := range []string{"scheduling_wait_ms", "server_duration_ms"} {
+		value, ok := stats[field].(float64)
+		if !ok || value < 0 {
+			t.Fatalf("batch timing %s=%v stats=%+v", field, stats[field], stats)
+		}
+	}
+	if stats["events"] != nil {
+		t.Fatalf("batch stats must not copy event streams: %+v", stats)
+	}
+	encoded, _ := json.Marshal(completed)
+	if len(encoded) > 128<<10 {
+		t.Fatalf("batch response is unbounded: %d bytes", len(encoded))
 	}
 }
 

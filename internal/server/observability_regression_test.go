@@ -97,7 +97,8 @@ func TestInstrumentToolCarriesSemanticContextToARC(t *testing.T) {
 		"progress_summary":  "工具调用已完成",
 		"next_step":         "检查终端渲染",
 		"plan_id":           "pl_context",
-		"task_id":           "pt_context",
+		"plan_task_id":      "pt_context",
+		"execution_task_id": "task_context",
 	})
 	result, err := instrumented(context.Background(), request)
 	if err != nil {
@@ -113,11 +114,14 @@ func TestInstrumentToolCarriesSemanticContextToARC(t *testing.T) {
 	}
 	for key, want := range map[string]string{
 		"goal": "提升观测体验", "purpose": "验证 ARC 语义上下文", "reasoning_summary": "先验证请求到结果的透传",
-		"progress_summary": "工具调用已完成", "next_step": "检查终端渲染", "plan_id": "pl_context", "task_id": "pt_context",
+		"progress_summary": "工具调用已完成", "next_step": "检查终端渲染", "plan_id": "pl_context", "plan_task_id": "pt_context", "execution_task_id": "task_context",
 	} {
 		if semantic[key] != want {
 			t.Fatalf("context[%q]=%v, want %q", key, semantic[key], want)
 		}
+	}
+	if _, exists := semantic["task_id"]; exists {
+		t.Fatalf("ambiguous task_id leaked into ARC context: %+v", semantic)
 	}
 	text := result.Content[0].(*mcp.TextContent).Text
 	if !strings.Contains(text, "Context:") || !strings.Contains(text, "next: 检查终端渲染") {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -393,6 +394,7 @@ func operationView(record operation.Record, includeResults bool) map[string]any 
 		steps = append(steps, view)
 	}
 	data["steps"] = steps
+	data["stats"] = operationStats(record)
 	if record.State == operation.StateQueued || record.State == operation.StateRunning {
 		data["next_action"] = nextActionWithReason("operation_manage", "操作仍在执行；使用一次 wait 等待结果，不要重复轮询 status", map[string]any{
 			"session_id":   record.RemoteSessionID,
@@ -406,6 +408,96 @@ func operationView(record operation.Record, includeResults bool) map[string]any 
 		data["error"] = decodeJSONValue(record.Error)
 	}
 	return data
+}
+
+func operationStats(record operation.Record) map[string]any {
+	stats := map[string]any{
+		"step_count":         len(record.Steps),
+		"success_count":      0,
+		"failure_count":      0,
+		"scheduling_wait_ms": int64(0),
+		"server_duration_ms": int64(0),
+		"max_concurrency":    0,
+	}
+	if record.StartedAt != nil {
+		stats["scheduling_wait_ms"] = nonNegativeDurationMillis(record.StartedAt.Sub(record.CreatedAt))
+	}
+	if record.StartedAt != nil && record.CompletedAt != nil {
+		stats["server_duration_ms"] = nonNegativeDurationMillis(record.CompletedAt.Sub(*record.StartedAt))
+	}
+
+	type concurrencyEvent struct {
+		at    time.Time
+		delta int
+	}
+	events := make([]concurrencyEvent, 0, len(record.Steps)*2)
+	durations := make([]int64, 0, len(record.Steps))
+	successCount, failureCount := 0, 0
+	for _, step := range record.Steps {
+		switch step.State {
+		case operation.StateSucceeded:
+			successCount++
+		case operation.StateFailed, operation.StateInterrupted, operation.StateCancelled:
+			failureCount++
+		}
+		if step.StartedAt == nil || step.CompletedAt == nil {
+			continue
+		}
+		start := *step.StartedAt
+		end := *step.CompletedAt
+		if !end.After(start) {
+			end = start.Add(time.Millisecond)
+		}
+		durations = append(durations, nonNegativeDurationMillis(end.Sub(start)))
+		events = append(events, concurrencyEvent{at: start, delta: 1}, concurrencyEvent{at: end, delta: -1})
+	}
+	stats["success_count"] = successCount
+	stats["failure_count"] = failureCount
+
+	sort.Slice(events, func(i, j int) bool {
+		if events[i].at.Equal(events[j].at) {
+			return events[i].delta > events[j].delta
+		}
+		return events[i].at.Before(events[j].at)
+	})
+	current, maximum := 0, 0
+	for _, event := range events {
+		current += event.delta
+		if current > maximum {
+			maximum = current
+		}
+	}
+	stats["max_concurrency"] = maximum
+
+	if len(durations) > 0 {
+		sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+		stats["step_duration_ms"] = map[string]any{
+			"p50": durationPercentile(durations, 50),
+			"p95": durationPercentile(durations, 95),
+		}
+	}
+	return stats
+}
+
+func nonNegativeDurationMillis(duration time.Duration) int64 {
+	if duration <= 0 {
+		return 0
+	}
+	return duration.Milliseconds()
+}
+
+func durationPercentile(sorted []int64, percentile int) int64 {
+	if len(sorted) == 0 {
+		return 0
+	}
+	index := (len(sorted)*percentile + 99) / 100
+	if index < 1 {
+		index = 1
+	}
+	if index > len(sorted) {
+		index = len(sorted)
+	}
+	return sorted[index-1]
 }
 
 func operationResultView(page operation.ResultPage) map[string]any {

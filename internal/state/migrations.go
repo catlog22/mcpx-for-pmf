@@ -236,6 +236,8 @@ var migrations = []string{
         kind TEXT NOT NULL,
         path TEXT NOT NULL,
         mime_type TEXT NOT NULL,
+        source_encoding TEXT NOT NULL CHECK (source_encoding IN ('utf-8','utf-16le','utf-16be','binary','unknown')),
+        source_bom TEXT NOT NULL,
         size INTEGER NOT NULL,
         sha256 TEXT NOT NULL,
         created_by TEXT NOT NULL,
@@ -275,8 +277,10 @@ var migrations = []string{
         id TEXT PRIMARY KEY,
         plan_id TEXT NOT NULL,
         task_id TEXT NOT NULL,
-        kind TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('read','edit','execute','artifact','source','verification','observe')),
         reference_id TEXT NOT NULL,
+        validated INTEGER NOT NULL CHECK (validated IN (0,1)),
+        source_event_id TEXT NOT NULL DEFAULT '',
         metadata_json TEXT NOT NULL DEFAULT '{}',
         created_by TEXT NOT NULL,
         created_at INTEGER NOT NULL,
@@ -434,7 +438,8 @@ var migrations = []string{
 	ALTER TABLE observation_events ADD COLUMN reasoning_summary TEXT NOT NULL DEFAULT '';
 	ALTER TABLE observation_events ADD COLUMN next_step TEXT NOT NULL DEFAULT '';
 	ALTER TABLE observation_events ADD COLUMN plan_id TEXT NOT NULL DEFAULT '';
-	ALTER TABLE observation_events ADD COLUMN task_id TEXT NOT NULL DEFAULT '';`,
+	ALTER TABLE observation_events ADD COLUMN plan_task_id TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN execution_task_id TEXT NOT NULL DEFAULT '';`,
 	`CREATE TABLE IF NOT EXISTS delete_requests (
 		id TEXT PRIMARY KEY,
 		remote_session_id TEXT NOT NULL,

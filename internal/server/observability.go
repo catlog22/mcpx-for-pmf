@@ -22,9 +22,9 @@ import (
 func (r *Runtime) addTool(s *mcp.Server, tool mcp.Tool, handler mcp.ToolHandler) {
 	tool = requireIntentSchema(tool)
 	// OutputSchema describes structuredContent, not the larger ARC metadata
-	// envelope. Keeping one shared schema makes tools/list and actual results
-	// describe the same machine contract without duplicating it per tool.
-	tool.OutputSchema = arc.OutputSchema()
+	// envelope. The shared ARC contract stays identical across tools while
+	// hard limits are attached from the same source used by runtime capabilities.
+	tool.OutputSchema = outputSchemaForTool(tool.Name)
 	instrumented := r.instrumentTool(tool.Name, handler)
 	if r.toolHandlers == nil {
 		r.toolHandlers = map[string]mcp.ToolHandler{}
@@ -51,6 +51,24 @@ func (r *Runtime) addTool(s *mcp.Server, tool mcp.Tool, handler mcp.ToolHandler)
 	r.toolIndexMu.Unlock()
 	tt := tool
 	s.AddTool(&tt, instrumented)
+}
+
+func outputSchemaForTool(toolName string) json.RawMessage {
+	base := arc.OutputSchema()
+	limits, ok := publishedLimits()[toolName]
+	if !ok {
+		return base
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(base, &schema); err != nil || schema == nil {
+		return base
+	}
+	schema["x-mcpx-limits"] = limits
+	encoded, err := json.Marshal(schema)
+	if err != nil {
+		return base
+	}
+	return json.RawMessage(encoded)
 }
 
 func boolPointerValue(value *bool) bool {
@@ -82,9 +100,13 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 		"type":        "string",
 		"description": "关联的服务端 Plan ID",
 	}
-	taskID := map[string]any{
+	planTaskID := map[string]any{
 		"type":        "string",
 		"description": "关联的服务端 Plan Task ID",
+	}
+	executionTaskID := map[string]any{
+		"type":        "string",
+		"description": "关联的服务端执行 Task ID",
 	}
 	rawBytes := mcpresult.ToolSchemaJSON(tool)
 	var raw map[string]any
@@ -101,7 +123,8 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 	properties["progress_summary"] = progressSummary
 	properties["next_step"] = nextStep
 	properties["plan_id"] = planID
-	properties["task_id"] = taskID
+	properties["plan_task_id"] = planTaskID
+	properties["execution_task_id"] = executionTaskID
 	raw["type"] = "object"
 	raw["properties"] = properties
 	if branches, ok := raw["oneOf"].([]any); ok {
@@ -120,7 +143,8 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 			branchProperties["progress_summary"] = progressSummary
 			branchProperties["next_step"] = nextStep
 			branchProperties["plan_id"] = planID
-			branchProperties["task_id"] = taskID
+			branchProperties["plan_task_id"] = planTaskID
+			branchProperties["execution_task_id"] = executionTaskID
 			branch["properties"] = branchProperties
 		}
 	}
@@ -220,7 +244,7 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 				Goal: observationRequest.Goal, Purpose: firstSemanticPurpose(observationRequest),
 				ReasoningSummary: observationRequest.ReasoningSummary,
 				ProgressSummary:  observationRequest.ProgressSummary, NextStep: observationRequest.NextStep,
-				PlanID: observationRequest.PlanID, TaskID: observationRequest.TaskID, OperationID: observationRequest.OperationID,
+				PlanID: observationRequest.PlanID, PlanTaskID: observationRequest.PlanTaskID, ExecutionTaskID: observationRequest.ExecutionTaskID, OperationID: observationRequest.OperationID,
 			},
 			Timing: arc.Timing{
 				StartedAtMs: timing.StartedAtMs, ReceivedAtMs: timing.ReceivedAtMs,

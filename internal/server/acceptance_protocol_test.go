@@ -583,7 +583,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	}
 	planCreated := call("plan_manage", map[string]any{
 		"action": "create", "remote_session_id": remoteID, "goal": "acceptance plan", "purpose": "acceptance plan create",
-		"tasks": []any{map[string]any{"task_id": "verify", "title": "Verify protocol"}},
+		"tasks": []any{map[string]any{"local_id": "verify", "title": "Verify protocol"}},
 	})
 	planData, _ := planCreated["data"].(map[string]any)
 	if !statusOK(planCreated) || planData["plan_id"] == nil {
@@ -593,17 +593,17 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	planTasks, _ := planData["tasks"].([]any)
 	taskID := ""
 	if len(planTasks) > 0 {
-		taskID, _ = planTasks[0].(map[string]any)["task_id"].(string)
+		taskID, _ = planTasks[0].(map[string]any)["plan_task_id"].(string)
 	}
 	if !strings.HasPrefix(taskID, "pt_") {
 		t.Fatalf("plan_create must issue server task id: %+v", planData)
 	}
-	started := call("plan_manage", map[string]any{"action": "start_task", "remote_session_id": remoteID, "plan_id": planID, "task_id": taskID, "purpose": "start task"})
-	if !statusOK(started) || started["data"].(map[string]any)["task_id"] != taskID {
+	started := call("plan_manage", map[string]any{"action": "start_task", "remote_session_id": remoteID, "plan_id": planID, "plan_task_id": taskID, "purpose": "start task"})
+	if !statusOK(started) || started["data"].(map[string]any)["plan_task_id"] != taskID {
 		t.Fatalf("plan start = %+v", started)
 	}
 	completed := call("plan_manage", map[string]any{
-		"action": "complete_task", "remote_session_id": remoteID, "plan_id": planID, "task_id": taskID, "purpose": "complete task",
+		"action": "complete_task", "remote_session_id": remoteID, "plan_id": planID, "plan_task_id": taskID, "purpose": "complete task",
 		"evidence": []any{map[string]any{"kind": "source", "reference_id": "demo.go"}},
 	})
 	if !statusOK(completed) || completed["data"].(map[string]any)["status"] != "completed" {
@@ -755,19 +755,19 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		"remote_session_id": remoteID, "command": "printf short-command", "purpose": "run the short command protocol check", "scope": "workspace",
 	})
 	shortData, _ := short["data"].(map[string]any)
-	if shortData["completed_in_call"] != true || shortData["exit_code"] != float64(0) || shortData["task_id"] != "" {
+	if shortData["completed_in_call"] != true || shortData["exit_code"] != float64(0) || shortData["execution_task_id"] != nil {
 		t.Fatalf("short command should complete in one call: %+v", short)
 	}
 	long := call("command_execute", map[string]any{
 		"remote_session_id": remoteID, "command": "sleep 0.05", "purpose": "verify short wait task handoff", "scope": "workspace", "yield_time_ms": 1,
 	})
 	longData, _ := long["data"].(map[string]any)
-	longTaskID, _ := longData["task_id"].(string)
+	longTaskID, _ := longData["execution_task_id"].(string)
 	if longData["completed_in_call"] != false || longTaskID == "" {
 		t.Fatalf("long command should return a unified Task: %+v", long)
 	}
 	attached := call("task_manage", map[string]any{
-		"action": "attach", "remote_session_id": remoteID, "task_id": longTaskID, "yield_time_ms": 1000,
+		"action": "attach", "remote_session_id": remoteID, "execution_task_id": longTaskID, "yield_time_ms": 1000,
 	})
 	attachedData, _ := attached["data"].(map[string]any)
 	if attachedData["status"] != "exited" || attachedData["exit_code"] != float64(0) || attachedData["stdout_next_offset"] == nil || attachedData["stderr_next_offset"] == nil {
@@ -777,12 +777,12 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		"remote_session_id": remoteID, "command": "sleep 11", "purpose": "verify default long-task handoff", "scope": "workspace",
 	})
 	overTenData, _ := overTen["data"].(map[string]any)
-	overTenTaskID, _ := overTenData["task_id"].(string)
+	overTenTaskID, _ := overTenData["execution_task_id"].(string)
 	if overTenData["completed_in_call"] != false || overTenTaskID == "" {
 		t.Fatalf("command longer than the default 10s yield should return a Task: %+v", overTen)
 	}
 	stopped := call("task_manage", map[string]any{
-		"action": "stop", "remote_session_id": remoteID, "task_id": overTenTaskID,
+		"action": "stop", "remote_session_id": remoteID, "execution_task_id": overTenTaskID,
 	})
 	if stopped["status"] != "ok" {
 		t.Fatalf("long command Task could not be stopped: %+v", stopped)

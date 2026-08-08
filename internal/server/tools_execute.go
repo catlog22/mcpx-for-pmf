@@ -94,12 +94,12 @@ func (r *Runtime) cleanExecuteReadyForIdempotency(ctx context.Context, req *mcp.
 // legacy task_read name in recovery actions or schemas.
 func (r *Runtime) toolObserveTask(ctx context.Context, req *mcp.CallToolRequest, view string) (*mcp.CallToolResult, error) {
 	args := mcpresult.Arguments(req)
-	if strings.TrimSpace(stringPayload(args, "task_id")) == "" {
+	if strings.TrimSpace(stringPayload(args, "execution_task_id")) == "" {
 		envReq, _, fail := r.remoteRequest(ctx, req)
 		if fail != nil {
 			return fail, nil
 		}
-		return r.terminalError(envReq, envReq.RemoteSessionID, envReq.Workspace, "TASK_ID_REQUIRED", "task_id is required for observe(view="+view+")")
+		return r.terminalError(envReq, envReq.RemoteSessionID, envReq.Workspace, "EXECUTION_TASK_ID_REQUIRED", "execution_task_id is required for observe(view="+view+")")
 	}
 	return r.toolTaskManage(withCleanCoreRequest(ctx), forwardedRequest(req, map[string]any{"action": view}))
 }

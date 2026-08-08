@@ -437,13 +437,13 @@ func (t *Task) StatusView() map[string]any {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	out := map[string]any{
-		"task_id":       t.ID,
-		"status":        t.Status,
-		"pid":           t.PID,
-		"runtime_ms":    time.Since(t.StartedAt).Milliseconds(),
-		"workspace":     t.WorkspaceName,
-		"command":       t.Command,
-		"log_truncated": t.logTruncated,
+		"execution_task_id": t.ID,
+		"status":            t.Status,
+		"pid":               t.PID,
+		"runtime_ms":        time.Since(t.StartedAt).Milliseconds(),
+		"workspace":         t.WorkspaceName,
+		"command":           t.Command,
+		"log_truncated":     t.logTruncated,
 	}
 	if t.FinishedAt != nil {
 		out["finished_at"] = *t.FinishedAt
@@ -649,7 +649,7 @@ func (m *TaskManager) List(remoteSessionID string, limit int) ([]map[string]any,
 		}
 		started := time.UnixMilli(startedAt.Int64).UTC()
 		view := map[string]any{
-			"task_id": id, "status": TaskStatus(status), "pid": pid,
+			"execution_task_id": id, "status": TaskStatus(status), "pid": pid,
 			"workspace": workspaceName, "command": command, "log_truncated": logTruncated != 0,
 			"runtime_ms": time.Since(started).Milliseconds(),
 		}

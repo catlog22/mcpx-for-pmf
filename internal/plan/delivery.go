@@ -37,7 +37,6 @@ func deliveryChecks(ctx context.Context, tx *sql.Tx, remoteSessionID string, ite
 	}
 
 	failedVerification := make([]string, 0)
-	changesetIDs := make([]string, 0)
 	editIDs := make([]string, 0)
 	executionTaskIDs := make([]string, 0)
 	artifactIDs := make([]string, 0)
@@ -47,13 +46,11 @@ func deliveryChecks(ctx context.Context, tx *sql.Tx, remoteSessionID string, ite
 				failedVerification = append(failedVerification, evidence.ID)
 			}
 			switch evidence.Kind {
-			case "changeset":
-				changesetIDs = append(changesetIDs, evidence.ReferenceID)
-			case "edit":
+			case EvidenceEdit:
 				editIDs = append(editIDs, evidence.ReferenceID)
-			case "execute", "execution_task", "task":
+			case EvidenceExecute:
 				executionTaskIDs = append(executionTaskIDs, evidence.ReferenceID)
-			case "artifact":
+			case EvidenceArtifact:
 				artifactIDs = append(artifactIDs, evidence.ReferenceID)
 			}
 		}
@@ -64,19 +61,9 @@ func deliveryChecks(ctx context.Context, tx *sql.Tx, remoteSessionID string, ite
 		blockers = append(blockers, "verification_failed")
 	}
 
-	changesets, err := queryStatuses(ctx, tx, "changesets", remoteSessionID, changesetIDs)
+	changeBlockers, err := queryUnappliedChangesets(ctx, tx, remoteSessionID)
 	if err != nil {
 		return nil, nil, err
-	}
-	unapplied, err := queryUnappliedChangesets(ctx, tx, remoteSessionID)
-	if err != nil {
-		return nil, nil, err
-	}
-	changeBlockers := append([]string{}, unapplied...)
-	for _, id := range uniqueStrings(changesetIDs) {
-		if changesets[id] != "applied" {
-			changeBlockers = append(changeBlockers, "changeset_not_applied:"+id)
-		}
 	}
 	changeBlockers = uniqueStrings(changeBlockers)
 	checks = append(checks, DeliveryCheck{Code: "changesets_applied", Passed: len(changeBlockers) == 0, Message: "all Changesets are applied"})
@@ -168,8 +155,7 @@ func queryCleanEditStatuses(ctx context.Context, tx *sql.Tx, remoteSessionID str
 }
 
 func evidenceFailed(evidence Evidence) bool {
-	kind := strings.ToLower(evidence.Kind)
-	if kind != "verification" && kind != "test" && kind != "validation" {
+	if strings.ToLower(evidence.Kind) != EvidenceVerification {
 		return false
 	}
 	for _, key := range []string{"status", "result", "outcome"} {

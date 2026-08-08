@@ -26,7 +26,7 @@ const defaultCommandYield = 10 * time.Second
 
 // toolCommandExecute uses one Task implementation for both ordinary commands
 // and discovered project tasks. It waits for short commands, but only exposes
-// a task_id to clients when the process still runs after the yield window.
+// an execution_task_id to clients when the process still runs after the yield window.
 func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, remote, fail := r.changeRequest(ctx, req, true)
 	if fail != nil {
@@ -185,7 +185,7 @@ func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Reques
 	capTaskExecutionOutput(data, config.MaxResultBytes(r.cfg.Limits))
 	if completed {
 		data["completed_in_call"] = true
-		data["task_id"] = ""
+		delete(data, "execution_task_id")
 		detail := commandExecutionDetail(purpose, scope, commandDigest)
 		detail["exit_code"] = data["exit_code"]
 		if exitCode, ok := data["exit_code"].(int); ok && exitCode != 0 {
@@ -205,13 +205,13 @@ func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Reques
 		nextTool = "execute"
 	}
 	data["next_action"] = nextAction(nextTool, map[string]any{
-		"remote_session_id": remote.ID, "action": "attach", "task_id": task.ID,
+		"remote_session_id": remote.ID, "action": "attach", "execution_task_id": task.ID,
 		"stdout_offset": data["stdout_next_offset"], "stderr_offset": data["stderr_next_offset"],
 		"yield_time_ms": int(yield / time.Millisecond),
 	})
 	data["summary"] = fmt.Sprintf("Command is running as Task %s.", task.ID)
 	detail := commandExecutionDetail(purpose, scope, commandDigest)
-	detail["task_id"] = task.ID
+	detail["execution_task_id"] = task.ID
 	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "command_execute", Command: command, Status: "running", Detail: detail})
 	response := envelope.Accepted(envReq.RequestID, remote.WorkspaceName, data)
 	response.RemoteSessionID = remote.ID
@@ -393,10 +393,16 @@ func (r *Runtime) toolTaskManage(ctx context.Context, req *mcp.CallToolRequest) 
 		}
 		return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, data)
 	}
-	taskID, _ := envReq.Payload["task_id"].(string)
-	task, err := r.tasks.Get(remote.ID, taskID)
+	executionTaskID := strings.TrimSpace(stringPayload(envReq.Payload, "execution_task_id"))
+	if executionTaskID == "" {
+		return r.terminalErrorForContext(ctx, envReq, remote.ID, remote.WorkspaceName, "EXECUTION_TASK_ID_REQUIRED", "execution_task_id is required")
+	}
+	if strings.HasPrefix(executionTaskID, "pt_") || strings.HasPrefix(executionTaskID, "pl_") {
+		return r.terminalErrorForContext(ctx, envReq, remote.ID, remote.WorkspaceName, "EXECUTION_TASK_ID_INVALID", "execution_task_id must identify a terminal execution Task; use observe(view=plan) for plan_task_id")
+	}
+	task, err := r.tasks.Get(remote.ID, executionTaskID)
 	if err != nil {
-		return r.terminalErrorForContext(ctx, envReq, remote.ID, remote.WorkspaceName, "not_found", err.Error())
+		return r.terminalErrorForContext(ctx, envReq, remote.ID, remote.WorkspaceName, "EXECUTION_TASK_NOT_FOUND", "execution_task_id does not belong to this Remote Session")
 	}
 	switch action {
 	case "status":
@@ -408,7 +414,7 @@ func (r *Runtime) toolTaskManage(ctx context.Context, req *mcp.CallToolRequest) 
 			if isCleanCoreRequest(ctx) {
 				nextTool = "observe"
 			}
-			data["next_action"] = nextAction(nextTool, map[string]any{"remote_session_id": remote.ID, "view": "logs", "task_id": task.ID, "stdout_offset": data["stdout_next_offset"], "stderr_offset": data["stderr_next_offset"]})
+			data["next_action"] = nextAction(nextTool, map[string]any{"remote_session_id": remote.ID, "view": "logs", "execution_task_id": task.ID, "stdout_offset": data["stdout_next_offset"], "stderr_offset": data["stderr_next_offset"]})
 		}
 		result := compactToolResult(data, commandOutputText(ctx, data, fmt.Sprintf("Task %s log chunk returned.", task.ID)))
 		return result, nil
@@ -424,7 +430,7 @@ func (r *Runtime) toolTaskManage(ctx context.Context, req *mcp.CallToolRequest) 
 			if isCleanCoreRequest(ctx) {
 				nextTool = "execute"
 			}
-			data["next_action"] = nextAction(nextTool, map[string]any{"remote_session_id": remote.ID, "action": "attach", "task_id": task.ID, "stdout_offset": stdoutNext, "stderr_offset": stderrNext, "yield_time_ms": int(commandYield(envReq.Payload) / time.Millisecond)})
+			data["next_action"] = nextAction(nextTool, map[string]any{"remote_session_id": remote.ID, "action": "attach", "execution_task_id": task.ID, "stdout_offset": stdoutNext, "stderr_offset": stderrNext, "yield_time_ms": int(commandYield(envReq.Payload) / time.Millisecond)})
 		}
 		result := compactToolResult(data, commandOutputText(ctx, data, fmt.Sprintf("Task %s attached.", task.ID)))
 		return result, nil
@@ -439,16 +445,16 @@ func (r *Runtime) toolTaskManage(ctx context.Context, req *mcp.CallToolRequest) 
 		if err != nil {
 			return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "port_inspection_unavailable", err.Error())
 		}
-		return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, map[string]any{"task_id": task.ID, "pid": task.PID, "ports": ports})
+		return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, map[string]any{"execution_task_id": task.ID, "pid": task.PID, "ports": ports})
 	case "diagnostics":
 		log, next := task.Logs(0)
-		return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, map[string]any{"task_id": task.ID, "diagnostics": projecttask.ParseDiagnostics(log, intPayload(envReq.Payload, "limit")), "parsed_log_bytes": next})
+		return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, map[string]any{"execution_task_id": task.ID, "diagnostics": projecttask.ParseDiagnostics(log, intPayload(envReq.Payload, "limit")), "parsed_log_bytes": next})
 	case "stdin":
 		input, _ := envReq.Payload["input"].(string)
 		if err := task.WriteStdin(input); err != nil {
 			return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "stdin_unavailable", err.Error())
 		}
-		return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, map[string]any{"task_id": task.ID, "accepted_bytes": len(input)})
+		return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, map[string]any{"execution_task_id": task.ID, "accepted_bytes": len(input)})
 	default:
 		return r.invalidAction(ctx, req, "task_manage", action)
 	}
@@ -458,7 +464,7 @@ func (r *Runtime) taskResultData(task *terminal.Task, stdoutOffset, stderrOffset
 	stdout, stdoutNext := task.LogsFor("stdout", stdoutOffset)
 	stderr, stderrNext := task.LogsFor("stderr", stderrOffset)
 	data := task.StatusView()
-	data["task_id"] = task.ID
+	data["execution_task_id"] = task.ID
 	data["stdout"] = stdout
 	data["stderr"] = stderr
 	data["stdout_offset"] = stdoutOffset
@@ -472,7 +478,7 @@ func taskListDigest(items []map[string]any) string {
 	stableItems := make([]map[string]any, 0, len(items))
 	for _, item := range items {
 		stable := make(map[string]any, 7)
-		for _, key := range []string{"task_id", "status", "pid", "command", "exit_code", "log_truncated", "finished_at"} {
+		for _, key := range []string{"execution_task_id", "status", "pid", "command", "exit_code", "log_truncated", "finished_at"} {
 			if value, ok := item[key]; ok {
 				stable[key] = value
 			}

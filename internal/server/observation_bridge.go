@@ -62,7 +62,8 @@ func (b *observationBridge) Record(ctx context.Context, event observation.Event)
 	event.ProgressSummary, _ = observation.SanitizeText(event.ProgressSummary, observationSummaryMaxBytes)
 	event.NextStep = observation.SanitizeIntent(event.NextStep)
 	event.PlanID = observation.SanitizeIntent(event.PlanID)
-	event.TaskID = observation.SanitizeIntent(event.TaskID)
+	event.PlanTaskID = observation.SanitizeIntent(event.PlanTaskID)
+	event.ExecutionTaskID = observation.SanitizeIntent(event.ExecutionTaskID)
 	if len(event.Input) > 0 {
 		var truncated bool
 		event.Input, truncated = observation.SanitizeJSON(event.Input, observation.MaxEventBytes)
@@ -159,7 +160,8 @@ func (b *observationBridge) RecordToolStarted(ctx context.Context, name string, 
 		ProgressSummary:   req.ProgressSummary,
 		NextStep:          req.NextStep,
 		PlanID:            req.PlanID,
-		TaskID:            req.TaskID,
+		PlanTaskID:        req.PlanTaskID,
+		ExecutionTaskID:   req.ExecutionTaskID,
 		Input:             input,
 		Truncated:         truncated,
 	})
@@ -192,7 +194,8 @@ func (b *observationBridge) RecordToolCompleted(ctx context.Context, name string
 		ProgressSummary:  req.ProgressSummary,
 		NextStep:         req.NextStep,
 		PlanID:           req.PlanID,
-		TaskID:           req.TaskID,
+		PlanTaskID:       req.PlanTaskID,
+		ExecutionTaskID:  req.ExecutionTaskID,
 		Summary:          summary,
 		Command:          facts.Command,
 		WorkingDirectory: facts.WorkingDirectory,
@@ -222,7 +225,8 @@ func (b *observationBridge) RecordToolCompleted(ctx context.Context, name string
 		ProgressSummary:   req.ProgressSummary,
 		NextStep:          req.NextStep,
 		PlanID:            req.PlanID,
-		TaskID:            req.TaskID,
+		PlanTaskID:        req.PlanTaskID,
+		ExecutionTaskID:   req.ExecutionTaskID,
 		Input:             input,
 		Output:            output,
 		Summary:           fmt.Sprintf("%s %s", name, status),
@@ -431,7 +435,8 @@ func (r *Runtime) observeAppliedChangeset(ctx context.Context, req envelope.Requ
 		ProgressSummary:  req.ProgressSummary,
 		NextStep:         req.NextStep,
 		PlanID:           req.PlanID,
-		TaskID:           req.TaskID,
+		PlanTaskID:       req.PlanTaskID,
+		ExecutionTaskID:  req.ExecutionTaskID,
 		Output:           bounded,
 		Summary:          item.Summary,
 		ResourceURI:      fmt.Sprintf("mcpx://remote-sessions/%s/changesets/%s/diff", session.ID, item.ID),
@@ -460,7 +465,7 @@ func (r *Runtime) observeTaskOutput(chunk terminal.OutputChunk) {
 		RemoteSessionID:  chunk.RemoteSessionID,
 		RequestID:        chunk.RequestID,
 		CallID:           firstNonEmptyObservationID(chunk.CallID, chunk.RequestID),
-		OperationID:      chunk.TaskID,
+		ExecutionTaskID:  chunk.TaskID,
 		Tool:             chunk.Tool,
 		Type:             observation.TypeCommandOutput,
 		Phase:            observation.PhaseOutput,

@@ -39,7 +39,7 @@ func (r *Runtime) toolArtifactRegister(ctx context.Context, req *mcp.CallToolReq
 		return result, err
 	}
 	// Append resource link for hosts; keep wire structuredContent from remoteResult.
-	link := mcpresult.NewResourceLink(registered.ResourceURI, registered.Name, "Registered MCPX development artifact", registered.MIMEType)
+	link := mcpresult.NewResourceLink(registered.ResourceURI, registered.Name, "Registered MCPX development artifact", artifact.DeliveryMIME(registered.MIMEType, registered.SourceEncoding))
 	link.Size = &registered.Size
 	result.Content = append(result.Content, link)
 	return result, nil
@@ -69,26 +69,25 @@ func (r *Runtime) toolArtifactRead(ctx context.Context, req *mcp.CallToolRequest
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "artifact_read_error", err.Error())
 	}
 	data := map[string]any{
-		"artifact": read.Artifact, "offset": read.Offset, "next_offset": read.Next,
-		"eof": read.EOF, "encoding": read.Encoding, "data": read.Data,
+		"artifact":        read.Artifact,
+		"source_encoding": read.SourceEncoding, "source_bom": read.SourceBOM,
+		"delivery_encoding": read.DeliveryEncoding, "mime_type": read.MIMEType,
+		"source_offset": read.SourceOffset, "next_source_offset": read.NextSourceOffset,
+		"eof": read.EOF, "sha256": read.SHA256,
 	}
-	if len(read.Format) > 0 {
-		data["format"] = read.Format
+	if read.Text != "" {
+		data["text"] = read.Text
+	}
+	if read.Base64 != "" {
+		data["base64"] = read.Base64
 	}
 	if !read.EOF {
-		nextTool := "artifact_read"
-		arguments := map[string]any{
-			"view": "content", "session_id": remote.ID, "artifact_id": artifactID, "offset": read.Next, "limit": intPayload(envReq.Payload, "limit"),
-		}
-		if isCleanCoreRequest(ctx) {
-			nextTool = "artifact"
-			arguments = map[string]any{
-				"action": "read", "remote_session_id": remote.ID, "artifact_id": artifactID, "offset": read.Next, "limit": intPayload(envReq.Payload, "limit"),
-			}
-		}
-		data["next_action"] = nextAction(nextTool, arguments)
+		data["next_action"] = nextAction("artifact", map[string]any{
+			"action": "read", "remote_session_id": remote.ID, "artifact_id": artifactID,
+			"offset": read.NextSourceOffset, "limit": intPayload(envReq.Payload, "limit"),
+		})
 	}
-	return compactToolResult(data, fmt.Sprintf("Read artifact %s at byte offset %d.", artifactID, read.Offset)), nil
+	return compactToolResult(data, fmt.Sprintf("Read artifact %s at source byte offset %d.", artifactID, read.SourceOffset)), nil
 }
 
 func (r *Runtime) resourceArtifact(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {

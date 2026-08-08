@@ -17,7 +17,8 @@ type HumanObsSnapshot struct {
 	ProgressSummary  string
 	NextStep         string
 	PlanID           string
-	TaskID           string
+	PlanTaskID       string
+	ExecutionTaskID  string
 	Summary          string
 	Command          string
 	WorkingDirectory string
@@ -48,7 +49,8 @@ func NormalizeHumanToolOutput(snap HumanObsSnapshot, maxBytes int) (json.RawMess
 		"progress_summary":  snap.ProgressSummary,
 		"next_step":         snap.NextStep,
 		"plan_id":           snap.PlanID,
-		"task_id":           snap.TaskID,
+		"plan_task_id":      snap.PlanTaskID,
+		"execution_task_id": snap.ExecutionTaskID,
 	} {
 		if value = strings.TrimSpace(value); value != "" {
 			payload[key] = value

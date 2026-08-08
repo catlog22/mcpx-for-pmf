@@ -61,7 +61,7 @@ func TestProjectTaskAndArtifactRemoteSessionFlow(t *testing.T) {
 	}
 	started := callEnvelope(t, runtime.toolCommandExecute, ctx, map[string]any{"remote_session_id": remoteSessionID, "task": "test", "purpose": "run the project test task", "scope": "workspace", "yield_time_ms": 1})
 	data, _ := started["data"].(map[string]any)
-	taskID, _ := data["task_id"].(string)
+	taskID, _ := data["execution_task_id"].(string)
 	if started["status"] != "accepted" || taskID == "" {
 		t.Fatalf("task start=%+v", started)
 	}
@@ -80,7 +80,7 @@ func TestProjectTaskAndArtifactRemoteSessionFlow(t *testing.T) {
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		status := callEnvelope(t, runtime.toolTaskManage, ctx, map[string]any{"remote_session_id": remoteSessionID, "action": "status", "task_id": taskID})
+		status := callEnvelope(t, runtime.toolTaskManage, ctx, map[string]any{"remote_session_id": remoteSessionID, "action": "status", "execution_task_id": taskID})
 		statusData, _ := status["data"].(map[string]any)
 		if statusData["status"] != "running" {
 			if statusData["exit_code"] != float64(0) {
@@ -93,7 +93,7 @@ func TestProjectTaskAndArtifactRemoteSessionFlow(t *testing.T) {
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	logsRequest := mcpresult.Request(map[string]any{"intent": "read task logs", "remote_session_id": remoteSessionID, "action": "logs", "task_id": taskID, "stdout_offset": 0, "stderr_offset": 0})
+	logsRequest := mcpresult.Request(map[string]any{"intent": "read task logs", "remote_session_id": remoteSessionID, "action": "logs", "execution_task_id": taskID, "stdout_offset": 0, "stderr_offset": 0})
 
 	logsResult, err := runtime.toolTaskManage(ctx, logsRequest)
 	if err != nil || len(logsResult.Content) < 1 {

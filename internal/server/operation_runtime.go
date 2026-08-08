@@ -109,7 +109,7 @@ func (r *Runtime) waitForOperationTask(ctx context.Context, input operation.Exec
 	}
 
 	data := r.taskResultData(task, 0, 0)
-	data["task_id"] = task.ID
+	data["execution_task_id"] = task.ID
 	data["command"] = task.Command
 	data["purpose"] = input.Purpose
 	data["completed_in_call"] = true
@@ -141,12 +141,12 @@ func resultTaskID(result *mcp.CallToolResult) string {
 		if metadata, ok := result.Meta[arc.ResultMetadataKey]; ok {
 			switch typed := metadata.(type) {
 			case arc.Envelope:
-				if taskID := strings.TrimSpace(findStringValue(typed.MCPX.Result.Data, "task_id")); strings.HasPrefix(taskID, "task_") {
+				if taskID := strings.TrimSpace(findStringValue(typed.MCPX.Result.Data, "execution_task_id")); strings.HasPrefix(taskID, "task_") {
 					return taskID
 				}
 			case *arc.Envelope:
 				if typed != nil {
-					if taskID := strings.TrimSpace(findStringValue(typed.MCPX.Result.Data, "task_id")); strings.HasPrefix(taskID, "task_") {
+					if taskID := strings.TrimSpace(findStringValue(typed.MCPX.Result.Data, "execution_task_id")); strings.HasPrefix(taskID, "task_") {
 						return taskID
 					}
 				}
@@ -162,7 +162,7 @@ func resultTaskID(result *mcp.CallToolResult) string {
 		if json.Unmarshal([]byte(textContent.Text), &value) != nil {
 			continue
 		}
-		taskID := strings.TrimSpace(findStringValue(value, "task_id"))
+		taskID := strings.TrimSpace(findStringValue(value, "execution_task_id"))
 		if strings.HasPrefix(taskID, "task_") {
 			return taskID
 		}

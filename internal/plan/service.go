@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,6 +70,35 @@ func (s *Service) Get(ctx context.Context, remoteSessionID, planID string) (Plan
 		return Plan{}, fmt.Errorf("%w: remote session and plan are required", ErrInvalidInput)
 	}
 	return loadPlan(ctx, s.db, remoteSessionID, planID)
+}
+
+func (s *Service) FindTask(ctx context.Context, remoteSessionID, planTaskID string) (string, Task, error) {
+	remoteSessionID = strings.TrimSpace(remoteSessionID)
+	planTaskID = strings.TrimSpace(planTaskID)
+	if remoteSessionID == "" || planTaskID == "" {
+		return "", Task{}, fmt.Errorf("%w: remote session and plan_task_id are required", ErrInvalidInput)
+	}
+	var planID string
+	err := s.db.QueryRowContext(ctx, `SELECT pt.plan_id
+		FROM plan_tasks pt
+		JOIN plans p ON p.id = pt.plan_id
+		WHERE pt.id = ? AND p.remote_session_id = ?`, planTaskID, remoteSessionID).Scan(&planID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", Task{}, ErrNotFound
+	}
+	if err != nil {
+		return "", Task{}, err
+	}
+	item, err := s.Get(ctx, remoteSessionID, planID)
+	if err != nil {
+		return "", Task{}, err
+	}
+	for _, task := range item.Tasks {
+		if task.ID == planTaskID {
+			return planID, task, nil
+		}
+	}
+	return "", Task{}, ErrNotFound
 }
 
 func (s *Service) StartTask(ctx context.Context, remoteSessionID, planID, taskID, principalID string) (Task, error) {
@@ -564,9 +594,11 @@ func insertTasksTx(ctx context.Context, tx *sql.Tx, planID string, tasks []Task,
 }
 
 type normalizedEvidence struct {
-	kind        string
-	referenceID string
-	metadata    string
+	kind          string
+	referenceID   string
+	metadata      string
+	validated     bool
+	sourceEventID string
 }
 
 func insertEvidenceBatchTx(ctx context.Context, tx *sql.Tx, remoteSessionID, planID, taskID, principalID string, inputs []EvidenceInput, now time.Time) error {
@@ -580,8 +612,8 @@ func insertEvidenceBatchTx(ctx context.Context, tx *sql.Tx, remoteSessionID, pla
 		if kind == "" || referenceID == "" {
 			return fmt.Errorf("%w: evidence kind and reference_id are required", ErrEvidence)
 		}
-		if !supportedEvidenceKind(kind) {
-			return fmt.Errorf("%w: unsupported evidence kind %s", ErrEvidence, kind)
+		if !IsEvidenceKind(kind) {
+			return fmt.Errorf("%w: unsupported evidence kind %s; expected one of %s", ErrEvidence, kind, strings.Join(EvidenceKinds(), ", "))
 		}
 		metadata := input.Metadata
 		if metadata == nil {
@@ -597,13 +629,13 @@ func insertEvidenceBatchTx(ctx context.Context, tx *sql.Tx, remoteSessionID, pla
 		return err
 	}
 	groups := make([]string, 0, len(normalized))
-	args := make([]any, 0, len(normalized)*8)
+	args := make([]any, 0, len(normalized)*10)
 	for _, evidence := range normalized {
-		groups = append(groups, "(?, ?, ?, ?, ?, ?, ?, ?)")
-		args = append(args, newID("ev_"), planID, taskID, evidence.kind, evidence.referenceID, evidence.metadata, principalID, now.UnixMilli())
+		groups = append(groups, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		args = append(args, newID("ev_"), planID, taskID, evidence.kind, evidence.referenceID, boolInt(evidence.validated), evidence.sourceEventID, evidence.metadata, principalID, now.UnixMilli())
 	}
 	_, err := tx.ExecContext(ctx, `INSERT INTO plan_task_evidence
-        (id, plan_id, task_id, kind, reference_id, metadata_json, created_by, created_at)
+        (id, plan_id, task_id, kind, reference_id, validated, source_event_id, metadata_json, created_by, created_at)
         VALUES `+strings.Join(groups, ", "), args...)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrEvidence, err)
@@ -611,94 +643,140 @@ func insertEvidenceBatchTx(ctx context.Context, tx *sql.Tx, remoteSessionID, pla
 	return nil
 }
 
-func supportedEvidenceKind(kind string) bool {
+func validateEvidenceRefs(ctx context.Context, tx *sql.Tx, remoteSessionID string, evidence []normalizedEvidence) error {
+	for i := range evidence {
+		sourceEventID, err := validateEvidenceRef(ctx, tx, remoteSessionID, evidence[i].kind, evidence[i].referenceID)
+		if err != nil {
+			return err
+		}
+		evidence[i].validated = true
+		evidence[i].sourceEventID = sourceEventID
+	}
+	return nil
+}
+
+func validateEvidenceRef(ctx context.Context, tx *sql.Tx, remoteSessionID, kind, referenceID string) (string, error) {
 	switch kind {
-	case "changeset", "edit", "execute", "execution_task", "task", "artifact", "source", "verification", "test", "validation":
+	case EvidenceRead:
+		return validateObservationOrOperation(ctx, tx, remoteSessionID, referenceID, "read")
+	case EvidenceObserve:
+		return validateObservationOrOperation(ctx, tx, remoteSessionID, referenceID, "observe")
+	case EvidenceVerification:
+		return validateObservationOrOperation(ctx, tx, remoteSessionID, referenceID, "")
+	case EvidenceEdit:
+		var state string
+		if err := tx.QueryRowContext(ctx, `SELECT state FROM clean_edit_records WHERE remote_session_id = ? AND id = ?`, remoteSessionID, referenceID).Scan(&state); err != nil {
+			return "", evidenceLookupError(kind, referenceID, err)
+		}
+		if state != "succeeded" {
+			return "", fmt.Errorf("%w: %s %s is not completed successfully (state=%s)", ErrEvidence, kind, referenceID, state)
+		}
+		return "", nil
+	case EvidenceExecute:
+		var status string
+		if err := tx.QueryRowContext(ctx, `SELECT status FROM terminal_tasks WHERE remote_session_id = ? AND id = ?`, remoteSessionID, referenceID).Scan(&status); err != nil {
+			return "", evidenceLookupError(kind, referenceID, err)
+		}
+		if status != "exited" {
+			return "", fmt.Errorf("%w: %s %s is not completed (status=%s)", ErrEvidence, kind, referenceID, status)
+		}
+		return "", nil
+	case EvidenceArtifact:
+		var id string
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM artifacts WHERE remote_session_id = ? AND id = ?`, remoteSessionID, referenceID).Scan(&id); err != nil {
+			return "", evidenceLookupError(kind, referenceID, err)
+		}
+		return "", nil
+	case EvidenceSource:
+		var workspaceRoot string
+		if err := tx.QueryRowContext(ctx, `SELECT workspace_path FROM remote_sessions WHERE id = ?`, remoteSessionID).Scan(&workspaceRoot); err != nil {
+			return "", fmt.Errorf("%w: source session: %v", ErrEvidence, err)
+		}
+		resolved, err := file.Resolve(workspaceRoot, referenceID)
+		if err != nil {
+			return "", fmt.Errorf("%w: source path: %v", ErrEvidence, err)
+		}
+		info, err := os.Stat(resolved)
+		if err != nil || !info.Mode().IsRegular() {
+			return "", fmt.Errorf("%w: source %s does not exist as a regular file in remote session", ErrEvidence, referenceID)
+		}
+		return "", nil
+	default:
+		return "", fmt.Errorf("%w: unsupported evidence kind %s", ErrEvidence, kind)
+	}
+}
+
+func validateObservationOrOperation(ctx context.Context, tx *sql.Tx, remoteSessionID, referenceID, expectedTool string) (string, error) {
+	if sequence, err := strconv.ParseInt(referenceID, 10, 64); err == nil && sequence > 0 {
+		var tool, eventType, status string
+		err := tx.QueryRowContext(ctx, `SELECT tool_name, event_type, status FROM observation_events WHERE sequence = ? AND remote_session_id = ?`, sequence, remoteSessionID).Scan(&tool, &eventType, &status)
+		if err != nil {
+			return "", evidenceLookupError("observation", referenceID, err)
+		}
+		if expectedTool != "" && tool != expectedTool {
+			return "", fmt.Errorf("%w: observation %s belongs to tool %s, expected %s", ErrEvidence, referenceID, tool, expectedTool)
+		}
+		if !completedObservationType(eventType) || !successfulEvidenceStatus(status) {
+			return "", fmt.Errorf("%w: observation %s is not a completed successful event (type=%s status=%s)", ErrEvidence, referenceID, eventType, status)
+		}
+		return referenceID, nil
+	}
+
+	var state string
+	if err := tx.QueryRowContext(ctx, `SELECT state FROM operations WHERE id = ? AND remote_session_id = ?`, referenceID, remoteSessionID).Scan(&state); err != nil {
+		return "", evidenceLookupError("operation", referenceID, err)
+	}
+	if state != "succeeded" {
+		return "", fmt.Errorf("%w: operation %s is not completed successfully (state=%s)", ErrEvidence, referenceID, state)
+	}
+	if expectedTool != "" {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM operation_steps WHERE operation_id = ? AND tool_name = ? AND state = 'succeeded'`, referenceID, expectedTool).Scan(&count); err != nil {
+			return "", fmt.Errorf("%w: operation %s step validation: %v", ErrEvidence, referenceID, err)
+		}
+		if count == 0 {
+			return "", fmt.Errorf("%w: operation %s has no succeeded %s step", ErrEvidence, referenceID, expectedTool)
+		}
+	}
+	var sequence int64
+	if err := tx.QueryRowContext(ctx, `SELECT sequence FROM observation_events WHERE remote_session_id = ? AND operation_id = ? AND event_type IN ('operation.completed','operation.step.completed') ORDER BY sequence DESC LIMIT 1`, remoteSessionID, referenceID).Scan(&sequence); err == nil {
+		return strconv.FormatInt(sequence, 10), nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("%w: operation %s observation lookup: %v", ErrEvidence, referenceID, err)
+	}
+	return "", nil
+}
+
+func completedObservationType(eventType string) bool {
+	switch eventType {
+	case "tool.completed", "operation.completed", "operation.step.completed":
 		return true
 	default:
 		return false
 	}
 }
 
-func validateEvidenceRefs(ctx context.Context, tx *sql.Tx, remoteSessionID string, evidence []normalizedEvidence) error {
-	byKind := map[string][]string{}
-	sourceRefs := make([]string, 0)
-	for _, item := range evidence {
-		if item.kind == "source" {
-			sourceRefs = append(sourceRefs, item.referenceID)
-			continue
-		}
-		if item.kind == "verification" || item.kind == "test" || item.kind == "validation" {
-			continue
-		}
-		byKind[item.kind] = append(byKind[item.kind], item.referenceID)
+func successfulEvidenceStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "ok", "succeeded", "completed", "exited", "success":
+		return true
+	default:
+		return false
 	}
-	if len(sourceRefs) > 0 {
-		var workspaceRoot string
-		if err := tx.QueryRowContext(ctx, `SELECT workspace_path FROM remote_sessions WHERE id = ?`, remoteSessionID).Scan(&workspaceRoot); err != nil {
-			return fmt.Errorf("%w: source session: %v", ErrEvidence, err)
-		}
-		for _, referenceID := range uniqueStrings(sourceRefs) {
-			resolved, err := file.Resolve(workspaceRoot, referenceID)
-			if err != nil {
-				return fmt.Errorf("%w: source path: %v", ErrEvidence, err)
-			}
-			info, err := os.Stat(resolved)
-			if err != nil || !info.Mode().IsRegular() {
-				return fmt.Errorf("%w: source %s does not exist in remote session", ErrEvidence, referenceID)
-			}
-		}
-	}
-	for kind, ids := range byKind {
-		table := "changesets"
-		if kind == "edit" {
-			table = "clean_edit_records"
-		} else if kind == "execute" || kind == "execution_task" || kind == "task" {
-			table = "terminal_tasks"
-		} else if kind == "artifact" {
-			table = "artifacts"
-		}
-		existing, err := queryReferenceIDs(ctx, tx, table, remoteSessionID, ids)
-		if err != nil {
-			return err
-		}
-		for _, id := range uniqueStrings(ids) {
-			if !existing[id] {
-				return fmt.Errorf("%w: %s %s does not belong to remote session", ErrEvidence, kind, id)
-			}
-		}
-	}
-	return nil
 }
 
-func queryReferenceIDs(ctx context.Context, tx *sql.Tx, table, remoteSessionID string, ids []string) (map[string]bool, error) {
-	result := make(map[string]bool)
-	ids = uniqueStrings(ids)
-	if len(ids) == 0 {
-		return result, nil
+func evidenceLookupError(kind, referenceID string, err error) error {
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: %s %s does not belong to remote session or does not exist", ErrEvidence, kind, referenceID)
 	}
-	if table != "changesets" && table != "clean_edit_records" && table != "terminal_tasks" && table != "artifacts" {
-		return nil, fmt.Errorf("%w: unsupported evidence table %s", ErrEvidence, table)
+	return fmt.Errorf("%w: %s %s lookup: %v", ErrEvidence, kind, referenceID, err)
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
 	}
-	query := `SELECT id FROM ` + table + ` WHERE remote_session_id = ? AND id IN (` + placeholders(len(ids)) + `)`
-	args := make([]any, 0, len(ids)+1)
-	args = append(args, remoteSessionID)
-	for _, id := range ids {
-		args = append(args, id)
-	}
-	rows, err := tx.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		result[id] = true
-	}
-	return result, rows.Err()
+	return 0
 }
 
 func insertEventTx(ctx context.Context, tx *sql.Tx, planID, taskID, eventType, reason, principalID string, payload map[string]any, now time.Time) error {
@@ -780,7 +858,7 @@ func loadTasks(ctx context.Context, q queryer, planID string) ([]Task, error) {
 }
 
 func loadEvidence(ctx context.Context, q queryer, planID string, tasks []Task, byID map[string]int) error {
-	rows, err := q.QueryContext(ctx, `SELECT id, plan_id, task_id, kind, reference_id, metadata_json, created_by, created_at
+	rows, err := q.QueryContext(ctx, `SELECT id, plan_id, task_id, kind, reference_id, validated, source_event_id, metadata_json, created_by, created_at
         FROM plan_task_evidence WHERE plan_id = ? ORDER BY created_at, id`, planID)
 	if err != nil {
 		return err
@@ -788,11 +866,13 @@ func loadEvidence(ctx context.Context, q queryer, planID string, tasks []Task, b
 	defer rows.Close()
 	for rows.Next() {
 		var evidence Evidence
+		var validated int
 		var metadataJSON string
 		var createdAt int64
-		if err := rows.Scan(&evidence.ID, &evidence.PlanID, &evidence.TaskID, &evidence.Kind, &evidence.ReferenceID, &metadataJSON, &evidence.CreatedBy, &createdAt); err != nil {
+		if err := rows.Scan(&evidence.ID, &evidence.PlanID, &evidence.TaskID, &evidence.Kind, &evidence.ReferenceID, &validated, &evidence.SourceEventID, &metadataJSON, &evidence.CreatedBy, &createdAt); err != nil {
 			return err
 		}
+		evidence.Validated = validated != 0
 		if err := json.Unmarshal([]byte(metadataJSON), &evidence.Metadata); err != nil {
 			return err
 		}

@@ -161,6 +161,53 @@ func TestCapabilityListIncludesInstructionsSkillsAndRoleState(t *testing.T) {
 	}
 }
 
+func TestRuntimeCapabilitiesPublishBuildProvenanceAndNoLegacyRevisionAliases(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("MCPX_HOME", home)
+	workspace := filepath.Join(home, "project")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Logging.Enabled = false
+	cfg.Workspaces = []config.WorkspaceEntry{{Name: "project", Path: workspace}}
+	if err := config.WriteGlobal(filepath.Join(home, "config.yaml"), cfg); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := New(Options{Version: "9.8.7-test", Commit: "abc123def", Date: "2026-08-09T00:00:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+
+	response := callEnvelope(t, runtime.toolRuntimeRead, context.Background(), map[string]any{
+		"view": "capabilities", "workspace": "project",
+	})
+	if response["status"] != "succeeded" && response["status"] != "ok" {
+		t.Fatalf("runtime capabilities=%+v", response)
+	}
+	data := response["data"].(map[string]any)
+	metadata, ok := data["runtime"].(map[string]any)
+	if !ok {
+		t.Fatalf("runtime provenance missing: %+v", data)
+	}
+	revisions := data["revisions"].(map[string]any)
+	if metadata["version"] != "9.8.7-test" || metadata["build_commit"] != "abc123def" || metadata["build_time"] != "2026-08-09T00:00:00Z" {
+		t.Fatalf("build provenance=%+v", metadata)
+	}
+	if metadata["tool_schema_revision"] == "" || metadata["tool_schema_revision"] != revisions["tool_schema_revision"] {
+		t.Fatalf("runtime tool schema revision=%+v revisions=%+v", metadata, revisions)
+	}
+	if metadata["capability_version"] != cleanCoreCapabilityVersion || metadata["capability_groups"] == nil {
+		t.Fatalf("runtime capabilities metadata=%+v", metadata)
+	}
+	for _, legacy := range []string{"tool_schema_revision", "skill_revision", "mcp_revision"} {
+		if data[legacy] != nil {
+			t.Fatalf("runtime capabilities must not duplicate deprecated top-level %s: %+v", legacy, data)
+		}
+	}
+}
+
 func authContextForCapabilities() context.Context {
 	return auth.ContextWithAuthorization(context.Background(), "Bearer developer-token")
 }

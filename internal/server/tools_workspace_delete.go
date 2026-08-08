@@ -56,7 +56,7 @@ var workspaceMoveOutPrepareAnnotation = toolAnnotation{
 }
 
 var workspaceMoveOutCommitAnnotation = toolAnnotation{
-	ReadOnly: false, Destructive: false, Idempotent: true, OpenWorld: false,
+	ReadOnly: false, Destructive: true, Idempotent: true, OpenWorld: false,
 	Title: "提交用户已确认的 Workspace 文件/目录安全移出", Meta: workspaceMoveOutSafetyMeta,
 }
 

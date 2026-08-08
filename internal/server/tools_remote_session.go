@@ -308,7 +308,7 @@ func (r *Runtime) toolRemoteSessionClose(ctx context.Context, req *mcp.CallToolR
 	if tasks, taskErr := r.tasks.List(remoteSessionID, 100); taskErr == nil {
 		for _, task := range tasks {
 			if fmt.Sprint(task["status"]) == "running" {
-				return r.remoteError(envReq, remoteSessionID, "", fmt.Errorf("%w: task %v must be stopped before closing", errRemoteSessionRunning, task["task_id"]))
+				return r.remoteError(envReq, remoteSessionID, "", fmt.Errorf("%w: task %v must be stopped before closing", errRemoteSessionRunning, task["execution_task_id"]))
 			}
 		}
 	}

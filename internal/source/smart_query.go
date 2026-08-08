@@ -36,10 +36,15 @@ type smartDocument struct {
 }
 
 type smartCandidate struct {
-	Path    string
-	Score   int
-	Sources map[string]bool
-	Matches map[string]bool
+	Path           string
+	Score          int
+	Sources        map[string]bool
+	Matches        map[string]bool
+	BestLine       int
+	HasBestLine    bool
+	WindowScore    int
+	MatchReason    string
+	ReasonPriority int
 }
 
 // SmartQueryPage runs exact and token recall, then merges the ranked files.
@@ -125,12 +130,14 @@ func SmartQueryPage(root string, opts SmartQueryOptions) (map[string]any, error)
 	}
 	files := make([]map[string]any, 0, end-start)
 	totalBytes := 0
-	for _, candidate := range ordered[start:end] {
-		read, readErr := Read(root, candidate.Path, 0, 120, opts.MaxBytesPerFile)
+	for pageIndex, candidate := range ordered[start:end] {
+		offset, limit := smartContextWindow(candidate, opts.ContextBefore, opts.ContextAfter)
+		read, readErr := Read(root, candidate.Path, offset, limit, opts.MaxBytesPerFile)
+		matchedTerms := smartMatches(candidate.Matches)
 		entry := map[string]any{
-			"path": candidate.Path, "score": candidate.Score,
-			"source": smartSources(candidate.Sources), "matches": smartMatches(candidate.Matches),
-			"metadata": smartMetadata(candidate.Path),
+			"path": candidate.Path, "score": candidate.Score, "rank": start + pageIndex + 1,
+			"source": smartSources(candidate.Sources), "matches": matchedTerms, "matched_terms": matchedTerms,
+			"match_reason": candidate.MatchReason, "metadata": smartMetadata(candidate.Path),
 		}
 		if readErr != nil {
 			entry["ok"] = false
@@ -241,34 +248,39 @@ func resolvePath(root, path string) (string, error) {
 }
 
 func exactRecall(query string, documents []smartDocument) []smartCandidate {
-	queryLower := strings.ToLower(strings.TrimSpace(query))
+	query = strings.TrimSpace(query)
+	queryLower := strings.ToLower(query)
 	normalizedQuery := normalizeIdentifier(query)
 	result := make([]smartCandidate, 0)
 	for _, document := range documents {
-		score := 0
-		matches := map[string]bool{}
+		candidate := smartCandidate{Path: document.Path, Sources: map[string]bool{"exact": true}, Matches: map[string]bool{}}
 		pathLower := strings.ToLower(document.Path)
 		pathNormalized := normalizeIdentifier(document.Path)
-		contentLower := strings.ToLower(document.Content)
-		contentNormalized := normalizeIdentifier(document.Content)
-		if queryLower != "" && strings.Contains(pathLower, queryLower) {
-			score = maxInt(score, 100)
-			matches[query] = true
+		titleLower := strings.ToLower(document.Title)
+		titleNormalized := normalizeIdentifier(document.Title)
+
+		if queryLower != "" {
+			if line, ok := firstSmartMatchingLine(document.Content, queryLower, normalizedQuery); ok {
+				candidate.Score += 1_000_000
+				candidate.Matches[query] = true
+				candidate.BestLine, candidate.HasBestLine = line, true
+				candidate.WindowScore = 100_000
+				candidate.MatchReason = "lexical: exact_phrase"
+				candidate.ReasonPriority = 5
+			}
 		}
-		if normalizedQuery != "" && strings.Contains(pathNormalized, normalizedQuery) {
-			score = maxInt(score, 100)
-			matches[query] = true
+		pathOrTitle := (queryLower != "" && (strings.Contains(pathLower, queryLower) || strings.Contains(titleLower, queryLower))) ||
+			(normalizedQuery != "" && (strings.Contains(pathNormalized, normalizedQuery) || strings.Contains(titleNormalized, normalizedQuery)))
+		if pathOrTitle {
+			candidate.Score += 200_000
+			candidate.Matches[query] = true
+			if candidate.ReasonPriority < 2 {
+				candidate.MatchReason = "heuristic: title_or_path"
+				candidate.ReasonPriority = 2
+			}
 		}
-		if queryLower != "" && strings.Contains(contentLower, queryLower) {
-			score = maxInt(score, 100)
-			matches[query] = true
-		}
-		if normalizedQuery != "" && strings.Contains(contentNormalized, normalizedQuery) {
-			score = maxInt(score, 100)
-			matches[query] = true
-		}
-		if score > 0 {
-			result = append(result, smartCandidate{Path: document.Path, Score: score, Sources: map[string]bool{"exact": true}, Matches: matches})
+		if candidate.Score > 0 {
+			result = append(result, candidate)
 		}
 	}
 	return result
@@ -276,32 +288,111 @@ func exactRecall(query string, documents []smartDocument) []smartCandidate {
 
 func tokenRecall(analysis QueryAnalysis, documents []smartDocument) []smartCandidate {
 	result := make([]smartCandidate, 0)
+	technical := make(map[string]bool, len(analysis.TechnicalTerms))
+	for _, term := range analysis.TechnicalTerms {
+		technical[term] = true
+	}
 	for _, document := range documents {
-		score := 0
-		matches := map[string]bool{}
+		candidate := smartCandidate{Path: document.Path, Sources: map[string]bool{"token": true}, Matches: map[string]bool{}}
 		title := strings.ToLower(document.Title)
-		body := strings.ToLower(document.Content)
 		path := normalizeIdentifier(document.Path)
+		lines := strings.Split(document.Content, "\n")
+		lineScores := make([]int, len(lines))
+		cjkPhraseMatches := 0
+		identifierMatches := 0
+		titlePathMatches := 0
+		lexicalMatches := 0
+		repeatBonus := 0
+
 		for _, phrase := range analysis.Phrases {
-			if strings.Contains(title, strings.ToLower(phrase)) || strings.Contains(path, normalizeIdentifier(phrase)) {
-				score += 80
-				matches[phrase] = true
-			} else if strings.Contains(body, strings.ToLower(phrase)) {
-				score += 50
-				matches[phrase] = true
+			lower := strings.ToLower(phrase)
+			normalized := normalizeIdentifier(phrase)
+			matchedTitlePath := strings.Contains(title, lower) || (normalized != "" && strings.Contains(path, normalized))
+			bodyCount := 0
+			for lineIndex, line := range lines {
+				lineLower := strings.ToLower(line)
+				if strings.Contains(lineLower, lower) || (normalized != "" && strings.Contains(normalizeIdentifier(line), normalized)) {
+					bodyCount++
+					lineScores[lineIndex] += 120
+				}
 			}
-		}
-		for _, token := range append(analysis.Tokens, analysis.TechnicalTerms...) {
-			if strings.Contains(title, strings.ToLower(token)) || strings.Contains(path, normalizeIdentifier(token)) {
-				score += 20
-				matches[token] = true
-			} else if strings.Contains(body, strings.ToLower(token)) || strings.Contains(normalizeIdentifier(body), normalizeIdentifier(token)) {
-				score += 5
-				matches[token] = true
+			if matchedTitlePath || bodyCount > 0 {
+				candidate.Matches[phrase] = true
+				if containsHan(phrase) {
+					cjkPhraseMatches++
+				}
 			}
+			if matchedTitlePath {
+				titlePathMatches++
+			}
+			repeatBonus += minInt(bodyCount, 3) * 20
 		}
-		if score > 0 {
-			result = append(result, smartCandidate{Path: document.Path, Score: score, Sources: map[string]bool{"token": true}, Matches: matches})
+
+		for _, token := range uniqueSmartTerms(analysis.Tokens, analysis.TechnicalTerms) {
+			lower := strings.ToLower(token)
+			normalized := normalizeIdentifier(token)
+			matchedTitlePath := strings.Contains(title, lower) || (normalized != "" && strings.Contains(path, normalized))
+			bodyCount := 0
+			for lineIndex, line := range lines {
+				lineLower := strings.ToLower(line)
+				matched := strings.Contains(lineLower, lower)
+				if !matched && normalized != "" {
+					matched = strings.Contains(normalizeIdentifier(line), normalized)
+				}
+				if !matched {
+					continue
+				}
+				bodyCount++
+				switch {
+				case technical[token]:
+					lineScores[lineIndex] += 70
+				case containsHan(token):
+					lineScores[lineIndex] += 15
+				default:
+					lineScores[lineIndex] += 25
+				}
+			}
+			if matchedTitlePath || bodyCount > 0 {
+				candidate.Matches[token] = true
+			}
+			if matchedTitlePath {
+				titlePathMatches++
+			}
+			if bodyCount > 0 {
+				if technical[token] {
+					identifierMatches++
+				} else {
+					lexicalMatches++
+				}
+			}
+			repeatBonus += minInt(bodyCount, 3) * 5
+		}
+
+		bestLine, bestLineScore := bestSmartLine(lineScores)
+		if bestLineScore > 0 {
+			candidate.BestLine, candidate.HasBestLine = bestLine, true
+			candidate.WindowScore = bestLineScore
+		}
+		switch {
+		case cjkPhraseMatches > 0:
+			candidate.Score = 500_000 + cjkPhraseMatches*4_000 + titlePathMatches*200 + lexicalMatches*25 + identifierMatches*100 + repeatBonus + bestLineScore
+			candidate.MatchReason = "heuristic: cjk_term_coverage"
+			candidate.ReasonPriority = 4
+		case identifierMatches > 0:
+			candidate.Score = 300_000 + identifierMatches*4_000 + titlePathMatches*200 + lexicalMatches*25 + repeatBonus + bestLineScore
+			candidate.MatchReason = "lexical: identifier_exact"
+			candidate.ReasonPriority = 3
+		case titlePathMatches > 0:
+			candidate.Score = 200_000 + titlePathMatches*2_000 + lexicalMatches*25 + repeatBonus + bestLineScore
+			candidate.MatchReason = "heuristic: title_or_path"
+			candidate.ReasonPriority = 2
+		case lexicalMatches > 0:
+			candidate.Score = 100_000 + lexicalMatches*500 + repeatBonus + bestLineScore
+			candidate.MatchReason = "lexical: token_match"
+			candidate.ReasonPriority = 1
+		}
+		if candidate.Score > 0 {
+			result = append(result, candidate)
 		}
 	}
 	return result
@@ -311,8 +402,13 @@ func mergeSmartCandidate(merged map[string]*smartCandidate, candidate smartCandi
 	current, ok := merged[candidate.Path]
 	if !ok {
 		copyCandidate := candidate
+		copyCandidate.Score = 0
 		copyCandidate.Sources = map[string]bool{}
 		copyCandidate.Matches = map[string]bool{}
+		copyCandidate.MatchReason = ""
+		copyCandidate.ReasonPriority = 0
+		copyCandidate.WindowScore = 0
+		copyCandidate.HasBestLine = false
 		merged[candidate.Path] = &copyCandidate
 		current = &copyCandidate
 	}
@@ -323,6 +419,93 @@ func mergeSmartCandidate(merged map[string]*smartCandidate, candidate smartCandi
 	for match := range candidate.Matches {
 		current.Matches[match] = true
 	}
+	if candidate.ReasonPriority > current.ReasonPriority {
+		current.MatchReason = candidate.MatchReason
+		current.ReasonPriority = candidate.ReasonPriority
+	}
+	if candidate.HasBestLine && (!current.HasBestLine || candidate.WindowScore > current.WindowScore || (candidate.WindowScore == current.WindowScore && candidate.BestLine < current.BestLine)) {
+		current.BestLine = candidate.BestLine
+		current.HasBestLine = true
+		current.WindowScore = candidate.WindowScore
+	}
+}
+
+func smartContextWindow(candidate *smartCandidate, contextBefore, contextAfter int) (int, int) {
+	if !candidate.HasBestLine {
+		return 0, 120
+	}
+	if contextBefore < 0 {
+		contextBefore = 0
+	}
+	if contextAfter < 0 {
+		contextAfter = 0
+	}
+	if contextBefore == 0 && contextAfter == 0 {
+		return candidate.BestLine, 120
+	}
+	offset := candidate.BestLine - contextBefore
+	if offset < 0 {
+		offset = 0
+	}
+	limit := contextBefore + 1 + contextAfter
+	if limit <= 0 {
+		limit = 1
+	}
+	return offset, limit
+}
+
+func firstSmartMatchingLine(content, queryLower, normalizedQuery string) (int, bool) {
+	for index, line := range strings.Split(content, "\n") {
+		lineLower := strings.ToLower(line)
+		if queryLower != "" && strings.Contains(lineLower, queryLower) {
+			return index, true
+		}
+		if normalizedQuery != "" && strings.Contains(normalizeIdentifier(line), normalizedQuery) {
+			return index, true
+		}
+	}
+	return 0, false
+}
+
+func bestSmartLine(scores []int) (int, int) {
+	bestLine, bestScore := 0, 0
+	for index, score := range scores {
+		if score > bestScore {
+			bestLine, bestScore = index, score
+		}
+	}
+	return bestLine, bestScore
+}
+
+func uniqueSmartTerms(groups ...[]string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0)
+	for _, group := range groups {
+		for _, term := range group {
+			if term == "" || seen[term] {
+				continue
+			}
+			seen[term] = true
+			result = append(result, term)
+		}
+	}
+	return result
+}
+
+func containsHan(value string) bool {
+	for _, r := range value {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+	}
+	return false
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func smartSources(sources map[string]bool) []string {

@@ -154,6 +154,12 @@ func TestAgentGuidanceIncludesEditPayloadCheatSheet(t *testing.T) {
 	if !strings.Contains(joined, "完整 sha256") || !strings.Contains(joined, "line_ending") {
 		t.Fatalf("rules must carry file revision and non-Git guidance: %s", joined)
 	}
+	if !strings.Contains(joined, "search_mode=smart") || !strings.Contains(joined, "lexical/heuristic") || !strings.Contains(joined, "score、rank、matched_terms 和 match_reason") || !strings.Contains(joined, "read(view=search)") {
+		t.Fatalf("rules must explain deterministic context ranking and high-confidence narrowing: %s", joined)
+	}
+	if !strings.Contains(joined, "local_id") || !strings.Contains(joined, "plan_task_id") || !strings.Contains(joined, "execution_task_id") || !strings.Contains(joined, "plan_task_ids") || !strings.Contains(joined, "execution_task_ids") {
+		t.Fatalf("rules must use the explicit dual task ID contract: %s", joined)
+	}
 	if !strings.Contains(joined, "idempotency_key") || !strings.Contains(joined, "STALE_REVISION") || !strings.Contains(joined, "suggested_next") {
 		t.Fatalf("rules must carry edit retry guidance: %s", joined)
 	}

@@ -18,7 +18,7 @@ func planTaskInputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"task_id":     stringSchema("可选的局部依赖引用（本计划内唯一即可）；服务端会生成最终 task_id，后续操作必须使用 plan_create 返回的精确值"),
+			"local_id":    stringSchema("可选的计划内局部依赖引用；仅用于 create 的 depends_on，服务端会生成正式 plan_task_id"),
 			"title":       stringSchema("任务标题"),
 			"description": stringSchema("任务描述"),
 			"depends_on":  arraySchema(map[string]any{"type": "string"}, "必须先完成的任务 ID"),
@@ -31,8 +31,8 @@ func planEvidenceSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"kind":         stringSchema("证据类型：read、edit、execute、artifact、source、verification 或 observe"),
-			"reference_id": stringSchema("服务端签发的证据引用"),
+			"kind":         enumSchema("证据类型", plan.EvidenceKinds()...),
+			"reference_id": stringSchema("服务端签发的真实持久化证据引用"),
 			"metadata":     map[string]any{"type": "object", "additionalProperties": true},
 		},
 		"required": []string{"kind", "reference_id"},
@@ -43,11 +43,11 @@ func planOperationSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"action":      map[string]any{"type": "string", "enum": []string{"add", "update", "remove"}},
-			"task_id":     stringSchema("由 plan_manage create/get 返回的精确 Plan Task ID；不得猜测"),
-			"title":       stringSchema("任务标题"),
-			"description": stringSchema("任务描述"),
-			"depends_on":  arraySchema(map[string]any{"type": "string"}, "必须先完成的任务 ID"),
+			"action":       map[string]any{"type": "string", "enum": []string{"add", "update", "remove"}},
+			"plan_task_id": stringSchema("由 plan create/read 返回的精确 Plan Task ID；不得猜测"),
+			"title":        stringSchema("任务标题"),
+			"description":  stringSchema("任务描述"),
+			"depends_on":   arraySchema(map[string]any{"type": "string"}, "必须先完成的任务 ID"),
 		},
 		"required": []string{"action"},
 	}
@@ -179,11 +179,11 @@ func decodePayload(payload map[string]any, target any) error {
 }
 
 func requiredPlanTaskID(payload map[string]any) (string, error) {
-	taskID, _ := payload["task_id"].(string)
-	if strings.TrimSpace(taskID) == "" {
-		return "", fmt.Errorf("%w: task_id is required", plan.ErrInvalidInput)
+	planTaskID, _ := payload["plan_task_id"].(string)
+	if strings.TrimSpace(planTaskID) == "" {
+		return "", fmt.Errorf("%w: plan_task_id is required", plan.ErrInvalidInput)
 	}
-	return taskID, nil
+	return planTaskID, nil
 }
 
 func planMap(item plan.Plan) map[string]any {
@@ -191,7 +191,7 @@ func planMap(item plan.Plan) map[string]any {
 }
 
 func planTaskMap(planID string, task plan.Task) map[string]any {
-	return map[string]any{"plan_id": planID, "task_id": task.ID, "status": task.Status, "task": task, "evidence": task.Evidence}
+	return map[string]any{"plan_id": planID, "plan_task_id": task.ID, "status": task.Status, "task": task, "evidence": task.Evidence}
 }
 
 func deliveryMap(item plan.Delivery) map[string]any {
@@ -217,6 +217,15 @@ func (r *Runtime) planError(envReq envelope.Request, session remotesession.Sessi
 		code = "PLAN_INVALID_REQUEST"
 	case errors.Is(err, plan.ErrInvalidState):
 		code = "PLAN_STATE_CONFLICT"
+	}
+	if errors.Is(err, plan.ErrEvidence) || errors.Is(err, plan.ErrEvidenceRequired) {
+		response := envelope.Fail(envelope.StatusError, envReq.RequestID, session.WorkspaceName, nil, code, err.Error())
+		response.RemoteSessionID = session.ID
+		addRecoveryAction(&response, "observe", "读取同一 Remote Session 的真实已完成事件/执行结果，再用 canonical evidence kind 重试", map[string]any{
+			"remote_session_id": session.ID,
+			"view":              "history",
+		})
+		return r.resultJSON(response)
 	}
 	return r.terminalError(envReq, session.ID, session.WorkspaceName, code, err.Error())
 }

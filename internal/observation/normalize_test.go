@@ -33,7 +33,8 @@ func TestNormalizeHumanToolOutputOmitsStructuredContent(t *testing.T) {
 		ProgressSummary:  "command started",
 		NextStep:         "inspect the result",
 		PlanID:           "pl_1",
-		TaskID:           "pt_1",
+		PlanTaskID:       "pt_1",
+		ExecutionTaskID:  "task_1",
 		Summary:          "visible output",
 		Command:          "echo hi",
 	}, MaxEventBytes)
@@ -53,7 +54,7 @@ func TestNormalizeHumanToolOutputOmitsStructuredContent(t *testing.T) {
 	}
 	for key, want := range map[string]string{
 		"goal": "verify output", "purpose": "run the command", "reasoning_summary": "the command is the smallest probe",
-		"progress_summary": "command started", "next_step": "inspect the result", "plan_id": "pl_1", "task_id": "pt_1",
+		"progress_summary": "command started", "next_step": "inspect the result", "plan_id": "pl_1", "plan_task_id": "pt_1", "execution_task_id": "task_1",
 	} {
 		if payload[key] != want {
 			t.Fatalf("human context[%q]=%v, want %q", key, payload[key], want)

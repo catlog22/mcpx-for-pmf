@@ -42,7 +42,7 @@ func TestRegisterListReadAndDetectExternalChange(t *testing.T) {
 		t.Fatalf("listed=%+v err=%v", listed, err)
 	}
 	read, err := service.Read(context.Background(), created.Session.ID, registered.ID, workspace, 0, 4)
-	if err != nil || read.Data != "test" || read.Encoding != "utf-8" {
+	if err != nil || read.Text != "test" || read.DeliveryEncoding != DeliveryEncodingUTF8 || read.SourceEncoding != SourceEncodingUTF8 || read.SourceOffset != 0 || read.NextSourceOffset != 4 {
 		t.Fatalf("read=%+v err=%v", read, err)
 	}
 	if err := os.WriteFile(filepath.Join(workspace, "report.txt"), []byte("changed\n"), 0o600); err != nil {
