@@ -66,9 +66,8 @@ func (r *Runtime) toolOperationBatch(ctx context.Context, req *mcp.CallToolReque
 		}
 		r.toolIndexMu.RLock()
 		meta, exists := r.toolMeta[toolName]
-		_, registered := r.toolHandlers[toolName]
 		r.toolIndexMu.RUnlock()
-		if !exists || !registered {
+		if !exists {
 			return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", fmt.Sprintf("tool %q is not registered", toolName))
 		}
 		steps = append(steps, operation.StepSpec{
@@ -256,11 +255,7 @@ func (r *Runtime) validateOperationToolArguments(toolName string, arguments map[
 		return fmt.Errorf("invalid schema for tool %q", toolName)
 	}
 	merged := cloneArguments(arguments)
-	if isCleanPublicTool(toolName) {
-		merged["remote_session_id"] = sessionID
-	} else {
-		merged["session_id"] = sessionID
-	}
+	merged["remote_session_id"] = sessionID
 	merged["purpose"] = purpose
 	return validateOperationSchemaValue(merged, schema, "arguments")
 }

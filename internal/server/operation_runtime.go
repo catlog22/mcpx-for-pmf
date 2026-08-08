@@ -25,7 +25,7 @@ func executionMode(req *mcp.CallToolRequest) string {
 
 func asyncEligibleTool(name string) bool {
 	switch name {
-	case "workspace_read", "session", "operation_batch", "operation_manage":
+	case "session", "operation_batch", "operation_manage":
 		return false
 	default:
 		return true
@@ -77,17 +77,13 @@ func (r *Runtime) executeOperationStep(ctx context.Context, input operation.Exec
 		return operation.ExecuteResult{Err: fmt.Errorf("tool %q is not registered", input.Tool)}
 	}
 	arguments := cloneArguments(input.Arguments)
-	if isCleanPublicTool(input.Tool) {
-		arguments["remote_session_id"] = input.RemoteSessionID
-	} else {
-		arguments["session_id"] = input.RemoteSessionID
-	}
+	arguments["remote_session_id"] = input.RemoteSessionID
 	arguments["purpose"] = input.Purpose
 	arguments["execution_mode"] = "sync"
 	request := mcpresult.Request(arguments)
 	childCtx := r.operationChildContext(ctx, input)
 	result, callErr := handler(childCtx, request)
-	if callErr == nil && (input.Tool == "execute" || input.Tool == "command_run" || input.Tool == "command_execute") {
+	if callErr == nil && input.Tool == "execute" {
 		result, callErr = r.waitForOperationTask(childCtx, input, result)
 	}
 	return operationResult(result, callErr)

@@ -14,9 +14,7 @@ import (
 	"mcpx/internal/server/prompts"
 )
 
-// registerTools is the sole public tool registration point. The legacy
-// fine-grained handlers remain private implementation details behind the
-// explicit public catalog below.
+// registerTools is the sole public tool registration point.
 func (r *Runtime) registerTools(s *mcp.Server) {
 	r.registerCleanCoreTools(s)
 	r.captureToolIndex(s)
@@ -421,18 +419,6 @@ func changeExecuteInputSchema() map[string]any {
 		},
 		"required": []string{"remote_session_id"},
 	}
-}
-
-// registerConsolidatedTools was the pre-v2 catalog and is no longer registered.
-func (r *Runtime) registerConsolidatedTools(s *mcp.Server) {
-	_ = s
-}
-
-// registerConsolidatedToolsV2 preserves the pre-clean-core catalog for focused
-// internal tests and migration comparisons. Production registration goes
-// through registerCleanCoreTools below.
-func (r *Runtime) registerConsolidatedToolsV2(s *mcp.Server) {
-	r.registerConsolidatedToolsCatalog(s, false)
 }
 
 // registerConsolidatedToolsCatalog registers the tools that are not yet part

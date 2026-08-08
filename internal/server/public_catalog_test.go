@@ -31,6 +31,11 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("public tool catalog = %v, want %v", got, want)
 	}
+	for _, legacy := range []string{"change", "change_read", "command_run", "command_execute", "task_read", "task", "plan_read", "extension_discover", "artifact_read"} {
+		if runtime.toolHandlers[legacy] != nil {
+			t.Fatalf("legacy handler %q must not be dispatchable", legacy)
+		}
+	}
 
 	for name, registered := range runtime.listedToolMap() {
 		if registered.OutputSchema == nil {

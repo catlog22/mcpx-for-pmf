@@ -211,32 +211,5 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"path":              path,
 	}, []string{"remote_session_id", "view"}, readOnlyToolAnnotation), r.toolObserve)
 
-	// Keep tools outside the P0 convergence available until their dedicated P1
-	// through P4 plans replace their public names.
 	r.registerConsolidatedToolsCatalog(s, true)
-	// Changeset handlers remain callable by internal operation/recovery tests and
-	// existing in-process services, but are deliberately absent from toolIndex
-	// and therefore never appear in the public tools/list catalog.
-	if _, exists := r.toolHandlers["change"]; !exists {
-		r.toolHandlers["change"] = r.instrumentTool("change", r.toolChange)
-	}
-	if _, exists := r.toolHandlers["change_read"]; !exists {
-		r.toolHandlers["change_read"] = r.instrumentTool("change_read", r.toolChangeRead)
-	}
-	// Private compatibility handlers keep stored operation fixtures and older
-	// in-process callers working without reintroducing legacy names into
-	// tools/list, schemas, bootstrap or recovery payloads.
-	for name, handler := range map[string]mcp.ToolHandler{
-		"command_run":        r.toolCommandRun,
-		"command_execute":    r.toolCommandExecute,
-		"task_read":          r.toolTaskRead,
-		"task":               r.toolTask,
-		"plan_read":          r.toolPlanReadPublic,
-		"extension_discover": r.toolExtensionDiscover,
-		"artifact_read":      r.toolArtifactReadPublic,
-	} {
-		if _, exists := r.toolHandlers[name]; !exists {
-			r.toolHandlers[name] = r.instrumentTool(name, handler)
-		}
-	}
 }

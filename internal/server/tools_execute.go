@@ -13,9 +13,8 @@ import (
 	"mcpx/internal/security"
 )
 
-// toolExecute is the clean-core execution surface. The older command/task
-// handlers remain available to internal operation tests, but all model-facing
-// task continuation points are routed through execute or observe.
+// toolExecute is the execution surface; task continuation points use execute
+// or observe.
 func (r *Runtime) toolExecute(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	ctx = withCleanCoreRequest(ctx)
 	action := toolAction(req)
