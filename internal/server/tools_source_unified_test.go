@@ -3,10 +3,12 @@ package server
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -16,7 +18,107 @@ import (
 	"mcpx/internal/mcpresult"
 
 	"mcpx/internal/arc"
+	"mcpx/internal/envelope"
+	"mcpx/internal/file"
 )
+
+func TestSourceErrorClassifiesMissingPathWithoutStatatLeak(t *testing.T) {
+	result, err := (&Runtime{}).sourceError(envelope.Request{RequestID: "req_missing"}, "session", "demo", fmt.Errorf("statat missing.txt: no such file or directory"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, ok := result.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("source error structured content=%T", result.StructuredContent)
+	}
+	errorBody, ok := wire["error"].(map[string]any)
+	if !ok || errorBody["code"] != "FILE_NOT_FOUND" || errorBody["category"] != "not_found" {
+		t.Fatalf("missing-path error=%+v", wire["error"])
+	}
+	if strings.Contains(strings.ToLower(result.Content[0].(*mcp.TextContent).Text), "statat") {
+		t.Fatalf("source error leaked statat typo: %+v", result.Content[0])
+	}
+}
+
+func TestReadFullLimitIsStructuredAndWindowReadsLargeSource(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	workspace, _ := rt.reg.Get("demo")
+	content := append(bytes.Repeat([]byte("x\n"), int(file.MaxSourceBytes/2)), 'z')
+	if int64(len(content)) <= file.MaxSourceBytes {
+		content = append(content, bytes.Repeat([]byte("x"), int(file.MaxSourceBytes-int64(len(content))+1))...)
+	}
+	path := filepath.Join(workspace.Path, "large-window.txt")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
+	remoteID := opened["remote_session_id"].(string)
+	full := callEnvelope(t, rt.toolRead, context.Background(), map[string]any{
+		"remote_session_id": remoteID, "view": "file", "path": "large-window.txt", "mode": "full",
+	})
+	if statusOK(full) || errorCode(full) != "file_too_large" {
+		t.Fatalf("large full read=%+v", full)
+	}
+	errorBody, _ := full["error"].(map[string]any)
+	if errorBody["category"] != "capacity" {
+		t.Fatalf("large full taxonomy=%+v", errorBody)
+	}
+	details, _ := errorBody["details"].(map[string]any)
+	if details["max_source_bytes"] != float64(file.MaxSourceBytes) {
+		t.Fatalf("large full details=%+v", details)
+	}
+	window := callEnvelope(t, rt.toolRead, context.Background(), map[string]any{
+		"remote_session_id": remoteID, "view": "file", "path": "large-window.txt", "mode": "window", "offset": 0, "limit": 1,
+	})
+	if !statusOK(window) {
+		t.Fatalf("large window read=%+v", window)
+	}
+	windowData, _ := window["data"].(map[string]any)
+	if windowData["truncated"] != true || windowData["content"] == "" {
+		t.Fatalf("large window data=%+v", windowData)
+	}
+}
+
+func TestReadItemsLimitAndListPathAreStructured(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	workspace, _ := rt.reg.Get("demo")
+	if err := os.MkdirAll(filepath.Join(workspace.Path, "scoped"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace.Path, "scoped", "inside.txt"), []byte("inside\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace.Path, "outside.txt"), []byte("outside\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
+	remoteID := opened["remote_session_id"].(string)
+	items := make([]any, MaxReadItems+1)
+	for index := range items {
+		items[index] = map[string]any{"path": "scoped/inside.txt", "mode": "window", "limit": 1}
+	}
+	tooMany := callEnvelope(t, rt.toolRead, context.Background(), map[string]any{
+		"remote_session_id": remoteID, "view": "file", "items": items,
+	})
+	if statusOK(tooMany) || errorCode(tooMany) != "limit_exceeded" {
+		t.Fatalf("too many read items=%+v", tooMany)
+	}
+	errorBody, _ := tooMany["error"].(map[string]any)
+	if errorBody["category"] != "validation" {
+		t.Fatalf("items taxonomy=%+v", errorBody)
+	}
+	list := callEnvelope(t, rt.toolRead, context.Background(), map[string]any{
+		"remote_session_id": remoteID, "view": "list", "path": "scoped",
+	})
+	if !statusOK(list) {
+		t.Fatalf("scoped list=%+v", list)
+	}
+	data, _ := list["data"].(map[string]any)
+	files, _ := data["files"].([]any)
+	if len(files) != 1 || files[0].(map[string]any)["path"] != "scoped/inside.txt" {
+		t.Fatalf("path scope leaked: %+v", data)
+	}
+}
 
 func TestSourceReadDisplayIncludesMarkdownSourceBlock(t *testing.T) {
 	data := map[string]any{

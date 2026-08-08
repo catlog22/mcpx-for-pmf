@@ -23,6 +23,7 @@ import (
 	"mcpx/internal/auth"
 	"mcpx/internal/changeset"
 	"mcpx/internal/config"
+	"mcpx/internal/deletion"
 	"mcpx/internal/envelope"
 	"mcpx/internal/environment"
 	"mcpx/internal/filesnapshot"
@@ -45,11 +46,10 @@ import (
 
 // Options configures mcpx-server startup.
 type Options struct {
-	WorkspaceFlag string
-	AddrOverride  string
-	Version       string
-	Commit        string
-	Date          string
+	AddrOverride string
+	Version      string
+	Commit       string
+	Date         string
 }
 
 // Runtime is the MCPX process root.
@@ -71,6 +71,7 @@ type Runtime struct {
 	fileSnapshots   *filesnapshot.Store
 	artifacts       *artifact.Service
 	plans           *plan.Service
+	deletions       *deletion.Store
 	retention       *state.RetentionService
 	retentionCancel context.CancelFunc
 	retentionDone   chan struct{}
@@ -121,7 +122,7 @@ type BuildInfo struct {
 	Date    string
 }
 
-// New constructs a Runtime, loading config and optional --workspace registration.
+// New constructs a Runtime from the registered global configuration.
 func New(opts Options) (*Runtime, error) {
 	// First boot: create ~/.mcpx/config.yaml, empty .mcp.json, logs/, skills/
 	ensured, err := config.EnsureGlobalLayout()
@@ -148,11 +149,6 @@ func New(opts Options) (*Runtime, error) {
 	globalPath, err := config.GlobalConfigPath()
 	if err != nil {
 		return nil, err
-	}
-	if opts.WorkspaceFlag != "" {
-		if err := config.RegisterWorkspace(globalPath, opts.WorkspaceFlag); err != nil {
-			return nil, fmt.Errorf("register workspace: %w", err)
-		}
 	}
 	cfg, err := config.LoadGlobal(globalPath)
 	if err != nil {
@@ -233,6 +229,7 @@ func New(opts Options) (*Runtime, error) {
 		fileSnapshots:         filesnapshot.NewStore(stateStore.DB()),
 		artifacts:             artifact.NewService(stateStore.DB()),
 		plans:                 plan.NewService(stateStore.DB()),
+		deletions:             deletion.NewStore(stateStore.DB()),
 		retention:             retentionService,
 		screenshot:            screenshot.NewService(),
 		toolIndex:             map[string]mcp.Tool{},
@@ -606,7 +603,7 @@ func (r *Runtime) logStartupInventory(log interface {
 	log.Info("──────── inventory ────────")
 	log.Info("workspaces", "count", len(workspaces))
 	if len(workspaces) == 0 {
-		log.Info("workspace", "hint", "none registered; use --workspace /path or edit config workspaces[]")
+		log.Info("workspace", "hint", "none registered; use workspace register <path> or edit config workspaces[]")
 	}
 	for i, ws := range workspaces {
 		desc := ws.Description
@@ -795,8 +792,11 @@ func (r *Runtime) resultJSON(resp envelope.Response) (*mcp.CallToolResult, error
 func envelopeHumanSummary(resp envelope.Response) string {
 	// Confirmation tokens must appear early in host-visible text before ARC wrap,
 	// so previews that truncate content still leave a usable retry key.
-	if token := confirmationTokenFromData(resp.Data); token != "" {
-		return "confirmation_token: `" + token + "`"
+	if label, credential := confirmationCredentialFromData(resp.Data); credential != "" {
+		if label == "confirmation_uuid" {
+			return "confirmation_uuid: `" + credential + "` · ask the web user, then call submit_remove"
+		}
+		return "confirmation_token: `" + credential + "`"
 	}
 	if resp.Error != nil {
 		if msg := strings.TrimSpace(resp.Error.Message); msg != "" {
@@ -825,23 +825,26 @@ func envelopeHumanSummary(resp envelope.Response) string {
 	}
 }
 
-func confirmationTokenFromData(data any) string {
+func confirmationCredentialFromData(data any) (string, string) {
 	if data == nil {
-		return ""
+		return "", ""
 	}
 	m, ok := data.(map[string]any)
 	if !ok {
 		// Typed DTOs (e.g. commandConfirmationData) are common in Fail payloads.
 		encoded, err := json.Marshal(data)
 		if err != nil {
-			return ""
+			return "", ""
 		}
 		if err := json.Unmarshal(encoded, &m); err != nil || m == nil {
-			return ""
+			return "", ""
 		}
 	}
+	if uuid, _ := m["confirmation_uuid"].(string); strings.TrimSpace(uuid) != "" {
+		return "confirmation_uuid", strings.TrimSpace(uuid)
+	}
 	if token, _ := m["confirmation_token"].(string); strings.TrimSpace(token) != "" {
-		return strings.TrimSpace(token)
+		return "confirmation_token", strings.TrimSpace(token)
 	}
 	// operation-style payloads nest tokens under steps.
 	if steps, ok := m["steps"].([]any); ok {
@@ -851,11 +854,11 @@ func confirmationTokenFromData(data any) string {
 				continue
 			}
 			if token, _ := sm["confirmation_token"].(string); strings.TrimSpace(token) != "" {
-				return strings.TrimSpace(token)
+				return "confirmation_token", strings.TrimSpace(token)
 			}
 		}
 	}
-	return ""
+	return "", ""
 }
 
 func (r *Runtime) logAudit(event audit.Event) {
@@ -944,6 +947,7 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 	data := map[string]any{
 		"capability_version":    cleanCoreCapabilityVersion,
 		"capability_groups":     capabilityGroups(),
+		"limits":                publishedLimits(),
 		"schema_source":         "tools/list",
 		"include_tool_schemas":  includeToolSchemas,
 		"include_skill_details": includeSkillDetails,

@@ -214,7 +214,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		}
 	}
 	expectedTools := []string{
-		"session", "read", "edit", "observe",
+		"session", "read", "edit", "remove_prepare", "submit_remove", "observe",
 		"operation_batch", "operation_manage",
 		"execute", "plan", "artifact", "discover", "skill_call", "mcp_call",
 		"runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide",
@@ -236,10 +236,9 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		if err := json.Unmarshal(encoded, &listedTool); err != nil {
 			t.Fatalf("decode %s: %v", name, err)
 		}
-		// ChatGPT Connector discovery rejects bloated tools/list OutputSchema.
-		// Runtime still wraps structuredContent with ARC; catalog must stay lean.
-		if listedTool["outputSchema"] != nil {
-			t.Fatalf("%s must not expose OutputSchema in tools/list: %+v", name, listedTool["outputSchema"])
+		outputSchema, ok := listedTool["outputSchema"].(map[string]any)
+		if !ok || outputSchema["$id"] != "mcpx.structured_content.v1.3" {
+			t.Fatalf("%s must expose the ARC structuredContent OutputSchema: %+v", name, listedTool["outputSchema"])
 		}
 		inputSchema, err := json.Marshal(tool.InputSchema)
 		if err != nil {
@@ -262,11 +261,18 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 			t.Fatalf("edit schema missing %q: %s", needle, schemaText)
 		}
 	}
-	if !strings.Contains(schemaText, "update") || !strings.Contains(schemaText, "create") || !strings.Contains(schemaText, "rename") || !strings.Contains(schemaText, "delete") {
+	if !strings.Contains(schemaText, "update") || !strings.Contains(schemaText, "create") || !strings.Contains(schemaText, "rename") || strings.Contains(schemaText, "user_confirmed") || strings.Contains(schemaText, "\"delete\"") {
 		t.Fatalf("edit operation enum incomplete: %s", schemaText)
 	}
-	if strings.Contains(schemaText, "user_confirmed") {
-		t.Fatalf("edit exposes removed compatibility field user_confirmed: %s", schemaText)
+	removeSchema, _ := json.Marshal(byName["remove_prepare"].InputSchema)
+	for _, needle := range []string{"targets", "kind", "expected_sha256"} {
+		if !strings.Contains(string(removeSchema), needle) {
+			t.Fatalf("remove_prepare schema missing %q: %s", needle, removeSchema)
+		}
+	}
+	commitSchema, _ := json.Marshal(byName["submit_remove"].InputSchema)
+	if !strings.Contains(string(commitSchema), "manifest_sha256") || !strings.Contains(string(commitSchema), "confirmation_uuid") {
+		t.Fatalf("submit_remove schema missing frozen confirmation fields: %s", commitSchema)
 	}
 	commandSchema, _ := json.Marshal(byName["execute"].InputSchema)
 	for _, required := range []string{"remote_session_id", "purpose"} {
@@ -550,6 +556,17 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	statusOK := func(resp map[string]any) bool {
 		return resp["status"] == "ok" || resp["status"] == "succeeded" || resp["ok"] == true
 	}
+	executeRun := call("execute", map[string]any{
+		"action": "run", "remote_session_id": remoteID, "purpose": "acceptance execute run",
+		"command": "printf acceptance-execute", "scope": "workspace",
+	})
+	if !statusOK(executeRun) {
+		t.Fatalf("execute run = %+v", executeRun)
+	}
+	executedData, _ := executeRun["data"].(map[string]any)
+	if executedData["completed_in_call"] != true || executedData["exit_code"] != float64(0) {
+		t.Fatalf("execute run did not reach handler: %+v", executedData)
+	}
 	planCreated := call("plan_manage", map[string]any{
 		"action": "create", "remote_session_id": remoteID, "goal": "acceptance plan", "purpose": "acceptance plan create",
 		"tasks": []any{map[string]any{"task_id": "verify", "title": "Verify protocol"}},
@@ -802,18 +819,6 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	if replayData["idempotent_replay"] != true || replayData["diff_summary"] != execData["diff_summary"] {
 		t.Fatalf("edit retry must replay its original result: %+v", replayed)
 	}
-	deleteSum := sha256.Sum256([]byte(files["delete_me.txt"]))
-	deleted := call("change_execute", map[string]any{
-		"remote_session_id": remoteID, "summary": "remove controlled file", "apply": true,
-		"operations": []any{map[string]any{"operation": "delete", "path": "delete_me.txt", "base_sha256": fmt.Sprintf("sha256:%x", deleteSum[:])}},
-	})
-	if !statusOK(deleted) {
-		t.Fatalf("clean delete failed: %+v", deleted)
-	}
-	if _, err := os.Stat(filepath.Join(workspace, "delete_me.txt")); !os.IsNotExist(err) {
-		t.Fatalf("clean delete did not remove target: %v", err)
-	}
-
 	// --- A12 stale revision ---
 	stale := call("change_execute", map[string]any{
 		"remote_session_id": remoteID,

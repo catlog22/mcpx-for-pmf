@@ -12,47 +12,41 @@ import (
 	"testing"
 	"unicode/utf16"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"mcpx/internal/mcpresult"
+	"mcpx/internal/edit"
+	"mcpx/internal/envelope"
 	"mcpx/internal/observation"
+	"mcpx/internal/remotesession"
 )
 
-func TestCleanCoreCatalogReplacesP0PublicNames(t *testing.T) {
-	runtime := &Runtime{}
-	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
-	runtime.registerTools(protocol)
-	tools := runtime.listedToolMap()
-	for _, name := range []string{"session", "read", "edit", "observe"} {
-		if _, ok := tools[name]; !ok {
-			t.Fatalf("clean-core tool %q is not registered", name)
-		}
+func TestTooManyChangesResponseCarriesStructuredRecovery(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	workspace, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
 	}
-	for _, name := range []string{"workspace_read", "session_read", "source_read", "change", "change_read"} {
-		if _, ok := tools[name]; ok {
-			t.Fatalf("legacy P0 tool %q is still registered", name)
-		}
-	}
-
-	var sessionSchema map[string]any
-	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(tools["session"]), &sessionSchema); err != nil {
+	result, err := rt.editToolError(envelope.Request{RequestID: "req_too_many"}, remotesession.Session{
+		ID: "session-1", WorkspaceName: "demo", WorkspacePath: workspace.Path,
+	}, &edit.ApplyError{Code: "TOO_MANY_CHANGES", Path: "large.txt", ChangedLines: edit.MaxChangedLines + 1})
+	if err != nil {
 		t.Fatal(err)
 	}
-	sessionProperties := sessionSchema["properties"].(map[string]any)
-	if sessionProperties["remote_session_id"] == nil {
-		t.Fatalf("session must expose remote_session_id: %+v", sessionProperties)
+	response := decodeToolResult(t, result)
+	errorBody, _ := response["error"].(map[string]any)
+	if errorBody["category"] != "validation" || errorBody["retryable"] != true {
+		t.Fatalf("error classification=%+v", errorBody)
 	}
-	if _, exists := sessionProperties["handoff_token"]; exists {
-		t.Fatal("clean-core session must not expose handoff_token")
+	details, _ := errorBody["details"].(map[string]any)
+	recovery, _ := details["recovery"].(map[string]any)
+	if recovery["action"] != "split_edit" || recovery["max_changed_lines"] != float64(edit.MaxChangedLines) {
+		t.Fatalf("details recovery=%+v", details["recovery"])
 	}
-	actions := sessionProperties["action"].(map[string]any)["enum"].([]any)
-	if strings.Contains(strings.Join(anyStrings(actions), ","), "handoff") {
-		t.Fatalf("session action enum contains handoff: %v", actions)
+	next, _ := details["suggested_next"].(map[string]any)
+	if next["action"] != "split_edit" || next["max_changed_lines"] != float64(edit.MaxChangedLines) {
+		t.Fatalf("suggested next=%+v", next)
 	}
-
-	editTool := tools["edit"]
-	if editTool.Annotations == nil || editTool.Annotations.DestructiveHint == nil || !*editTool.Annotations.DestructiveHint || !editTool.Annotations.IdempotentHint {
-		t.Fatalf("edit annotations do not express destructive idempotent behavior: %+v", editTool.Annotations)
+	publicRecovery, _ := errorBody["recovery"].(map[string]any)
+	if publicRecovery["action"] != "split_edit" || publicRecovery["tool"] != "edit" {
+		t.Fatalf("public recovery=%+v", publicRecovery)
 	}
 }
 
@@ -334,6 +328,52 @@ func encodeUTF16ForServerTest(text string, order binary.ByteOrder) []byte {
 func digestForTest(content []byte) string {
 	sum := sha256.Sum256(content)
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func TestCleanEditApplyFalseNeverMutatesFilesystem(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	workspace, _ := rt.reg.Get("demo")
+	path := filepath.Join(workspace.Path, "dry-run.txt")
+	original := []byte("before\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
+	remoteID := opened["remote_session_id"].(string)
+	response := callEnvelope(t, rt.toolEdit, context.Background(), map[string]any{
+		"remote_session_id": remoteID,
+		"purpose":           "preview a change without applying it",
+		"apply":             false,
+		"edits": []any{map[string]any{
+			"path": "dry-run.txt", "operation": "update", "base_sha256": digestForTest(original),
+			"replacements": []any{map[string]any{"match": "before", "replacement": "after"}},
+		}},
+	})
+	if !statusOK(response) {
+		t.Fatalf("dry-run edit failed: %+v", response)
+	}
+	data, _ := response["data"].(map[string]any)
+	if data["apply"] != false || data["preview_only"] != true || data["edit_id"] != "" {
+		t.Fatalf("dry-run response indicates mutation: %+v", data)
+	}
+	actual, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(actual) != string(original) {
+		t.Fatalf("dry-run changed file: %q", actual)
+	}
+	deletePreview := callEnvelope(t, rt.toolEdit, context.Background(), map[string]any{
+		"remote_session_id": remoteID, "purpose": "ensure delete preview cannot mutate",
+		"apply": false,
+		"edits": []any{map[string]any{"path": "dry-run.txt", "operation": "delete", "base_sha256": digestForTest(original)}},
+	})
+	if statusOK(deletePreview) || errorCode(deletePreview) != "delete_use_remove" {
+		t.Fatalf("edit delete must route to remove_prepare: %+v", deletePreview)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("rejected delete preview changed file: %v", err)
+	}
 }
 
 func anyStrings(values []any) []string {

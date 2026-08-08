@@ -85,6 +85,68 @@ func TestToolLogRecordsDuration(t *testing.T) {
 	}
 }
 
+func TestInstrumentToolCarriesSemanticContextToARC(t *testing.T) {
+	handler := func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return mcpresult.NewStructured(map[string]any{"status": "succeeded"}, "ok"), nil
+	}
+	instrumented := (&Runtime{}).instrumentTool("observability_context", handler)
+	request := mcpresult.Request(map[string]any{
+		"goal":              "提升观测体验",
+		"purpose":           "验证 ARC 语义上下文",
+		"reasoning_summary": "先验证请求到结果的透传",
+		"progress_summary":  "工具调用已完成",
+		"next_step":         "检查终端渲染",
+		"plan_id":           "pl_context",
+		"task_id":           "pt_context",
+	})
+	result, err := instrumented(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	structured, ok := result.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("structuredContent=%T", result.StructuredContent)
+	}
+	semantic, ok := structured["context"].(map[string]any)
+	if !ok {
+		t.Fatalf("context=%#v", structured["context"])
+	}
+	for key, want := range map[string]string{
+		"goal": "提升观测体验", "purpose": "验证 ARC 语义上下文", "reasoning_summary": "先验证请求到结果的透传",
+		"progress_summary": "工具调用已完成", "next_step": "检查终端渲染", "plan_id": "pl_context", "task_id": "pt_context",
+	} {
+		if semantic[key] != want {
+			t.Fatalf("context[%q]=%v, want %q", key, semantic[key], want)
+		}
+	}
+	text := result.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, "Context:") || !strings.Contains(text, "next: 检查终端渲染") {
+		t.Fatalf("human ARC text=%q", text)
+	}
+}
+
+func TestCallToolSafelyConvertsHandlerPanic(t *testing.T) {
+	result, err := callToolSafely("panic_test", func() (*mcp.CallToolResult, error) {
+		panic("synthetic handler panic")
+	})
+	if err != nil {
+		t.Fatalf("panic should be converted to a tool result, got error: %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("panic result=%+v, want structured MCP tool error", result)
+	}
+	if len(result.Content) != 1 || result.Content[0].(*mcp.TextContent).Text != "EXECUTION_RUNTIME_ERROR: tool execution failed" {
+		t.Fatalf("panic result content=%+v", result.Content)
+	}
+
+	result, err = callToolSafely("recovery_test", func() (*mcp.CallToolResult, error) {
+		return mcpresult.NewText("alive"), nil
+	})
+	if err != nil || result == nil || result.IsError {
+		t.Fatalf("safe call did not remain usable after panic: result=%+v err=%v", result, err)
+	}
+}
+
 func TestStartupSkillDetailsUseDebugAndInfoOnlyCounts(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo", "fyy", "codex")
 	skillRoot := t.TempDir()

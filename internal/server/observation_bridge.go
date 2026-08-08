@@ -36,26 +36,33 @@ type observationTaskStreamKey struct {
 // observationBridge is the single write boundary for the workspace observer.
 // Store.Append always happens before Broker.Publish so a live observer can
 // recover every event from SQLite after a disconnect or buffer overflow.
-// Tool start/complete events are enqueued on async so tools/call is not blocked.
+// Tool lifecycle and task output events are enqueued on async so tools/call and
+// the command pipe copy path are not blocked by SQLite latency.
 type observationBridge struct {
 	store           *observation.Store
 	broker          *observation.Broker
 	async           *observation.AsyncRecorder
 	resolve         func(context.Context, envelope.Request) (string, string)
+	recordMu        sync.Mutex
 	outputStateMu   sync.Mutex
 	outputSanitizer map[observationTaskStreamKey]*observation.TextStreamSanitizer
 }
 
 func (b *observationBridge) Record(ctx context.Context, event observation.Event) error {
-	if b == nil || b.broker == nil {
+	if b == nil {
 		return nil
 	}
-	_ = ctx
 	event.Workspace = strings.TrimSpace(event.Workspace)
+	event.CallID = strings.TrimSpace(event.CallID)
 	event.Intent = observation.SanitizeIntent(event.Intent)
+	event.Goal = observation.SanitizeIntent(event.Goal)
 	event.Purpose = observation.SanitizeIntent(event.Purpose)
+	event.ReasoningSummary = observation.SanitizeIntent(event.ReasoningSummary)
 	event.Summary, _ = observation.SanitizeText(event.Summary, observationSummaryMaxBytes)
 	event.ProgressSummary, _ = observation.SanitizeText(event.ProgressSummary, observationSummaryMaxBytes)
+	event.NextStep = observation.SanitizeIntent(event.NextStep)
+	event.PlanID = observation.SanitizeIntent(event.PlanID)
+	event.TaskID = observation.SanitizeIntent(event.TaskID)
 	if len(event.Input) > 0 {
 		var truncated bool
 		event.Input, truncated = observation.SanitizeJSON(event.Input, observation.MaxEventBytes)
@@ -70,30 +77,23 @@ func (b *observationBridge) Record(ctx context.Context, event observation.Event)
 		event.CreatedAt = time.Now().UTC()
 	}
 
-	// Live observers must never freeze when durable write is slow/fails.
-	// Publish first so `mcpx-server workspace` keeps moving; persist best-effort.
-	live := event
-	if live.Sequence == 0 {
-		live.Sequence = -time.Now().UnixNano()
-		if live.EventID == "" {
-			live.EventID = fmt.Sprintf("live-%d", -live.Sequence)
-		}
-	}
-	b.broker.Publish(live)
-
 	if b.store == nil {
 		return nil
 	}
-	writeCtx, cancel := context.WithTimeout(context.Background(), observationWriteTimeout)
+	// Keep append and publish in one critical section. Without this, two
+	// direct producers could append sequence 1/2 and publish 2 before 1,
+	// causing a socket client to discard the late sequence 1 as stale.
+	b.recordMu.Lock()
+	defer b.recordMu.Unlock()
+	writeCtx, cancel := context.WithTimeout(observationContext(ctx), observationWriteTimeout)
 	defer cancel()
 	persisted, err := b.store.Append(writeCtx, event)
 	if err != nil {
 		logging.With("component", "workspace_observer").Error("persist event failed",
 			"workspace", event.Workspace, "type", event.Type, "tool", event.Tool, "err", err)
-		// Soft-fail: live stream already published.
 		return nil
 	}
-	if persisted.Sequence > 0 && persisted.Sequence != live.Sequence {
+	if b.broker != nil && persisted.Sequence > 0 {
 		b.broker.Publish(persisted)
 	}
 	return nil
@@ -124,6 +124,19 @@ func (b *observationBridge) enqueueOrRecord(ctx context.Context, event observati
 	return b.Record(ctx, event)
 }
 
+func observationCallID(req envelope.Request) string {
+	return firstNonEmptyObservationID(req.CallID, req.RequestID)
+}
+
+func firstNonEmptyObservationID(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func (b *observationBridge) RecordToolStarted(ctx context.Context, name string, req envelope.Request, args map[string]any) error {
 	workspace, remoteID := b.target(ctx, req)
 	input, truncated := observation.NormalizeToolInput(args, observation.MaxEventBytes)
@@ -131,15 +144,22 @@ func (b *observationBridge) RecordToolStarted(ctx context.Context, name string, 
 		Workspace:         workspace,
 		RemoteSessionID:   remoteID,
 		RequestID:         req.RequestID,
+		CallID:            observationCallID(req),
 		OperationID:       req.OperationID,
 		ParentOperationID: req.ParentOperationID,
 		StepID:            req.StepID,
 		Tool:              name,
 		Type:              observation.TypeToolStarted,
+		Phase:             observation.PhaseActionStarted,
 		Status:            "started",
-		Purpose:           req.Intent,
+		Goal:              req.Goal,
+		Purpose:           firstSemanticPurpose(req),
 		Intent:            req.Intent,
+		ReasoningSummary:  req.ReasoningSummary,
 		ProgressSummary:   req.ProgressSummary,
+		NextStep:          req.NextStep,
+		PlanID:            req.PlanID,
+		TaskID:            req.TaskID,
 		Input:             input,
 		Truncated:         truncated,
 	})
@@ -165,9 +185,14 @@ func (b *observationBridge) RecordToolCompleted(ctx context.Context, name string
 	snap := observation.HumanObsSnapshot{
 		Tool:             name,
 		Status:           status,
-		Purpose:          req.Intent,
+		Goal:             req.Goal,
+		Purpose:          firstSemanticPurpose(req),
 		Intent:           req.Intent,
+		ReasoningSummary: req.ReasoningSummary,
 		ProgressSummary:  req.ProgressSummary,
+		NextStep:         req.NextStep,
+		PlanID:           req.PlanID,
+		TaskID:           req.TaskID,
 		Summary:          summary,
 		Command:          facts.Command,
 		WorkingDirectory: facts.WorkingDirectory,
@@ -183,15 +208,21 @@ func (b *observationBridge) RecordToolCompleted(ctx context.Context, name string
 		Workspace:         workspace,
 		RemoteSessionID:   remoteID,
 		RequestID:         req.RequestID,
+		CallID:            observationCallID(req),
 		OperationID:       req.OperationID,
 		ParentOperationID: req.ParentOperationID,
 		StepID:            req.StepID,
 		Tool:              name,
 		Type:              observation.TypeToolCompleted,
 		Status:            status,
-		Purpose:           req.Intent,
+		Goal:              req.Goal,
+		Purpose:           firstSemanticPurpose(req),
 		Intent:            req.Intent,
+		ReasoningSummary:  req.ReasoningSummary,
 		ProgressSummary:   req.ProgressSummary,
+		NextStep:          req.NextStep,
+		PlanID:            req.PlanID,
+		TaskID:            req.TaskID,
 		Input:             input,
 		Output:            output,
 		Summary:           fmt.Sprintf("%s %s", name, status),
@@ -363,6 +394,7 @@ func (r *Runtime) observeOperationEvent(event operation.Event) {
 		Workspace:         event.WorkspaceName,
 		RemoteSessionID:   event.RemoteSessionID,
 		RequestID:         event.RequestID,
+		CallID:            firstNonEmptyObservationID(event.RequestID),
 		OperationID:       event.OperationID,
 		ParentOperationID: parentOperationID,
 		StepID:            event.StepID,
@@ -385,17 +417,25 @@ func (r *Runtime) observeAppliedChangeset(ctx context.Context, req envelope.Requ
 	}
 	bounded, truncated := observation.SanitizeJSON(encoded, observation.MaxEventBytes)
 	_ = r.observation.Record(ctx, observation.Event{
-		Workspace:       session.WorkspaceName,
-		RemoteSessionID: session.ID,
-		RequestID:       req.RequestID,
-		OperationID:     item.ID,
-		Type:            observation.TypeFileChanged,
-		Status:          "succeeded",
-		Intent:          req.Intent,
-		Output:          bounded,
-		Summary:         item.Summary,
-		ResourceURI:     fmt.Sprintf("mcpx://remote-sessions/%s/changesets/%s/diff", session.ID, item.ID),
-		Truncated:       truncated,
+		Workspace:        session.WorkspaceName,
+		RemoteSessionID:  session.ID,
+		RequestID:        req.RequestID,
+		CallID:           observationCallID(req),
+		OperationID:      item.ID,
+		Type:             observation.TypeFileChanged,
+		Status:           "succeeded",
+		Goal:             req.Goal,
+		Purpose:          firstSemanticPurpose(req),
+		Intent:           req.Intent,
+		ReasoningSummary: req.ReasoningSummary,
+		ProgressSummary:  req.ProgressSummary,
+		NextStep:         req.NextStep,
+		PlanID:           req.PlanID,
+		TaskID:           req.TaskID,
+		Output:           bounded,
+		Summary:          item.Summary,
+		ResourceURI:      fmt.Sprintf("mcpx://remote-sessions/%s/changesets/%s/diff", session.ID, item.ID),
+		Truncated:        truncated,
 	})
 }
 
@@ -415,13 +455,15 @@ func (r *Runtime) observeTaskOutput(chunk terminal.OutputChunk) {
 		encoded = []byte(`{"text":"[UNAVAILABLE]","bytes":0}`)
 		truncated = true
 	}
-	_ = r.observation.Record(context.Background(), observation.Event{
+	_ = r.observation.enqueueOrRecord(context.Background(), observation.Event{
 		Workspace:        chunk.WorkspaceName,
 		RemoteSessionID:  chunk.RemoteSessionID,
 		RequestID:        chunk.RequestID,
+		CallID:           firstNonEmptyObservationID(chunk.CallID, chunk.RequestID),
 		OperationID:      chunk.TaskID,
 		Tool:             chunk.Tool,
 		Type:             observation.TypeCommandOutput,
+		Phase:            observation.PhaseOutput,
 		Status:           "running",
 		Command:          chunk.Command,
 		WorkingDirectory: chunk.WorkDir,

@@ -36,9 +36,15 @@ type Request struct {
 	OperationID       string         `json:"-"`
 	ParentOperationID string         `json:"-"`
 	StepID            string         `json:"-"`
+	Goal              string         `json:"goal,omitempty"`
 	Purpose           string         `json:"purpose,omitempty"`
 	Intent            string         `json:"intent,omitempty"`
+	ReasoningSummary  string         `json:"reasoning_summary,omitempty"`
 	ProgressSummary   string         `json:"progress_summary,omitempty"`
+	NextStep          string         `json:"next_step,omitempty"`
+	PlanID            string         `json:"plan_id,omitempty"`
+	TaskID            string         `json:"task_id,omitempty"`
+	CallID            string         `json:"call_id,omitempty"`
 	RemoteSessionID   string         `json:"remote_session_id,omitempty"`
 	Workspace         string         `json:"workspace,omitempty"`
 	StartedAtMs       int64          `json:"-"`
@@ -222,8 +228,14 @@ func Fail(status Status, requestID, workspace string, data any, code, msg string
 	code = strings.ToUpper(code)
 	category, retryable, hint := classifyError(status, code)
 	details := map[string]any{}
+	if status == StatusNeedConfirmation && usesBooleanConfirmation(data) {
+		hint = "Ask the user for explicit confirmation, then retry the original tool with the same business arguments and user_confirmed=true."
+	}
 	if hint != "" {
 		details["retry_hint"] = hint
+	}
+	if exitCode, ok := exitCodeFromData(data, 0); ok {
+		details["exit_code"] = exitCode
 	}
 	return Response{
 		OK:        false,
@@ -237,18 +249,62 @@ func Fail(status Status, requestID, workspace string, data any, code, msg string
 	}
 }
 
+func usesBooleanConfirmation(data any) bool {
+	value, ok := data.(map[string]any)
+	if !ok || value["user_confirmed_required"] != true {
+		return false
+	}
+	_, hasToken := value["confirmation_token"]
+	return !hasToken
+}
+
 func classifyError(status Status, code string) (category string, retryable bool, retryHint string) {
+	if code == "CONFIRMATION_REQUIRED" {
+		return "confirmation", true, "Ask the user to confirm the frozen manifest in the web conversation, then retry submit_remove with the confirmation_uuid returned by remove_prepare."
+	}
+	if code == "CONFIRMATION_MISMATCH" {
+		return "conflict", false, "Use the confirmation_uuid returned by remove_prepare for this delete request; do not create a new UUID."
+	}
 	if status == StatusNeedConfirmation || strings.Contains(code, "CONFIRMATION") {
 		return "confirmation", true, "Ask the user for explicit confirmation, then retry the original tool with the same business arguments and confirmation_token."
 	}
 	if strings.Contains(code, "UNAUTHORIZED") || strings.Contains(code, "FORBIDDEN") || strings.Contains(code, "DENIED") || strings.Contains(code, "SECRET") {
 		return "permission", false, "Request the required permission or provide the required secret."
 	}
+	switch code {
+	case "COMMAND_NOT_FOUND":
+		return "execution", false, "Check the executable name and the workspace toolchain, then retry with a command that exists."
+	case "PROCESS_EXIT", "COMMAND_FAILED":
+		return "execution", false, "Inspect exit_code, stdout and stderr; correct the command or its inputs before retrying."
+	case "OPERATION_FAILED":
+		return "execution", false, "Inspect the failed operation step and its result before deciding whether to retry."
+	}
 	if strings.Contains(code, "NOT_FOUND") || strings.Contains(code, "WORKSPACE_NOT_FOUND") {
 		return "not_found", false, "Check the identifier and refresh the relevant list."
 	}
-	if strings.Contains(code, "STALE") || strings.Contains(code, "CONFLICT") || strings.Contains(code, "VERSION") || strings.Contains(code, "PATCH_CONTEXT") || strings.Contains(code, "PATCH_HUNKS") || strings.Contains(code, "PATCH_APPLY") || strings.Contains(code, "ROLLBACK") {
+	if code == "SYMLINK_NOT_ALLOWED" || code == "DELETE_FILE_ONLY" || code == "DELETE_DIRECTORY_ONLY" || code == "PATH_ESCAPE" || code == "PATH_STAT_FAILED" || code == "FILE_READ_FAILED" || code == "DIRECTORY_READ_FAILED" || code == "WORKSPACE_MISMATCH" || code == "DELETE_USE_REMOVE" {
+		return "validation", false, "Correct the explicit Workspace target and retry; removal never follows symlinks or accepts shell paths."
+	}
+	if strings.Contains(code, "STALE") || strings.Contains(code, "CONFLICT") || strings.Contains(code, "VERSION") || strings.Contains(code, "PATCH_CONTEXT") || strings.Contains(code, "PATCH_HUNKS") || strings.Contains(code, "PATCH_APPLY") || strings.Contains(code, "ROLLBACK") || code == "DIRECTORY_CHANGED" {
 		return "conflict", true, "Read the current revision and regenerate the operation."
+	}
+	if code == "TOO_MANY_CHANGES" {
+		return "validation", true, "Split the edit into smaller batches and retry; keep total changed lines within the request limit."
+	}
+	if code == "LIMIT_EXCEEDED" {
+		return "validation", false, "Reduce the request to the advertised limit and retry."
+	}
+	if code == "DELETE_IN_PROGRESS" {
+		return "runtime", true, "Wait for the current submit_remove request, then retry with the same idempotency key."
+	}
+	if code == "FILE_TOO_LARGE" {
+		return "capacity", false, "Use a bounded window read, or reduce the requested full-read source size."
+	}
+	if code == "DELETE_REQUEST_EXPIRED" || code == "DELETE_MANIFEST_MISMATCH" {
+		return "validation", false, "Prepare a new removal manifest and ask the web user to confirm it again."
+	}
+	if code == "DELETE_FAILED" || code == "DELETE_STATE_IN_DOUBT" || code == "DELETE_STORE_ERROR" {
+		return "runtime", true, "Inspect the durable removal request and audit event before retrying."
 	}
 	if strings.Contains(code, "INVALID") || strings.Contains(code, "BAD_REQUEST") || strings.Contains(code, "VALIDATION") || strings.Contains(code, "UNSUPPORTED") || strings.Contains(code, "REQUIRED") || strings.Contains(code, "AMBIGUOUS") {
 		return "validation", false, "Correct the request arguments and retry."
@@ -257,6 +313,46 @@ func classifyError(status Status, code string) (category string, retryable bool,
 		return "runtime", true, "Retry when the runtime is available or inspect the Task logs."
 	}
 	return "internal", false, "Inspect the server log and retry with a new request id if appropriate."
+}
+
+// exitCodeFromData extracts an execution exit code from a response payload so
+// errors remain actionable even when a failed command is wrapped by an async
+// operation result.
+func exitCodeFromData(value any, depth int) (int, bool) {
+	if depth > 8 || value == nil {
+		return 0, false
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		if raw, exists := typed["exit_code"]; exists {
+			switch code := raw.(type) {
+			case int:
+				return code, true
+			case int8:
+				return int(code), true
+			case int16:
+				return int(code), true
+			case int32:
+				return int(code), true
+			case int64:
+				return int(code), true
+			case float64:
+				return int(code), true
+			}
+		}
+		for _, child := range typed {
+			if code, ok := exitCodeFromData(child, depth+1); ok {
+				return code, true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if code, ok := exitCodeFromData(child, depth+1); ok {
+				return code, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // EnsureRequestID returns id if non-empty, otherwise generates one.
@@ -290,6 +386,13 @@ func ParseRequest(raw json.RawMessage) (Request, error) {
 	if strings.TrimSpace(req.Purpose) != "" {
 		req.Intent = req.Purpose
 	}
+	req.Goal = strings.TrimSpace(req.Goal)
+	req.Purpose = strings.TrimSpace(req.Purpose)
+	req.ReasoningSummary = strings.TrimSpace(req.ReasoningSummary)
+	req.ProgressSummary = strings.TrimSpace(req.ProgressSummary)
+	req.NextStep = strings.TrimSpace(req.NextStep)
+	req.PlanID = strings.TrimSpace(req.PlanID)
+	req.TaskID = strings.TrimSpace(req.TaskID)
 	// Runtime metadata is deliberately discarded from the business payload.
 	// The server repopulates it from Gateway Runtime Context after parsing.
 	for key := range req.Payload {
@@ -308,8 +411,11 @@ func ParseRequest(raw json.RawMessage) (Request, error) {
 			req.RemoteSessionID = strings.TrimSpace(sessionID)
 		}
 	}
+	if req.CallID == "" {
+		req.CallID = firstStringValue(flat, "call_id", "callId")
+	}
 	for key, value := range flat {
-		if key == "purpose" || key == "intent" || key == "progress_summary" || key == "session_id" || key == "remote_session_id" || key == "workspace" || key == "payload" || key == "execution_mode" || isRuntimeField(key) {
+		if key == "purpose" || key == "intent" || key == "reasoning_summary" || key == "progress_summary" || key == "call_id" || key == "callId" || key == "session_id" || key == "remote_session_id" || key == "workspace" || key == "payload" || key == "execution_mode" || isRuntimeField(key) {
 			continue
 		}
 		if _, exists := req.Payload[key]; !exists {
@@ -320,6 +426,15 @@ func ParseRequest(raw json.RawMessage) (Request, error) {
 	req.OperationID = "op_" + strings.TrimPrefix(req.RequestID, "req_")
 	req.StartedAtMs = 0
 	return req, nil
+}
+
+func firstStringValue(values map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := values[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func isRuntimeField(key string) bool {

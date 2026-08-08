@@ -2,13 +2,25 @@ package observation
 
 import (
 	"bytes"
+	"strconv"
 	"strings"
 	"testing"
 )
 
 func TestActionColorUsesToolAndErrorOverride(t *testing.T) {
-	if got := actionColor("command_execute", false); got != ansiAmber {
-		t.Fatalf("command color=%q", got)
+	for _, test := range []struct {
+		tool  string
+		color string
+	}{
+		{tool: "execute", color: ansiAmber},
+		{tool: "read", color: ansiCyan},
+		{tool: "edit", color: ansiGreen},
+		{tool: "plan", color: ansiYellow},
+		{tool: "session", color: ansiMagenta},
+	} {
+		if got := actionColor(test.tool, false); got != test.color {
+			t.Fatalf("%s color=%q, want %q", test.tool, got, test.color)
+		}
 	}
 	if got := actionColor("file_read", true); got != ansiRed {
 		t.Fatalf("error color=%q", got)
@@ -394,7 +406,7 @@ func TestRenderTextShowsExecutedCommandAndProgressSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"• Ran go test ./internal/...", "↳ 已读取配置，下一步运行单元测试", "↳ Command completed with exit code 0."} {
+	for _, want := range []string{"• Ran go test ./internal/...", "↳ progress: 已读取配置，下一步运行单元测试", "↳ Command completed with exit code 0."} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("command rendering missing %q: %s", want, text)
 		}
@@ -430,13 +442,45 @@ func TestRenderTextShowsMarkdownFileDiff(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"• Edited auth.go", "↳ auth.go (update) +1 -1", "    | --- a/auth.go", "    | +++ b/auth.go", "    | @@", "  1 | -old", "  1 | +new"} {
+	for _, want := range []string{"• Edited auth.go [-1,+1]", "  1 | -old", "  1 | +new"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("file diff rendering missing %q: %q", want, text)
 		}
 	}
+	if strings.Count(text, "auth.go") != 1 || strings.Contains(text, "--- a/auth.go") || strings.Contains(text, "@@") {
+		t.Fatalf("file diff should show one path without unified headers: %q", text)
+	}
 	if strings.Contains(text, "mcpx://changeset") || strings.Contains(text, "```diff") || strings.Contains(text, "status=") {
 		t.Fatalf("file diff rendering=%q", text)
+	}
+}
+
+func TestRenderTextShowsCleanEditResultsDiff(t *testing.T) {
+	var output bytes.Buffer
+	err := RenderText(&output, Event{
+		Tool:    "edit",
+		Type:    TypeFileChanged,
+		Summary: "edit 3 files, 3 changed lines",
+		Output: []byte(`{"edit_id":"edit_clean_1","results":[
+{"path":"created.txt","operation":"create","diff":"--- /dev/null\n+++ b/created.txt\n@@ -0,0 +1 @@\n+created\n"},
+{"path":"updated.txt","operation":"update","diff":"--- a/updated.txt\n+++ b/updated.txt\n@@ -1 +1 @@\n-old\n+new\n"},
+{"path":"deleted.txt","operation":"delete","diff":"--- a/deleted.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\n"}
+]}`),
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{"created.txt (create)", "updated.txt (update)", "deleted.txt (delete)", "  1 | +created", "  1 | -old", "  1 | -gone"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("clean edit diff missing %q: %q", want, text)
+		}
+	}
+	if strings.Contains(text, "file details unavailable") {
+		t.Fatalf("clean edit fell back to unavailable details: %q", text)
+	}
+	if strings.Contains(text, "--- ") || strings.Contains(text, "+++ ") || strings.Contains(text, "@@") {
+		t.Fatalf("clean edit leaked unified headers: %q", text)
 	}
 }
 
@@ -449,8 +493,28 @@ func TestRenderTextTruncatesLargeFileDiff(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	if !strings.Contains(text, "• Edited large.go") || !strings.Contains(text, "  5 | +line-5") {
+	if !strings.Contains(text, "• Edited large.go [-5,+5]") || !strings.Contains(text, "  5 | +line-5") {
 		t.Fatalf("large diff rendering: %s", text)
+	}
+}
+
+func TestRenderFileChangedKeepsFiveContextLinesAndDropsHeaders(t *testing.T) {
+	diff := "--- a/context.go\n+++ b/context.go\n@@ -1,13 +1,13 @@\n" +
+		" before-1\n before-2\n before-3\n before-4\n before-5\n before-6\n" +
+		"-old\n+new\n" +
+		" after-1\n after-2\n after-3\n after-4\n after-5\n after-6\n"
+	var output bytes.Buffer
+	if err := RenderText(&output, Event{Type: TypeFileChanged, Output: []byte(`{"files":[{"path":"context.go","operation":"update","diff":` + strconv.Quote(diff) + `}]}`)}, false); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	if strings.Contains(text, "before-1") || strings.Contains(text, "after-6") || strings.Contains(text, "--- ") || strings.Contains(text, "@@") {
+		t.Fatalf("diff context window/header rendering=%q", text)
+	}
+	for _, want := range []string{"before-2", "before-6", "old", "new", "after-1", "after-5"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("diff context missing %q: %q", want, text)
+		}
 	}
 }
 
@@ -460,7 +524,7 @@ func TestRenderFileChangedSupportsSummaryAndPreviewModes(t *testing.T) {
 	if err := renderFileChanged(&summary, Event{Type: TypeFileChanged, Output: payload}, renderOptions{diffMode: DiffModeSummary}); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(summary.String(), "-old") || strings.Contains(summary.String(), "+new") || !strings.Contains(summary.String(), "+1 -1") {
+	if strings.Contains(summary.String(), "-old") || strings.Contains(summary.String(), "+new") || !strings.Contains(summary.String(), "Edited demo.go [-1,+1]") {
 		t.Fatalf("summary diff=%q", summary.String())
 	}
 

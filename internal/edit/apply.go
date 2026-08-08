@@ -58,6 +58,10 @@ func ApplyBatchWithHook(req BatchRequest, beforeWrite func(BatchResult) error) (
 		if path == "" {
 			return BatchResult{}, &ApplyError{Code: "INVALID_INPUT", Message: "path required", Index: fileIndex, Err: ErrInvalidInput}
 		}
+		lexical, lexicalErr := file.LexicalPath(req.WorkspaceRoot, path)
+		if lexicalErr != nil {
+			return BatchResult{}, &ApplyError{Code: "INVALID_PATH", Message: lexicalErr.Error(), Path: path, Index: fileIndex, Err: lexicalErr}
+		}
 		abs, err := file.Resolve(req.WorkspaceRoot, path)
 		if err != nil {
 			return BatchResult{}, &ApplyError{Code: "INVALID_PATH", Message: err.Error(), Path: path, Index: fileIndex, Err: err}
@@ -116,6 +120,16 @@ func ApplyBatchWithHook(req BatchRequest, beforeWrite func(BatchResult) error) (
 			p.newHash = hashBytes(p.proposed)
 
 		case OpDelete:
+			linkInfo, linkErr := os.Lstat(lexical)
+			if linkErr != nil {
+				return BatchResult{}, &ApplyError{Code: "NOT_FOUND", Message: linkErr.Error(), Path: path, Index: fileIndex, Err: linkErr}
+			}
+			if linkInfo.Mode()&os.ModeSymlink != 0 {
+				return BatchResult{}, &ApplyError{Code: "SYMLINK_NOT_ALLOWED", Message: "symlink deletion is not allowed", Path: path, Index: fileIndex}
+			}
+			if !linkInfo.Mode().IsRegular() {
+				return BatchResult{}, &ApplyError{Code: "DELETE_FILE_ONLY", Message: "clean edit delete accepts regular files only", Path: path, Index: fileIndex}
+			}
 			original, mode, err := readFile(abs)
 			if err != nil {
 				return BatchResult{}, &ApplyError{Code: "NOT_FOUND", Message: err.Error(), Path: path, Index: fileIndex, Err: err}
@@ -221,6 +235,9 @@ func ApplyBatchWithHook(req BatchRequest, beforeWrite func(BatchResult) error) (
 		TotalChangedLines: totalChanged,
 		DiffSummary:       strings.Join(diffParts, "\n"),
 	}
+	if req.DryRun {
+		return batchResult, nil
+	}
 	if beforeWrite != nil {
 		if err := beforeWrite(batchResult); err != nil {
 			return BatchResult{}, err
@@ -229,6 +246,20 @@ func ApplyBatchWithHook(req BatchRequest, beforeWrite func(BatchResult) error) (
 
 	// Apply writes only after all validation, line counting, and durable
 	// pre-write hooks have completed.
+	var deleteRoot *os.Root
+	for _, p := range preparedList {
+		if p.edit.Operation == OpDelete {
+			var openErr error
+			deleteRoot, openErr = os.OpenRoot(req.WorkspaceRoot)
+			if openErr != nil {
+				return BatchResult{}, openErr
+			}
+			break
+		}
+	}
+	if deleteRoot != nil {
+		defer deleteRoot.Close()
+	}
 	for _, p := range preparedList {
 		switch p.edit.Operation {
 		case OpCreate, OpUpdate:
@@ -236,7 +267,7 @@ func ApplyBatchWithHook(req BatchRequest, beforeWrite func(BatchResult) error) (
 				return BatchResult{}, err
 			}
 		case OpDelete:
-			if err := os.Remove(p.absPath); err != nil {
+			if err := deleteRoot.Remove(p.edit.Path); err != nil {
 				return BatchResult{}, err
 			}
 		case OpRename:

@@ -127,6 +127,8 @@ type toolAnnotation struct {
 	Destructive bool
 	Idempotent  bool
 	OpenWorld   bool
+	Title       string
+	Meta        mcp.Meta
 }
 
 var (
@@ -147,6 +149,13 @@ func annotatedTool(tool mcp.Tool, annotation toolAnnotation) mcp.Tool {
 		DestructiveHint: &dest,
 		IdempotentHint:  annotation.Idempotent,
 		OpenWorldHint:   &open,
+		Title:           annotation.Title,
+	}
+	if annotation.Title != "" {
+		tool.Title = annotation.Title
+	}
+	if annotation.Meta != nil {
+		tool.Meta = annotation.Meta
 	}
 	return tool
 }
@@ -224,6 +233,15 @@ func cleanActionTool(name, description string, common map[string]any, branches m
 		if branch.Description == "" {
 			branch.Description = "仅执行「" + action + "」操作；失败时按返回的 next_action 继续。"
 		}
+		// JSON Schema evaluates additionalProperties against the object schema
+		// where it is declared. Keep every branch field in the root property set
+		// as well as in the selected branch; otherwise strict client validators
+		// reject valid branch arguments before oneOf is evaluated.
+		for key, value := range branch.Properties {
+			if _, exists := rootProperties[key]; !exists {
+				rootProperties[key] = value
+			}
+		}
 		properties := map[string]any{"action": map[string]any{"const": action}}
 		for key, value := range common {
 			properties[key] = value
@@ -241,9 +259,14 @@ func cleanActionTool(name, description string, common map[string]any, branches m
 			"additionalProperties": false,
 		})
 	}
+	// Keep the root object open for clients that validate object properties
+	// before evaluating oneOf. Each selected branch remains strict and carries
+	// the common fields plus its own fields, so the action contract is still
+	// enforced by validators that implement oneOf correctly. An open root is
+	// required for connectors that flatten or pre-validate discriminated unions.
 	raw, _ := json.Marshal(map[string]any{
 		"type": "object", "description": description, "properties": rootProperties,
-		"required": []string{"action"}, "additionalProperties": false, "oneOf": oneOf,
+		"required": []string{"action"}, "oneOf": oneOf,
 	})
 	return annotatedTool(mcp.Tool{Name: name, Description: description, InputSchema: json.RawMessage(raw)}, annotation)
 }
@@ -455,6 +478,7 @@ func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server, cleanCore bool
 		},
 		"required": []string{"id", "tool", "arguments"},
 	}, "带依赖关系的公开工具操作")
+	operationSteps["maxItems"] = operation.MaxSteps
 	r.addTool(s, supportTool("operation_batch", toolDesc["operation_batch"], map[string]any{
 		"remote_session_id": remoteSession, "operations": operationSteps, "purpose": stringSchema("本次调用的目的；必须由用户明确提供"),
 	}, []string{"remote_session_id", "purpose", "operations"}, mutatingToolAnnotation), r.toolOperationBatch)
@@ -622,7 +646,7 @@ func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server, cleanCore bool
 			"idempotency_key": stringSchema("同一执行请求重试时复用的幂等键"),
 			"scope":           enumSchema("执行范围", "workspace"), "yield_time_ms": numberSchema("等待时长"),
 			"user_confirmed": booleanSchema("用户已确认同一命令；服务端仍会校验待确认摘要"),
-			"execution_mode": enumSchema("执行模式", "sync", "async"),
+			"execution_mode": enumSchema("async 只表示 Operation 异步调度；是否返回 Task ID 由命令是否超过 yield_time_ms 决定", "sync", "async"),
 		}
 		executeBranches := map[string]actionSchemaBranch{
 			"run": {Description: "执行 command 或项目 task；短命令同步返回，长命令返回 task_id。", Properties: map[string]any{

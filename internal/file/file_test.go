@@ -38,6 +38,36 @@ func TestResolveRejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestLexicalPathPreservesFinalSymlink(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target.txt")
+	link := filepath.Join(root, "link.txt")
+	if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("target.txt", link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	lexical, err := LexicalPath(root, "link.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(lexical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("lexical path followed symlink: %s", lexical)
+	}
+	resolved, err := Resolve(root, "link.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved == lexical {
+		t.Fatalf("Resolve should follow existing symlink: %s", resolved)
+	}
+}
+
 func TestReadAndPatch(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "f.txt")

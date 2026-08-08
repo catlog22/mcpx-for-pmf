@@ -167,7 +167,7 @@ func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Reques
 	if originTool == "" {
 		originTool = "command_execute"
 	}
-	task, err := r.tasks.StartRemoteWithObservation(ctx, envReq.RequestID, originTool, remote.ID, remote.WorkspaceName, remote.WorkspacePath, command)
+	task, err := r.tasks.StartRemoteWithObservationContext(ctx, envReq.RequestID, observationCallID(envReq), originTool, remote.ID, remote.WorkspaceName, remote.WorkspacePath, command)
 	if err != nil {
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "start_error", err.Error())
 	}
@@ -189,7 +189,9 @@ func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Reques
 		detail := commandExecutionDetail(purpose, scope, commandDigest)
 		detail["exit_code"] = data["exit_code"]
 		if exitCode, ok := data["exit_code"].(int); ok && exitCode != 0 {
-			response := envelope.Fail(envelope.StatusError, envReq.RequestID, remote.WorkspaceName, data, "COMMAND_FAILED", fmt.Sprintf("命令退出码为 %d", exitCode))
+			stderr, _ := data["stderr"].(string)
+			code := commandFailureCode(exitCode, stderr)
+			response := envelope.Fail(envelope.StatusError, envReq.RequestID, remote.WorkspaceName, data, code, commandFailureMessage(code, exitCode))
 			response.RemoteSessionID = remote.ID
 			return r.resultJSON(response)
 		}
@@ -283,6 +285,23 @@ func commandIntent(req envelope.Request) (purpose, scope string, err error) {
 		return "", "", fmt.Errorf("unsupported execution scope %q; only workspace is allowed", scope)
 	}
 	return purpose, scope, nil
+}
+
+func commandFailureCode(exitCode int, stderr string) string {
+	if exitCode == 127 {
+		lower := strings.ToLower(stderr)
+		if strings.Contains(lower, "command not found") || strings.Contains(lower, "no such file or directory") {
+			return "COMMAND_NOT_FOUND"
+		}
+	}
+	return "PROCESS_EXIT"
+}
+
+func commandFailureMessage(code string, exitCode int) string {
+	if code == "COMMAND_NOT_FOUND" {
+		return fmt.Sprintf("command executable was not found (exit code %d)", exitCode)
+	}
+	return fmt.Sprintf("command exited with code %d", exitCode)
 }
 
 func commandRequestDigest(requestID, remoteSessionID, workspace, command, purpose, scope string) string {

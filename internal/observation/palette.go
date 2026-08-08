@@ -2,6 +2,7 @@ package observation
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -47,20 +48,22 @@ func actionColor(tool string, failed bool) string {
 		return ansiRed
 	}
 	switch strings.ToLower(strings.TrimSpace(tool)) {
-	case "command_execute", "command_run":
+	case "execute", "command_execute", "command_run":
 		return ansiAmber
-	case "context_query", "source_read":
+	case "read", "context_query", "source_read", "discover", "skill_call":
 		return ansiCyan
 	case "file_read":
 		return ansiBlue
-	case "change_read":
-		return ansiCyan
-	case "change_prepare":
-		return ansiYellow
-	case "change_execute", "change_apply", "change_revert", "file.changed":
+	case "edit", "change_execute", "change_apply", "change_revert", "file.changed":
 		return ansiGreen
-	case "session_open", "workspace_list", "session.lifecycle":
+	case "observe", "change_read", "runtime_read":
+		return ansiCyan
+	case "plan", "change_prepare":
+		return ansiYellow
+	case "session", "session_open", "workspace_list", "session.lifecycle", "mcp_call":
 		return ansiMagenta
+	case "artifact":
+		return ansiBlue
 	case "progress_report", "observer.notice":
 		return ansiGray
 	default:
@@ -100,6 +103,28 @@ func eventActionColor(event Event, fallback string) string {
 		}
 		return actionColor(event.toolOrType(), false)
 	}
+}
+
+func operationSeparatorLabel(event Event) string {
+	label := strings.TrimSpace(event.toolOrType())
+	if label == "" {
+		label = "operation"
+	}
+	label = strings.ReplaceAll(label, "_", " ")
+	status := eventStatus(event)
+	if status == "" && event.Type == TypeToolStarted {
+		status = "started"
+	}
+	if status != "" {
+		label += " · " + strings.ReplaceAll(status, "_", " ")
+	}
+	if operationID := strings.TrimSpace(event.OperationID); operationID != "" {
+		label += " · operation=" + operationID
+	}
+	if event.DurationMs > 0 {
+		label += fmt.Sprintf(" · duration=%dms", event.DurationMs)
+	}
+	return label
 }
 
 func eventMarker(event Event) string {

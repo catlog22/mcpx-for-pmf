@@ -65,3 +65,23 @@ func TestAsyncRecorderDropsWhenFull(t *testing.T) {
 	close(block)
 	rec.Close(time.Second)
 }
+
+func TestAsyncRecorderRecoversFromRecordPanic(t *testing.T) {
+	var calls atomic.Int32
+	rec := NewAsyncRecorder(2, func(context.Context, Event) error {
+		if calls.Add(1) == 1 {
+			panic("synthetic observer panic")
+		}
+		return nil
+	})
+	if !rec.Enqueue(Event{Type: TypeToolCompleted, Tool: "panic", Workspace: "demo"}) {
+		t.Fatal("failed to enqueue panic event")
+	}
+	if !rec.Enqueue(Event{Type: TypeToolCompleted, Tool: "after", Workspace: "demo"}) {
+		t.Fatal("failed to enqueue recovery event")
+	}
+	rec.Close(time.Second)
+	if calls.Load() != 2 {
+		t.Fatalf("recorder stopped after panic; calls=%d", calls.Load())
+	}
+}

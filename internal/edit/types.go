@@ -47,6 +47,9 @@ type FileEdit struct {
 type BatchRequest struct {
 	WorkspaceRoot string
 	Edits         []FileEdit
+	// DryRun validates and builds the exact result without invoking any
+	// filesystem mutation or pre-write hook.
+	DryRun bool
 }
 
 // FileResult is the outcome for one path.

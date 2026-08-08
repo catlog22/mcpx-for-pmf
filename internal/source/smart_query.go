@@ -24,6 +24,7 @@ type SmartQueryOptions struct {
 	ContextAfter    int
 	MaxBytesPerFile int64
 	IncludeSHA256   bool
+	ScopePaths      []string
 	Allowed         func(string) bool
 }
 
@@ -62,7 +63,11 @@ func SmartQueryPage(root string, opts SmartQueryOptions) (map[string]any, error)
 		opts.MaxBytesPerFile = 64 << 10
 	}
 	analysis := AnalyzeQuery(opts.Query)
-	paths, err := paths(root, opts.Pattern, opts.ExcludePattern, opts.Allowed)
+	allowed := opts.Allowed
+	if len(opts.ScopePaths) > 0 {
+		allowed = ScopePathFilter(root, opts.ScopePaths, allowed)
+	}
+	paths, err := paths(root, opts.Pattern, opts.ExcludePattern, allowed)
 	if err != nil {
 		return nil, err
 	}
@@ -153,6 +158,50 @@ func SmartQueryPage(root string, opts SmartQueryOptions) (map[string]any, error)
 		result["next_cursor"] = encodeCursor(end)
 	}
 	return result, nil
+}
+
+// ScopePathFilter turns user-provided paths into a hard file boundary. A
+// directory seed includes only that directory's descendants; a file seed
+// includes only that file. Invalid or missing seeds match nothing instead of
+// silently widening the query back to the workspace root.
+func ScopePathFilter(root string, seeds []string, allowed func(string) bool) func(string) bool {
+	scopes := make([]string, 0, len(seeds))
+	for _, seed := range seeds {
+		seed = strings.TrimSpace(seed)
+		if seed == "" {
+			continue
+		}
+		normalized := filepath.ToSlash(filepath.Clean(seed))
+		if normalized == "." {
+			scopes = append(scopes, "")
+			continue
+		}
+		absolute, err := resolvePath(root, normalized)
+		if err != nil {
+			continue
+		}
+		info, err := os.Stat(absolute)
+		if err != nil {
+			continue
+		}
+		if info.IsDir() {
+			scopes = append(scopes, strings.TrimSuffix(normalized, "/"))
+			continue
+		}
+		scopes = append(scopes, normalized)
+	}
+	return func(path string) bool {
+		if allowed != nil && !allowed(path) {
+			return false
+		}
+		path = filepath.ToSlash(filepath.Clean(path))
+		for _, scope := range scopes {
+			if scope == "" || path == scope || strings.HasPrefix(path, scope+"/") {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 func loadSmartDocuments(root string, filePaths []string) []smartDocument {

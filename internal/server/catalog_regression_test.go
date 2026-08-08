@@ -98,6 +98,32 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	capabilityData := structuredBusinessData(capabilityResult)
+	editCapabilityFound := false
+	removeCapabilityFound := false
+	for _, item := range asMapSlice(capabilityData["tools"]) {
+		if item["name"] == "submit_remove" {
+			removeCapabilityFound = true
+			safety, _ := item["safety"].(map[string]any)
+			if safety["approval"] != "web_model_user_confirmation_required" || safety["registered_workspace"] != true || safety["confirmation_credential"] != "server_generated_confirmation_uuid" {
+				t.Fatalf("runtime_read must publish submit_remove safety metadata: %+v", item)
+			}
+			continue
+		}
+		if item["name"] != "edit" {
+			continue
+		}
+		editCapabilityFound = true
+		safety, _ := item["safety"].(map[string]any)
+		if safety["approval"] == "host_user_approval_required" || safety["scope"] != "registered_workspace_root" {
+			t.Fatalf("runtime_read must publish edit safety metadata: %+v", item)
+		}
+	}
+	if !editCapabilityFound {
+		t.Fatal("runtime_read did not publish the edit capability")
+	}
+	if !removeCapabilityFound {
+		t.Fatal("runtime_read did not publish the submit_remove capability")
+	}
 	for _, item := range asMapSlice(capabilityData["tool_manifest"]) {
 		if _, exists := item["inputSchema"]; exists {
 			t.Fatalf("capabilities should default to tool summaries: %+v", item)

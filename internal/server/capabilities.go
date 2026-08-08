@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"sort"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"mcpx/internal/config"
 	"mcpx/internal/remotesession"
 )
@@ -14,7 +16,7 @@ const cleanCoreCapabilityVersion = "clean-core-p4"
 
 func capabilityGroups() map[string][]string {
 	return map[string][]string{
-		"core":    {"session", "read", "edit", "observe", "execute", "plan", "artifact", "discover", "skill_call", "mcp_call"},
+		"core":    {"session", "read", "edit", "remove_prepare", "submit_remove", "observe", "execute", "plan", "artifact", "discover", "skill_call", "mcp_call"},
 		"support": {"operation_batch", "operation_manage", "runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide"},
 	}
 }
@@ -37,6 +39,8 @@ var toolCapabilityDefinitions = []toolCapabilityDefinition{
 	{Name: "session", Domain: "session"},
 	{Name: "read", Domain: "source", RequiresRemoteSession: true},
 	{Name: "edit", Domain: "edit", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+	{Name: "remove_prepare", Domain: "workspace_remove", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+	{Name: "submit_remove", Domain: "workspace_remove", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "execute", Domain: "command", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "terminal"},
 	{Name: "plan", Domain: "plan", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "artifact", Domain: "artifact", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
@@ -89,6 +93,9 @@ func machineToolCapabilities(effective config.Config, session *remotesession.Ses
 		}
 		if reason != "" {
 			item["reason"] = reason
+		}
+		if limit, ok := publishedLimits()[definition.Name]; ok {
+			item["limits"] = limit
 		}
 		items = append(items, item)
 	}
@@ -166,11 +173,28 @@ func (r *Runtime) registeredToolManifest() []map[string]any {
 func summarizeToolManifest(manifest []map[string]any) []map[string]any {
 	result := make([]map[string]any, 0, len(manifest))
 	for _, tool := range manifest {
-		result = append(result, map[string]any{
+		item := map[string]any{
 			"name": tool["name"], "description": tool["description"], "annotations": tool["annotations"],
-		})
+		}
+		if safety := toolSafetyMetadata(tool); safety != nil {
+			item["safety"] = safety
+		}
+		result = append(result, item)
 	}
 	return result
+}
+
+func toolSafetyMetadata(tool map[string]any) map[string]any {
+	switch meta := tool["_meta"].(type) {
+	case map[string]any:
+		safety, _ := meta["mcpx/safety"].(map[string]any)
+		return safety
+	case mcp.Meta:
+		safety, _ := meta["mcpx/safety"].(map[string]any)
+		return safety
+	default:
+		return nil
+	}
 }
 
 func (r *Runtime) runtimeToolCapabilities(effective config.Config, session *remotesession.Session, includeSchemas bool) []map[string]any {
@@ -190,6 +214,9 @@ func (r *Runtime) runtimeToolCapabilities(effective config.Config, session *remo
 				item["input_schema"] = tool["inputSchema"]
 			}
 			item["annotations"] = tool["annotations"]
+			if safety := toolSafetyMetadata(tool); safety != nil {
+				item["safety"] = safety
+			}
 		}
 	}
 	return items

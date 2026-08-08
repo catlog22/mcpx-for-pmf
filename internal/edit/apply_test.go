@@ -86,6 +86,25 @@ func TestStaleRevision(t *testing.T) {
 	}
 }
 
+func TestDeleteRejectsSymlinkAndPreservesTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	if err := os.WriteFile(target, []byte("keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("target.txt", filepath.Join(dir, "link.txt")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	_, err := ApplyBatch(BatchRequest{WorkspaceRoot: dir, Edits: []FileEdit{{Path: "link.txt", Operation: OpDelete}}})
+	var applyErr *ApplyError
+	if !errors.As(err, &applyErr) || applyErr.Code != "SYMLINK_NOT_ALLOWED" {
+		t.Fatalf("delete symlink error=%v", err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("symlink target was affected: %v", err)
+	}
+}
+
 func TestTooManyChangesBoundary(t *testing.T) {
 	dir := t.TempDir()
 	path := "big.txt"

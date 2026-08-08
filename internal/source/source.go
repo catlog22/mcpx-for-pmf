@@ -17,6 +17,21 @@ import (
 	"mcpx/internal/file"
 )
 
+// LimitError is a request-level capacity violation. It is kept in the source
+// package so list/read callers can expose the same machine-readable contract.
+type LimitError struct {
+	Resource string
+	Actual   int
+	Max      int
+}
+
+func (e *LimitError) Error() string {
+	if e == nil {
+		return "source request exceeds its limit"
+	}
+	return fmt.Sprintf("%s exceeds maximum of %d", e.Resource, e.Max)
+}
+
 type Entry struct {
 	Path   string `json:"path"`
 	Size   int64  `json:"size"`
@@ -49,6 +64,7 @@ type SearchOptions struct {
 	Query          string
 	Pattern        string
 	ExcludePattern string
+	ScopePaths     []string
 	Cursor         string
 	Regex          bool
 	CaseSensitive  bool
@@ -161,6 +177,9 @@ func SearchWith(root string, opts SearchOptions, allowed func(string) bool) (Sea
 		if err != nil {
 			return SearchResult{}, fmt.Errorf("invalid regular expression: %w", err)
 		}
+	}
+	if len(opts.ScopePaths) > 0 {
+		allowed = ScopePathFilter(root, opts.ScopePaths, allowed)
 	}
 	filePaths, err := paths(root, opts.Pattern, opts.ExcludePattern, allowed)
 	if err != nil {

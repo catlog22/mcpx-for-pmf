@@ -56,8 +56,11 @@ func (a *AsyncRecorder) Enqueue(event Event) bool {
 	case a.ch <- event:
 		return true
 	default:
-		logging.With("component", "workspace_observer").Error("observation queue full; dropping event",
-			"type", event.Type, "tool", event.Tool, "workspace", event.Workspace)
+		fields := []any{"type", event.Type, "tool", event.Tool, "workspace", event.Workspace}
+		if event.Type == TypeCommandOutput && event.OperationID != "" {
+			fields = append(fields, "operation_id", event.OperationID, "recovery", "observe(view=logs)")
+		}
+		logging.With("component", "workspace_observer").Error("observation queue full; dropping event; durable task log remains the recovery source", fields...)
 		return false
 	}
 }
@@ -67,9 +70,16 @@ func (a *AsyncRecorder) loop() {
 	for event := range a.ch {
 		// Record is best-effort (publish + optional persist). Never let a slow
 		// SQLite write stall the whole observation pipeline for long.
-		ctx, cancel := context.WithTimeout(context.Background(), asyncWriteTimeout)
-		_ = a.record(ctx, event)
-		cancel()
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					logging.With("component", "workspace_observer").Error("observation recorder panic recovered", "type", event.Type, "tool", event.Tool, "panic", recovered)
+				}
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), asyncWriteTimeout)
+			_ = a.record(ctx, event)
+			cancel()
+		}()
 	}
 }
 

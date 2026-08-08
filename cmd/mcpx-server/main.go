@@ -21,8 +21,10 @@ func main() {
 	// Subcommands (before flag.Parse so they own their flags).
 	if len(os.Args) >= 2 {
 		switch os.Args[1] {
+		case "observe":
+			os.Exit(runObserve(os.Args[2:]))
 		case "workspace":
-			os.Exit(runWorkspaceObserver(os.Args[2:]))
+			os.Exit(runWorkspaceCommand(os.Args[2:]))
 		case "oauth-register":
 			os.Exit(runOAuthRegister(os.Args[2:]))
 		case "help", "-h", "--help":
@@ -31,7 +33,6 @@ func main() {
 		}
 	}
 
-	workspace := flag.String("workspace", "", "register workspace path into global config and use it")
 	addr := flag.String("addr", "", "override listen addr host:port")
 	logLevel := flag.String("log-level", "", "debug|info|warn|error (or MCPX_LOG_LEVEL)")
 	logFormat := flag.String("log-format", "", "text|json (or MCPX_LOG_FORMAT)")
@@ -48,11 +49,10 @@ func main() {
 	logging.Info("mcpx-server", "version", version, "commit", commit)
 
 	rt, err := server.New(server.Options{
-		WorkspaceFlag: *workspace,
-		AddrOverride:  *addr,
-		Version:       version,
-		Commit:        commit,
-		Date:          date,
+		AddrOverride: *addr,
+		Version:      version,
+		Commit:       commit,
+		Date:         date,
 	})
 	if err != nil {
 		logging.Error("startup failed", "err", err)
@@ -68,9 +68,10 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, `mcpx-server — MCPX Runtime
 
 Usage:
-  mcpx-server [flags]                 启动 Streamable HTTP 服务
-  mcpx-server workspace [flags] <name> 只读观测 Workspace 事件
-  mcpx-server oauth-register [url]    动态注册 OAuth 客户端（粘贴 ChatGPT 回调 URL）
+  mcpx-server [flags]                     启动 Streamable HTTP 服务
+  mcpx-server observe [flags] <name>      终端只读观测 Workspace 事件
+  mcpx-server workspace register <path>  注册或更新 Workspace（不启动服务）
+  mcpx-server oauth-register [url]        动态注册 OAuth 客户端（粘贴 ChatGPT 回调 URL）
   mcpx-server -version
 
 oauth-register:

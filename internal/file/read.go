@@ -17,6 +17,26 @@ import (
 	"unicode/utf8"
 )
 
+// MaxSourceBytes is the maximum source payload that an explicit full read may
+// materialize. Window reads are streaming and may inspect a larger source file
+// while returning only the requested bounded text.
+const MaxSourceBytes int64 = 4 << 20
+
+// SizeLimitError is returned only when an operation explicitly asks to
+// materialize a source larger than its advertised capacity.
+type SizeLimitError struct {
+	Path   string
+	Actual int64
+	Max    int64
+}
+
+func (e *SizeLimitError) Error() string {
+	if e == nil {
+		return "source file exceeds the maximum size"
+	}
+	return fmt.Sprintf("source file %q is %d bytes; maximum is %d bytes", e.Path, e.Actual, e.Max)
+}
+
 // ReadOptions controls file.read.
 type ReadOptions struct {
 	WorkspaceRoot string
@@ -104,10 +124,6 @@ func Read(opts ReadOptions) (ReadResult, error) {
 	if st.IsDir() {
 		return ReadResult{}, fmt.Errorf("is a directory")
 	}
-	if st.Size() > opts.MaxBytes*4 {
-		return ReadResult{}, fmt.Errorf("file too large")
-	}
-
 	f, err := root.Open(opts.Path)
 	if err != nil {
 		return ReadResult{}, err
@@ -198,7 +214,7 @@ func Read(opts ReadOptions) (ReadResult, error) {
 // request. It preserves binary bytes and rejects files larger than MaxBytes.
 func ReadFull(opts FullReadOptions) (FullReadResult, error) {
 	if opts.MaxBytes <= 0 {
-		opts.MaxBytes = 1 << 20
+		opts.MaxBytes = MaxSourceBytes
 	}
 	if _, err := Resolve(opts.WorkspaceRoot, opts.Path); err != nil {
 		return FullReadResult{}, err
@@ -216,7 +232,7 @@ func ReadFull(opts FullReadOptions) (FullReadResult, error) {
 		return FullReadResult{}, fmt.Errorf("is a directory")
 	}
 	if info.Size() > opts.MaxBytes {
-		return FullReadResult{}, fmt.Errorf("file too large for full read")
+		return FullReadResult{}, &SizeLimitError{Path: opts.Path, Actual: info.Size(), Max: opts.MaxBytes}
 	}
 
 	handle, err := root.Open(opts.Path)
@@ -229,7 +245,7 @@ func ReadFull(opts FullReadOptions) (FullReadResult, error) {
 		return FullReadResult{}, err
 	}
 	if int64(len(content)) > opts.MaxBytes {
-		return FullReadResult{}, fmt.Errorf("file too large for full read")
+		return FullReadResult{}, &SizeLimitError{Path: opts.Path, Actual: int64(len(content)), Max: opts.MaxBytes}
 	}
 	digest := sha256.Sum256(content)
 	format := detectFormat(content)
@@ -319,48 +335,156 @@ func applyDecodedFormat(format Format, text string) Format {
 }
 
 func readUTF16Window(handle *os.File, opts ReadOptions, size int64) (ReadResult, error) {
-	maxRaw := opts.MaxBytes * 4
-	if maxRaw <= 0 {
-		maxRaw = 4 << 20
+	if size < 2 || size%2 != 0 {
+		return ReadResult{}, fmt.Errorf("unsupported utf-16 content: invalid byte length")
 	}
-	content, err := io.ReadAll(io.LimitReader(handle, maxRaw+1))
-	if err != nil {
+	if _, err := handle.Seek(0, io.SeekStart); err != nil {
 		return ReadResult{}, err
 	}
-	if int64(len(content)) > maxRaw || int64(len(content)) != size {
-		return ReadResult{}, fmt.Errorf("file too large")
+	reader := bufio.NewReaderSize(handle, 64*1024)
+	hasher := sha256.New()
+	var bom [2]byte
+	if _, err := io.ReadFull(reader, bom[:]); err != nil {
+		return ReadResult{}, err
 	}
-	text, format, err := DecodeText(content)
-	if err != nil {
-		return ReadResult{}, fmt.Errorf("unsupported utf-16 content: %w", err)
+	_, _ = hasher.Write(bom[:])
+	format := Format{Charset: "utf-16le", BOM: "utf-16le", LineEnding: "none"}
+	if bom[0] == 0xfe && bom[1] == 0xff {
+		format.Charset, format.BOM = "utf-16be", "utf-16be"
 	}
-	lines := strings.Split(strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n"), "\n")
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
+	order := binary.ByteOrder(binary.LittleEndian)
+	if format.Charset == "utf-16be" {
+		order = binary.BigEndian
 	}
+
 	start := opts.Offset
-	if start > len(lines) {
-		start = len(lines)
+	if start < 0 {
+		start = 0
 	}
-	end := start + opts.Limit
-	if end > len(lines) {
-		end = len(lines)
+	selected := make([]string, 0, opts.Limit)
+	var line strings.Builder
+	lineNumber := 0
+	lineEnded := false
+	pendingCR := false
+	crlfCount, lfCount, crCount := 0, 0, 0
+	finalNewline := false
+	emit := func(ending string) {
+		if lineNumber >= start && lineNumber < start+opts.Limit {
+			value := line.String()
+			if int64(len(value)) > opts.MaxBytes {
+				value = truncateUTF8(value, int(opts.MaxBytes))
+			}
+			selected = append(selected, value)
+		}
+		line.Reset()
+		lineNumber++
+		lineEnded = true
+		finalNewline = true
+		switch ending {
+		case "CRLF":
+			crlfCount++
+		case "CR":
+			crCount++
+		default:
+			lfCount++
+		}
 	}
-	chunk := strings.Join(lines[start:end], "\n")
-	if end < len(lines) || (end > start && format.FinalNewline != nil && *format.FinalNewline) {
+	appendRune := func(r rune) {
+		if lineNumber < start || lineNumber >= start+opts.Limit || int64(line.Len()) >= opts.MaxBytes {
+			return
+		}
+		line.WriteRune(r)
+	}
+	for {
+		var raw [2]byte
+		if _, err := io.ReadFull(reader, raw[:]); err != nil {
+			if err != io.EOF && err != io.ErrUnexpectedEOF {
+				return ReadResult{}, err
+			}
+			break
+		}
+		_, _ = hasher.Write(raw[:])
+		unit := order.Uint16(raw[:])
+		var runeValue rune
+		switch {
+		case unit >= 0xd800 && unit <= 0xdbff:
+			var next [2]byte
+			if _, err := io.ReadFull(reader, next[:]); err != nil {
+				return ReadResult{}, fmt.Errorf("unsupported utf-16 content: invalid surrogate pair")
+			}
+			_, _ = hasher.Write(next[:])
+			nextUnit := order.Uint16(next[:])
+			if nextUnit < 0xdc00 || nextUnit > 0xdfff {
+				return ReadResult{}, fmt.Errorf("unsupported utf-16 content: invalid surrogate pair")
+			}
+			runeValue = utf16.Decode([]uint16{unit, nextUnit})[0]
+		case unit >= 0xdc00 && unit <= 0xdfff:
+			return ReadResult{}, fmt.Errorf("unsupported utf-16 content: invalid surrogate pair")
+		default:
+			runeValue = rune(unit)
+		}
+		if pendingCR {
+			if runeValue == '\n' {
+				emit("CRLF")
+				pendingCR = false
+				continue
+			}
+			emit("CR")
+			pendingCR = false
+		}
+		switch runeValue {
+		case '\r':
+			pendingCR = true
+		case '\n':
+			emit("LF")
+		default:
+			lineEnded = false
+			finalNewline = false
+			appendRune(runeValue)
+		}
+	}
+	if pendingCR {
+		emit("CR")
+	} else if !lineEnded {
+		if line.Len() > 0 || lineNumber == 0 {
+			if lineNumber >= start && lineNumber < start+opts.Limit {
+				value := line.String()
+				if int64(len(value)) > opts.MaxBytes {
+					value = truncateUTF8(value, int(opts.MaxBytes))
+				}
+				selected = append(selected, value)
+			}
+			lineNumber++
+		}
+	}
+	if lineNumber == 0 && size == 2 {
+		lineNumber = 0
+	}
+	chunk := strings.Join(selected, "\n")
+	if len(selected) > 0 && (finalNewline || start+len(selected) < lineNumber) {
 		chunk += "\n"
 	}
-	truncated := end < len(lines)
+	truncated := start+len(selected) < lineNumber
 	if int64(len(chunk)) > opts.MaxBytes {
 		chunk = truncateUTF8(chunk, int(opts.MaxBytes))
 		truncated = true
 	}
-	digest := sha256.Sum256(content)
+	format.LineEnding = lineEndingName(crlfCount, lfCount, crCount)
+	format.LineEndingCounts = LineEndingCounts{LF: lfCount, CRLF: crlfCount, CR: crCount}
+	format.FinalNewline = boolPointer(finalNewline)
+	digest := hasher.Sum(nil)
 	return ReadResult{
-		Path: opts.Path, Content: chunk, TotalLines: len(lines), Offset: start, Limit: opts.Limit,
+		Path: opts.Path, Content: chunk, TotalLines: lineNumber, Offset: minInt(start, lineNumber), Limit: opts.Limit,
 		Truncated: truncated, LineEnding: format.LineEnding, Format: format,
-		SHA256: "sha256:" + hex.EncodeToString(digest[:]),
+		SHA256: "sha256:" + hex.EncodeToString(digest),
 	}, nil
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func formatFromReadStats(prefix []byte, crlfCount, lfCount, crCount int, finalNewline bool) Format {

@@ -67,6 +67,55 @@ func TestCleanCoreExecuteIdempotencyAndUserConfirmation(t *testing.T) {
 	}
 }
 
+func TestCleanCoreMissingCommandUsesExecutionTaxonomy(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	rt.cfg.Security.Commands.Allow = append(rt.cfg.Security.Commands.Allow, `^mcpx-command-that-does-not-exist$`)
+	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
+	remoteID := opened["remote_session_id"].(string)
+	response := callEnvelope(t, rt.toolExecute, context.Background(), map[string]any{
+		"action": "run", "remote_session_id": remoteID, "purpose": "classify a missing executable",
+		"command": "mcpx-command-that-does-not-exist", "scope": "workspace",
+	})
+	if statusOK(response) || errorCode(response) != "command_not_found" {
+		t.Fatalf("missing command response=%+v", response)
+	}
+	errorBody, _ := response["error"].(map[string]any)
+	if errorBody["category"] != "execution" || errorBody["retryable"] != false {
+		t.Fatalf("missing command taxonomy=%+v", errorBody)
+	}
+	details, _ := errorBody["details"].(map[string]any)
+	if details["exit_code"] != float64(127) {
+		t.Fatalf("missing command exit code=%+v", details)
+	}
+
+	accepted := callEnvelope(t, rt.toolHandlers["execute"], context.Background(), map[string]any{
+		"action": "run", "remote_session_id": remoteID, "purpose": "classify async command failure",
+		"command": "mcpx-command-that-does-not-exist", "scope": "workspace", "execution_mode": "async",
+	})
+	if accepted["status"] != "accepted" {
+		t.Fatalf("async missing command was not accepted as an operation: %+v", accepted)
+	}
+	acceptedData, _ := accepted["data"].(map[string]any)
+	operationID, _ := acceptedData["operation_id"].(string)
+	if operationID == "" {
+		t.Fatalf("async operation id missing: %+v", accepted)
+	}
+	completed := callEnvelope(t, rt.toolHandlers["operation_manage"], context.Background(), map[string]any{
+		"remote_session_id": remoteID, "action": "wait", "operation_id": operationID, "timeout_ms": 5000,
+	})
+	if statusOK(completed) || errorCode(completed) != "operation_failed" {
+		t.Fatalf("async operation failure=%+v", completed)
+	}
+	operationError, _ := completed["error"].(map[string]any)
+	if operationError["category"] != "execution" || operationError["retryable"] != false {
+		t.Fatalf("async operation taxonomy=%+v", operationError)
+	}
+	operationDetails, _ := operationError["details"].(map[string]any)
+	if operationDetails["exit_code"] != float64(127) {
+		t.Fatalf("async operation exit code=%+v", operationDetails)
+	}
+}
+
 func TestCleanCorePlanEvidenceAndArtifactWorkflow(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	rt.cfg.Security.Commands.Allow = append(rt.cfg.Security.Commands.Allow, `^sleep\b`)

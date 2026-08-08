@@ -15,7 +15,7 @@ import (
 	"mcpx/internal/mcpresult"
 )
 
-const Version = "1.2"
+const Version = "1.3"
 
 // ResultMetadataKey identifies the hidden response metadata that carries the
 // complete ARC envelope. Keeping the envelope in _meta prevents MCP hosts
@@ -52,7 +52,22 @@ type ResultContext struct {
 	RequestID string
 	TraceID   string
 	SpanID    string
+	Context   Context
 	Timing    Timing
+}
+
+// Context is the concise, operator-visible semantic context for one tool
+// operation. ReasoningSummary is intentionally a short rationale supplied by
+// the model; it must never contain hidden chain-of-thought.
+type Context struct {
+	Goal             string `json:"goal,omitempty"`
+	Purpose          string `json:"purpose,omitempty"`
+	ReasoningSummary string `json:"reasoning_summary,omitempty"`
+	ProgressSummary  string `json:"progress_summary,omitempty"`
+	NextStep         string `json:"next_step,omitempty"`
+	PlanID           string `json:"plan_id,omitempty"`
+	TaskID           string `json:"task_id,omitempty"`
+	OperationID      string `json:"operation_id,omitempty"`
 }
 
 type Trace struct {
@@ -87,6 +102,7 @@ type Result struct {
 	Schema       string        `json:"schema"`
 	Status       string        `json:"status"`
 	Summary      string        `json:"summary,omitempty"`
+	Context      Context       `json:"context"`
 	Data         any           `json:"data"`
 	Presentation *Presentation `json:"presentation,omitempty"`
 	Hints        Hints         `json:"hints,omitempty"`
@@ -115,6 +131,7 @@ func WrapToolResult(tool string, runtime ResultContext, raw *mcp.CallToolResult)
 	}
 	data, summary := extractResult(raw)
 	resultType, resultData, hints, actions := classify(tool, raw.IsError, data, summary)
+	semanticContext := contextFrom(runtime, data, resultData)
 	if summary == "" {
 		summary = fmt.Sprintf("%s result returned.", tool)
 	}
@@ -130,8 +147,10 @@ func WrapToolResult(tool string, runtime ResultContext, raw *mcp.CallToolResult)
 	envelope.MCPX.Trace = buildTrace(tool, runtime, runtime.Timing)
 	envelope.MCPX.Result = Result{
 		Type: resultType, Schema: schemaForType(resultType), Status: status, Summary: summary,
-		Data: resultData, Presentation: DefaultPresentation(resultType), Hints: hints, Actions: actions,
+		Context: semanticContext,
+		Data:    resultData, Presentation: DefaultPresentation(resultType), Hints: hints, Actions: actions,
 	}
+	display = renderContextBlock(display, semanticContext)
 	content := []mcp.Content{&mcp.TextContent{Text: display}}
 	for _, item := range raw.Content {
 		if _, isText := item.(*mcp.TextContent); isText {
@@ -140,17 +159,18 @@ func WrapToolResult(tool string, runtime ResultContext, raw *mcp.CallToolResult)
 		content = append(content, item)
 	}
 	raw.Content = content
-	raw.StructuredContent = modelStructuredContent(status, resultType, resultData, data, hints, actions, raw.IsError)
+	raw.StructuredContent = modelStructuredContent(status, resultType, resultData, data, semanticContext, hints, actions, raw.IsError)
 	setMetadata(raw, envelope, resultType)
 	return raw
 }
 
 // modelStructuredContent is the machine contract for models.
-func modelStructuredContent(status, resultType string, resultData any, rawData map[string]any, hints Hints, actions []Action, isError bool) map[string]any {
+func modelStructuredContent(status, resultType string, resultData any, rawData map[string]any, semanticContext Context, hints Hints, actions []Action, isError bool) map[string]any {
 	payload := map[string]any{
-		"status": status,
-		"type":   resultType,
-		"data":   resultData,
+		"status":  status,
+		"type":    resultType,
+		"context": contextData(semanticContext),
+		"data":    resultData,
 	}
 	if rawData != nil {
 		if errBody, ok := rawData["error"]; ok && errBody != nil {
@@ -172,6 +192,86 @@ func modelStructuredContent(status, resultType string, resultData any, rawData m
 	}
 	normalized, _ := normalizePublicData(payload).(map[string]any)
 	return normalized
+}
+
+func contextData(context Context) map[string]any {
+	context = normalizeContext(context)
+	data := map[string]any{}
+	for key, value := range map[string]string{
+		"goal":              context.Goal,
+		"purpose":           context.Purpose,
+		"reasoning_summary": context.ReasoningSummary,
+		"progress_summary":  context.ProgressSummary,
+		"next_step":         context.NextStep,
+		"plan_id":           context.PlanID,
+		"task_id":           context.TaskID,
+		"operation_id":      context.OperationID,
+	} {
+		if value != "" {
+			data[key] = value
+		}
+	}
+	return data
+}
+
+func contextFrom(runtime ResultContext, rawData map[string]any, resultData any) Context {
+	result := runtime.Context
+	mergeContextMap(&result, rawData)
+	if nested, ok := rawData["context"].(map[string]any); ok {
+		mergeContextMap(&result, nested)
+	}
+	if nested, ok := rawData["data"].(map[string]any); ok {
+		mergeContextMap(&result, nested)
+		if nestedContext, contextOK := nested["context"].(map[string]any); contextOK {
+			mergeContextMap(&result, nestedContext)
+		}
+	}
+	if nested, ok := resultData.(map[string]any); ok {
+		mergeContextMap(&result, nested)
+	}
+	return normalizeContext(result)
+}
+
+func mergeContextMap(context *Context, values map[string]any) {
+	if context == nil {
+		return
+	}
+	if context.Goal == "" {
+		context.Goal = stringValue(values, "goal")
+	}
+	if context.Purpose == "" {
+		context.Purpose = stringValue(values, "purpose")
+	}
+	if context.ReasoningSummary == "" {
+		context.ReasoningSummary = stringValue(values, "reasoning_summary")
+	}
+	if context.ProgressSummary == "" {
+		context.ProgressSummary = stringValue(values, "progress_summary")
+	}
+	if context.NextStep == "" {
+		context.NextStep = stringValue(values, "next_step")
+	}
+	if context.PlanID == "" {
+		context.PlanID = stringValue(values, "plan_id")
+	}
+	if context.TaskID == "" {
+		context.TaskID = stringValue(values, "task_id")
+	}
+	if context.OperationID == "" {
+		context.OperationID = stringValue(values, "operation_id")
+	}
+}
+
+func normalizeContext(context Context) Context {
+	context.Goal = strings.TrimSpace(context.Goal)
+	context.Purpose = strings.TrimSpace(context.Purpose)
+	context.ReasoningSummary = strings.TrimSpace(context.ReasoningSummary)
+	context.ProgressSummary = strings.TrimSpace(context.ProgressSummary)
+	context.NextStep = strings.TrimSpace(context.NextStep)
+	context.PlanID = strings.TrimSpace(context.PlanID)
+	context.TaskID = strings.TrimSpace(context.TaskID)
+	context.OperationID = strings.TrimSpace(context.OperationID)
+	return context
 }
 
 func buildTrace(tool string, runtime ResultContext, timing Timing) Trace {
@@ -278,6 +378,10 @@ func classify(tool string, isError bool, data map[string]any, summary string) (s
 	case tool == "change_execute" || tool == "change_manage" || tool == "change_prepare" || tool == "change_read" || tool == "change_apply" || tool == "change_revert":
 		// Tool identity wins over content heuristics: the Changeset DTO also
 		// carries a "files" key which would otherwise classify as search_result.
+		resultType = "code_change"
+	case tool == "edit" && hasAnyKey(inner, "edit_id", "results", "diff_summary"):
+		// Clean-core edit returns results[] rather than the Changeset files[] DTO.
+		// It still has the same user-facing diff semantics.
 		resultType = "code_change"
 	case tool == "context_query" || tool == "source_read":
 		resultType = "search_result"
@@ -670,45 +774,43 @@ func buildOutputSchema() json.RawMessage {
 		"diagram", "diagram_collection", "plan", "plan_task", "delivery",
 	}
 	typeValues := make([]any, 0, len(resultTypes))
-	schemaValues := make([]any, 0, len(resultTypes))
-	definitions := map[string]any{}
-	dataRefs := make([]any, 0, len(resultTypes))
 	for _, resultType := range resultTypes {
 		typeValues = append(typeValues, resultType)
-		schemaName := schemaForType(resultType)
-		schemaValues = append(schemaValues, schemaName)
-		definitionName := strings.TrimPrefix(schemaName, "mcpx.")
-		definitions[definitionName] = resultDataSchema(schemaName)
-		dataRefs = append(dataRefs, map[string]any{"$ref": "#/$defs/" + definitionName})
 	}
 	schema := map[string]any{
-		"$id": "mcpx.envelope.v1", "$defs": definitions, "type": "object", "required": []string{"mcpx"},
+		// This schema is repeated once per tool in tools/list. Keep the shared
+		// result contract explicit while leaving tool-specific data open; the
+		// result type and the actual data fields are the stable discriminator.
+		"$id": "mcpx.structured_content.v" + Version, "type": "object",
+		"required":             []string{"status", "type", "context", "data"},
+		"additionalProperties": false,
 		"properties": map[string]any{
-			"mcpx": map[string]any{
-				"type": "object", "required": []string{"version", "trace", "result"},
+			"status": map[string]any{"type": "string", "enum": []string{"succeeded", "accepted", "waiting_confirmation", "interrupted", "failed"}},
+			"type":   map[string]any{"type": "string", "enum": typeValues},
+			"context": map[string]any{
+				"type": "object", "additionalProperties": false, "description": "模型公开的目标、作用、判断依据、进展和下一步；不是隐藏思维链",
 				"properties": map[string]any{
-					"version": map[string]any{"const": Version},
-					"trace": map[string]any{
-						"type": "object", "required": []string{"trace_id", "span_id", "source", "tool", "started_at_ms", "received_at_ms", "completed_at_ms", "network_latency_ms", "duration"},
-					},
-					"result": map[string]any{
-						"type": "object", "required": []string{"type", "schema", "status", "data"},
-						"properties": map[string]any{
-							"type": map[string]any{"type": "string", "enum": typeValues}, "schema": map[string]any{"type": "string", "enum": schemaValues}, "status": map[string]any{"type": "string", "enum": []string{"succeeded", "accepted", "waiting_confirmation", "interrupted", "failed"}},
-							"summary": map[string]any{"type": "string"}, "data": map[string]any{"oneOf": dataRefs},
-							"presentation": map[string]any{
-								"type": "object", "required": []string{"default", "available", "fallback"},
-								"properties": map[string]any{
-									"default": map[string]any{"type": "string"}, "available": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-									"fallback": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "options": map[string]any{"type": "object"},
-								},
-							},
-							"hints":   map[string]any{"type": "object", "properties": map[string]any{"preferred_behavior": map[string]any{"type": "string", "enum": []string{"show_directly", "summarize", "ask_confirm", "continue"}}}},
-							"actions": map[string]any{"type": "array", "items": map[string]any{"type": "object", "required": []string{"id", "type", "label", "confirm", "arguments"}}},
-						},
-					},
+					"goal": map[string]any{"type": "string"}, "purpose": map[string]any{"type": "string"},
+					"reasoning_summary": map[string]any{"type": "string"}, "progress_summary": map[string]any{"type": "string"},
+					"next_step": map[string]any{"type": "string"}, "plan_id": map[string]any{"type": "string"},
+					"task_id": map[string]any{"type": "string"}, "operation_id": map[string]any{"type": "string"},
 				},
 			},
+			"data":  map[string]any{"type": "object", "additionalProperties": true, "description": "按 type 返回的业务结果；ID、SHA、路径、命令输出和分页游标均原样位于此处"},
+			"error": map[string]any{"type": "object", "additionalProperties": true},
+			"hints": map[string]any{
+				"type": "object", "properties": map[string]any{
+					"preferred_behavior": map[string]any{"type": "string", "enum": []string{"show_directly", "summarize", "ask_confirm", "continue"}},
+				},
+			},
+			"actions": map[string]any{"type": "array", "items": map[string]any{
+				"type": "object", "required": []string{"id", "type", "label", "confirm", "arguments"},
+				"properties": map[string]any{
+					"id": map[string]any{"type": "string"}, "type": map[string]any{"type": "string"},
+					"label": map[string]any{"type": "string"}, "confirm": map[string]any{"type": "boolean"},
+					"arguments": map[string]any{"type": "object"},
+				},
+			}},
 		},
 	}
 	encoded, _ := json.Marshal(schema)

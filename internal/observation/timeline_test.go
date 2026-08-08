@@ -8,7 +8,11 @@ import (
 )
 
 func joinWrappedObservationLines(text string) string {
-	return strings.ReplaceAll(text, "\n│ ", "")
+	var builder strings.Builder
+	for _, line := range strings.Split(text, "\n") {
+		builder.WriteString(strings.TrimLeft(line, " "))
+	}
+	return builder.String()
 }
 
 func TestTextRendererGroupsInteractionIntoBoundedBlock(t *testing.T) {
@@ -44,11 +48,11 @@ func TestTextRendererGroupsInteractionIntoBoundedBlock(t *testing.T) {
 	if bodyLines > maxInteractionBodyLines {
 		t.Fatalf("body lines=%d output=%q", bodyLines, text)
 	}
-	if strings.Count(text, "╭─") != 1 || strings.Count(text, "╰") != 1 {
-		t.Fatalf("interaction was not grouped: %q", text)
+	if strings.Contains(text, "╭─") || strings.Contains(text, "╰") || strings.Contains(text, "│ ") {
+		t.Fatalf("compact renderer leaked framed timeline: %q", text)
 	}
-	if !strings.Contains(text, "#42 · 4f8c2e90-6b2a-4b20-9d8c-1a1f8a12e7c4 · command_execute") || !strings.Contains(text, "...") {
-		t.Fatalf("header or overflow marker missing: %q", text)
+	if !strings.Contains(text, "Read stdout") || !strings.Contains(text, "output truncated") {
+		t.Fatalf("compact output or overflow marker missing: %q", text)
 	}
 	if !strings.HasSuffix(text, "\n\n") {
 		t.Fatalf("footer is not followed by blank line: %q", text)
@@ -67,8 +71,31 @@ func TestTextRendererStartsContinuationAfterCompletion(t *testing.T) {
 		}
 	}
 	text := output.String()
-	if strings.Count(text, "╭─") != 2 || !strings.Contains(text, "continued") {
-		t.Fatalf("continuation block missing: %q", text)
+	if strings.Count(text, "Read stdout") != 1 || strings.Contains(text, "continued") {
+		t.Fatalf("continuation was not rendered as a compact stream: %q", text)
+	}
+}
+
+func TestTextRendererSeparatesAdjacentOperationsWithToolAndStatus(t *testing.T) {
+	renderer := NewTextRendererWithMode(ColorModeANSI16, 80)
+	var output bytes.Buffer
+	for _, event := range []Event{
+		{Sequence: 1, RequestID: "req_read", Tool: "read", Type: TypeToolCompleted, Status: "succeeded", Input: []byte(`{"view":"file","path":"a.go"}`), Output: []byte(`{"status":"succeeded","result":{"content":[{"type":"text","text":"Read a.go."}]}}`)},
+		{Sequence: 2, RequestID: "req_edit", Tool: "edit", Type: TypeToolCompleted, Status: "failed", Input: []byte(`{"path":"a.go"}`), Output: []byte(`{"status":"failed","result":{"content":[{"type":"text","text":"edit failed"}]}}`)},
+	} {
+		if err := renderer.RenderEvent(&output, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	text := output.String()
+	if !strings.Contains(text, "── edit · failed") {
+		t.Fatalf("operation separator missing tool/status: %q", text)
+	}
+	if !strings.Contains(text, ansiRed) {
+		t.Fatalf("failed operation did not use error color: %q", text)
+	}
+	if strings.Count(text, ansiReset) < 4 {
+		t.Fatalf("colored adjacent operations were not independently reset: %q", text)
 	}
 }
 
@@ -98,6 +125,53 @@ func TestTextRendererSuppressesConsecutiveDuplicateProgressReports(t *testing.T)
 	}
 	if strings.Count(text, "已完成最终验证") != 1 {
 		t.Fatalf("distinct progress report was suppressed: %q", text)
+	}
+}
+
+func TestTextRendererSuppressesProtocolNoiseButKeepsFailedOperation(t *testing.T) {
+	renderer := NewTextRenderer(false)
+	var output bytes.Buffer
+	events := []Event{
+		{Sequence: 1, OperationID: "op_1", Type: TypeOperationStarted, Status: "running", Summary: "operation queued"},
+		{Sequence: 2, OperationID: "op_1", StepID: "step_1", Type: TypeOperationStepStarted, Status: "running", Summary: "operation step started"},
+		{Sequence: 3, OperationID: "op_1", StepID: "step_1", Type: TypeOperationStepCompleted, Status: "succeeded", Summary: "operation step succeeded"},
+		{Sequence: 4, OperationID: "op_1", Type: TypeOperationCompleted, Status: "succeeded", Summary: "operation succeeded"},
+		{Sequence: 5, Type: TypeObserverNotice, Summary: "command.started: go test ./...", Output: []byte(`{"source_type":"command.started"}`)},
+		{Sequence: 6, OperationID: "op_2", Type: TypeOperationCompleted, Status: "failed", Summary: "operation failed"},
+	}
+	for _, event := range events {
+		if err := renderer.RenderEvent(&output, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	text := output.String()
+	if strings.Contains(text, "operation queued") || strings.Contains(text, "step started") || strings.Contains(text, "command.started") {
+		t.Fatalf("protocol noise leaked into compact output: %q", text)
+	}
+	if !strings.Contains(text, "Observed operation failed") {
+		t.Fatalf("failed operation result was hidden: %q", text)
+	}
+}
+
+func TestHumanTextStripsTerminalControlsWithoutChangingJSON(t *testing.T) {
+	event := Event{
+		Tool:   "command_execute",
+		Type:   TypeToolCompleted,
+		Output: []byte("{\"status\":\"ok\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"hello\\u001b[Z^[[?25lworld\\r\"}]}}"),
+	}
+	var textOutput bytes.Buffer
+	if err := RenderText(&textOutput, event, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(textOutput.String(), "\033") || strings.Contains(textOutput.String(), "^[[") || strings.Contains(textOutput.String(), "\\r") {
+		t.Fatalf("terminal controls leaked: %q", textOutput.String())
+	}
+	var jsonOutput bytes.Buffer
+	if err := RenderJSON(&jsonOutput, event); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(jsonOutput.String(), `\u001b`) {
+		t.Fatalf("JSON event was unexpectedly sanitized: %q", jsonOutput.String())
 	}
 }
 
@@ -150,6 +224,36 @@ func TestTextRendererFoldsRepeatedReadEvents(t *testing.T) {
 	}
 }
 
+func TestTextRendererShowsProgressBeforeCompletionOnce(t *testing.T) {
+	renderer := NewTextRenderer(false)
+	var output bytes.Buffer
+	progress := "已完成定位，下一步运行测试"
+	for _, event := range []Event{
+		{Sequence: 0, RequestID: "req_previous", Tool: "read", Type: TypeToolCompleted, Status: "succeeded", Output: []byte(`{"status":"succeeded"}`)},
+		{Sequence: 1, RequestID: "req_progress", Tool: "execute", Type: TypeToolStarted, Goal: "验证变更", Purpose: "运行测试", ReasoningSummary: "先验证最小闭环", ProgressSummary: progress, NextStep: "检查失败日志", PlanID: "pl_progress", TaskID: "pt_progress", OperationID: "op_progress"},
+		{Sequence: 2, RequestID: "req_progress", Tool: "execute", Type: TypeToolCompleted, Status: "succeeded", DurationMs: 27, Goal: "验证变更", Purpose: "运行测试", ReasoningSummary: "先验证最小闭环", ProgressSummary: progress, NextStep: "检查失败日志", PlanID: "pl_progress", TaskID: "pt_progress", OperationID: "op_progress", Input: []byte(`{"command":"go test ./..."}`), Output: []byte(`{"status":"succeeded"}`)},
+	} {
+		if err := renderer.RenderEvent(&output, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	text := output.String()
+	if strings.Contains(text, "Progress model summary") || strings.Count(text, "已完成定位，下一步运行测试") != 1 {
+		t.Fatalf("progress rendering=%q", text)
+	}
+	for _, want := range []string{"goal: 验证变更", "purpose: 运行测试", "reasoning: 先验证最小闭环", "next: 检查失败日志"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("semantic context missing %q: %q", want, text)
+		}
+	}
+	if !strings.Contains(text, "goal: 验证变更 · purpose: 运行测试") || !strings.Contains(text, "plan: pl_progress · task: pt_progress") || !strings.Contains(text, "── execute · started · operation=op_progress · duration=27ms") {
+		t.Fatalf("semantic context was not grouped: %q", text)
+	}
+	if strings.Contains(text, "↳ operation: op_progress") {
+		t.Fatalf("operation id should be part of the operation header: %q", text)
+	}
+}
+
 func TestTextRendererAppliesSemanticFilters(t *testing.T) {
 	renderer := NewTextRenderer(false)
 	renderer.SetFilter(EventFilter{Tool: "change_read", Path: "demo.go"})
@@ -163,35 +267,17 @@ func TestTextRendererAppliesSemanticFilters(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if text := output.String(); !strings.Contains(text, "change_read") || strings.Contains(text, "file_read") || strings.Contains(text, "other.go") {
+	if text := output.String(); !strings.Contains(text, "change read") || strings.Contains(text, "file_read") || strings.Contains(text, "other.go") {
 		t.Fatalf("semantic filter output=%q", text)
-	}
-}
-
-func TestFormatRemoteSessionIDUsesCanonicalUUID(t *testing.T) {
-	for _, test := range []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{name: "uuid", input: "4F8C2E90-6B2A-4B20-9D8C-1A1F8A12E7C4", want: "4f8c2e90-6b2a-4b20-9d8c-1a1f8a12e7c4"},
-		{name: "legacy random id", input: "rs_AAECAwQFBgcICQoLDA0ODw", want: "00010203-0405-0607-0809-0a0b0c0d0e0f"},
-		{name: "unknown id", input: "rs_observer", want: "rs_observer"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if got := formatRemoteSessionID(test.input); got != test.want {
-				t.Fatalf("formatted remote session id=%q, want %q", got, test.want)
-			}
-		})
 	}
 }
 
 func TestTextRendererAllowsFiftyBodyLinesBeforeEllipsis(t *testing.T) {
 	renderer := NewTextRenderer(false)
 	var output bytes.Buffer
-	block := &interactionBlock{key: "test", sequence: 1, tool: "file_read"}
+	block := &interactionBlock{key: "test"}
 	renderer.blocks[block.key] = block
-	if err := renderer.activate(&output, block); err != nil {
+	if err := renderer.activate(&output, block, Event{Tool: "command_execute", Status: "running"}); err != nil {
 		t.Fatal(err)
 	}
 	for index := 0; index < maxInteractionBodyLines; index++ {
@@ -203,10 +289,10 @@ func TestTextRendererAllowsFiftyBodyLinesBeforeEllipsis(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	if strings.Contains(text, "│ ...") {
+	if strings.Contains(text, "output truncated") {
 		t.Fatalf("exactly fifty body lines should not truncate: %q", text)
 	}
-	if strings.Count(text, "│ ") != maxInteractionBodyLines || !strings.HasSuffix(text, "\n\n") {
+	if strings.Count(text, "line-") != maxInteractionBodyLines || !strings.HasSuffix(text, "\n\n") {
 		t.Fatalf("body/footer budget output=%q", text)
 	}
 }
@@ -214,8 +300,8 @@ func TestTextRendererAllowsFiftyBodyLinesBeforeEllipsis(t *testing.T) {
 func TestTextRendererCapsWrappedBodyLines(t *testing.T) {
 	renderer := NewTextRendererWithWidth(false, 10)
 	var output bytes.Buffer
-	block := &interactionBlock{key: "wrapped", sequence: 1, tool: "source_read"}
-	if err := renderer.activate(&output, block); err != nil {
+	block := &interactionBlock{key: "wrapped"}
+	if err := renderer.activate(&output, block, Event{Tool: "command_execute", Status: "running"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := renderer.writeBodyLine(&output, block, strings.Repeat("x", 500)); err != nil {
@@ -227,8 +313,8 @@ func TestTextRendererCapsWrappedBodyLines(t *testing.T) {
 	if block.bodyLines != maxInteractionBodyLines || !block.ellipsis {
 		t.Fatalf("wrapped body budget=%d ellipsis=%v, want %d and true", block.bodyLines, block.ellipsis, maxInteractionBodyLines)
 	}
-	if got := strings.Count(output.String(), "│ "); got != maxInteractionBodyLines {
-		t.Fatalf("rendered body lines=%d, want %d: %q", got, maxInteractionBodyLines, output.String())
+	if got := strings.Count(output.String(), "xxxxxxxx"); got == 0 || !strings.Contains(output.String(), "… out") {
+		t.Fatalf("wrapped output did not retain content and truncation marker: %q", output.String())
 	}
 }
 
@@ -267,7 +353,7 @@ func TestTextRendererUsesIndependentFallbackKeysAndResetsAfterGap(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	if strings.Count(output.String(), "╭─") != 2 {
+	if strings.Count(output.String(), "Observed ") != 2 {
 		t.Fatalf("fallback events were merged: %q", output.String())
 	}
 
@@ -275,12 +361,12 @@ func TestTextRendererUsesIndependentFallbackKeysAndResetsAfterGap(t *testing.T) 
 	if err := renderer.RenderEvent(&output, Event{Sequence: 3, RequestID: "req_reset", Tool: "file_read", Type: TypeToolCompleted, Output: []byte(`{"status":"ok"}`)}); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(output.String(), "╭─") != 3 {
+	if strings.Contains(output.String(), "╭─") || !strings.Contains(output.String(), "Read files") {
 		t.Fatalf("renderer state survived gap: %q", output.String())
 	}
 }
 
-func TestTextRendererWrapsBodyAndFillsFooterToConfiguredWidth(t *testing.T) {
+func TestTextRendererWrapsBodyToConfiguredWidth(t *testing.T) {
 	const width = 32
 	renderer := NewTextRendererWithWidth(false, width)
 	var output bytes.Buffer
@@ -305,16 +391,6 @@ func TestTextRendererWrapsBodyAndFillsFooterToConfiguredWidth(t *testing.T) {
 		if got := displayWidth(line); got > width {
 			t.Fatalf("line width=%d exceeds %d: %q", got, width, line)
 		}
-	}
-	footer := ""
-	for index := len(lines) - 1; index >= 0; index-- {
-		if strings.TrimSpace(lines[index]) != "" {
-			footer = lines[index]
-			break
-		}
-	}
-	if !strings.HasPrefix(footer, "╰") || displayWidth(footer) != width {
-		t.Fatalf("footer width=%d content=%q", displayWidth(footer), footer)
 	}
 	if !strings.Contains(joinWrappedObservationLines(output.String()), longSummary) {
 		t.Fatalf("long body line was truncated: %q", output.String())
@@ -374,18 +450,18 @@ func TestTextRendererRefreshesWidthAfterTerminalResize(t *testing.T) {
 	}
 }
 
-func TestTextRendererClipsPendingLineAfterTerminalResize(t *testing.T) {
+func TestTextRendererUsesWidthWhenWritingAfterTerminalResize(t *testing.T) {
 	renderer := NewTextRendererWithWidth(false, 80)
 	var output bytes.Buffer
-	block := &interactionBlock{key: "pending_resize", sequence: 10, tool: "file_read"}
+	block := &interactionBlock{key: "pending_resize"}
 	renderer.blocks[block.key] = block
-	if err := renderer.activate(&output, block); err != nil {
-		t.Fatal(err)
-	}
-	if err := renderer.writeBodyLine(&output, block, "this pending line was collected before the resize"); err != nil {
+	if err := renderer.activate(&output, block, Event{Tool: "file_read", Status: "succeeded"}); err != nil {
 		t.Fatal(err)
 	}
 	renderer.SetWidth(28)
+	if err := renderer.writeBodyLine(&output, block, "this line is written after the resize"); err != nil {
+		t.Fatal(err)
+	}
 	if err := renderer.close(&output, block); err != nil {
 		t.Fatal(err)
 	}

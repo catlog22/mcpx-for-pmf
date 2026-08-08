@@ -1,10 +1,12 @@
 # Public tool short descriptions (list surface). Schema structure stays in Go.
 tools:
   read: 读取 Workspace 文件、搜索结果、文件列表、上下文或环境；view 决定读取语义，支持 items[] 批量读取。
-  edit: 使用精确片段或完整内容批量修改 Workspace 文件；返回内联 Unified Diff 与严格变更行统计。
-  observe: 查看会话状态、历史、最近文件变更、任务日志或工作区差异；view 决定观察语义。
+  edit: 使用精确片段或完整内容批量修改 Workspace 文件；不提供文件删除。删除必须使用 remove_prepare/submit_remove；返回内联 Unified Diff 与严格变更行统计。
+  remove_prepare: 冻结已注册 Workspace 内明确文件或目录树的删除清单；严格只读，不执行删除，返回 manifest_sha256 和用户批准摘要。
+  submit_remove: 提交网页端模型向用户询问后确认的冻结删除清单；仅接受 remove_prepare 返回的 confirmation_uuid，只删除 SHA/目录树摘要匹配的 Workspace 文件或明确目录，不执行 shell、glob 或 symlink 跟随，并保留 durable audit。
+  observe: 查看会话状态、历史、最近文件变更、任务日志或工作区差异；view=history 支持按事件、请求、Operation、Task、Changeset、关键词、类型、状态和时间过滤，并用 cursor 分页。
   session: 创建、直接接入或关闭 Remote Session；action 决定生命周期。
-  execute: 按策略执行命令或项目任务，并统一处理 Task attach/stop/stdin；长命令返回 Task ID。
+  execute: 按策略执行命令或项目任务，并统一处理 Task attach/stop/stdin；短命令内联返回，超过 yield_time_ms 才返回 Task ID；execution_mode=async 只表示 Operation 异步调度。
   plan: 创建、读取、推进、阻塞、重规划或交付持久化计划；action 决定具体动作。
   operation_batch: 提交多个公开工具操作；无依赖步骤并发，有依赖按 DAG。
   operation_manage: 查询、等待、读取结果、取消或恢复异步操作。

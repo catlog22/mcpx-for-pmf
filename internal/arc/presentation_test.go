@@ -23,10 +23,13 @@ func TestRenderContentRendersCodeChangeDiff(t *testing.T) {
 	if !ok {
 		t.Fatal("code_change diff renderer must produce a dedicated view")
 	}
-	for _, want := range []string{"### Changeset chg_1", "| `demo.go` | update | +1 −1 |", "```diff", diff} {
+	for _, want := range []string{"### Changeset chg_1", "| `demo.go` | update | +1 −1 |", "```diff", "-const Value = 2", "+const Value = 3"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("rendered diff missing %q:\n%s", want, text)
 		}
+	}
+	if strings.Contains(text, "diff --git") || strings.Contains(text, "@@") || strings.Count(text, "demo.go") != 1 {
+		t.Fatalf("rendered diff leaked headers or repeated path:\n%s", text)
 	}
 }
 
@@ -151,6 +154,39 @@ func TestRenderContentShowsPerFileDiffDetails(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("per-file diff detail missing %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestRenderContentRendersCleanEditResultsDiff(t *testing.T) {
+	data := map[string]any{
+		"edit_id": "edit_clean_1",
+		"results": []any{map[string]any{
+			"path":      "created.txt",
+			"operation": "create",
+			"diff":      "--- /dev/null\n+++ b/created.txt\n@@ -0,0 +1 @@\n+created\n",
+		}},
+		"diff_summary": "--- /dev/null\n+++ b/created.txt\n@@ -0,0 +1 @@\n+created\n",
+	}
+	text, ok := RenderContent("code_change", "diff", "edit summary", data)
+	if !ok || !strings.Contains(text, "### Edit edit_clean_1") || !strings.Contains(text, "created.txt") || !strings.Contains(text, "+created") {
+		t.Fatalf("clean edit diff rendering=%q, dedicated=%v", text, ok)
+	}
+}
+
+func TestRenderToolContentUsesBooleanConfirmationForCleanDelete(t *testing.T) {
+	text, ok := RenderToolContent("edit", "error", "text", "delete blocked", map[string]any{
+		"confirmation_required":   true,
+		"user_confirmed_required": true,
+		"confirmation_digest":     "sha256:delete-request",
+		"deletions": []any{map[string]any{
+			"path": "tmp/fixture.txt", "sha256": "sha256:file", "size": int64(12),
+		}},
+	})
+	if !ok || !strings.Contains(text, "user_confirmed=true") || !strings.Contains(text, "confirmation_digest") {
+		t.Fatalf("clean delete confirmation text=%q rendered=%v", text, ok)
+	}
+	if strings.Contains(text, "confirmation_token") {
+		t.Fatalf("clean delete confirmation leaked token terminology: %q", text)
 	}
 }
 

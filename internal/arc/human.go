@@ -46,6 +46,10 @@ func RenderToolContent(tool, resultType, renderer, summary string, data any) (st
 		if text, ok := renderCommandConfirmation(summary, asMap); ok {
 			return text, true
 		}
+	case "edit":
+		if text, ok := renderEditConfirmation(summary, asMap); ok {
+			return text, true
+		}
 	case "operation_manage", "operation_batch":
 		if text, ok := renderOperationConfirmation(summary, asMap); ok {
 			return text, true
@@ -71,6 +75,75 @@ func RenderToolContent(tool, resultType, renderer, summary string, data any) (st
 		return text, true
 	}
 	return summary, false
+}
+
+func renderEditConfirmation(summary string, data map[string]any) (string, bool) {
+	if data["confirmation_required"] != true || data["user_confirmed_required"] != true {
+		return summary, false
+	}
+	var builder strings.Builder
+	builder.WriteString("文件删除等待客户端完成用户语义确认")
+	if digest := humanField(data, "confirmation_digest"); digest != "" {
+		fmt.Fprintf(&builder, "\n- confirmation_digest: %s", inlineCode(digest))
+	}
+	for index, item := range humanMaps(data["deletions"]) {
+		if index >= maxHumanItems {
+			break
+		}
+		path := humanField(item, "path")
+		if path == "" {
+			continue
+		}
+		fmt.Fprintf(&builder, "\n- delete: %s", inlineCode(path))
+		if sha := humanField(item, "sha256"); sha != "" {
+			fmt.Fprintf(&builder, " · sha256=%s", inlineCode(sha))
+		}
+	}
+	if count := len(humanMaps(data["deletions"])); count > maxHumanItems {
+		fmt.Fprintf(&builder, "\n- ... and %d more files", count-maxHumanItems)
+	}
+	builder.WriteString("\n确认后使用相同 edits、purpose 和 idempotency_key 重试，并设置 user_confirmed=true。")
+	return strings.TrimSpace(builder.String()), true
+}
+
+// renderContextBlock keeps the semantic context visible in hosts that only
+// render content[0].text. The same values remain available in ARC
+// structuredContent.context for machines.
+func renderContextBlock(display string, context Context) string {
+	context = normalizeContext(context)
+	lines := make([]string, 0, 3)
+	hasNarrative := context.Goal != "" || context.Purpose != "" || context.ReasoningSummary != "" || context.ProgressSummary != "" || context.NextStep != ""
+	for index, group := range [][]struct {
+		label string
+		value string
+	}{
+		{{label: "goal", value: context.Goal}, {label: "purpose", value: context.Purpose}},
+		{{label: "reasoning", value: context.ReasoningSummary}, {label: "progress", value: context.ProgressSummary}, {label: "next", value: context.NextStep}},
+		{{label: "plan", value: context.PlanID}, {label: "task", value: context.TaskID}, {label: "operation", value: context.OperationID}},
+	} {
+		if index == 2 && !hasNarrative {
+			// Internal IDs are useful alongside a model-authored context, but an
+			// operation ID alone must not turn a plain result into a context card.
+			break
+		}
+		parts := make([]string, 0, len(group))
+		for _, field := range group {
+			if value := compactHuman(field.value); value != "" {
+				parts = append(parts, field.label+": "+value)
+			}
+		}
+		if len(parts) > 0 {
+			lines = append(lines, "- "+strings.Join(parts, " · "))
+		}
+	}
+	if len(lines) == 0 {
+		return display
+	}
+	block := "Context:\n" + strings.Join(lines, "\n")
+	if strings.TrimSpace(display) == "" {
+		return block
+	}
+	return block + "\n\n" + strings.TrimSpace(display)
 }
 
 // renderCommandConfirmation puts the confirmation_token into the model-facing

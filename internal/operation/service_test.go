@@ -238,3 +238,48 @@ func TestServiceResumesWaitingConfirmationStep(t *testing.T) {
 		t.Fatalf("final=%+v timedOut=%v", final, timedOut)
 	}
 }
+
+func TestServiceRecoversFromExecutorPanicAndKeepsWorkerUsable(t *testing.T) {
+	service := newTestService(t, 2)
+	record, err := service.Submit(context.Background(), SubmitSpec{
+		RemoteSessionID: "session", WorkspaceName: "workspace", RequestID: "panic_request", Purpose: "panic isolation",
+		Steps: []StepSpec{{ID: "panic", Tool: "execute"}, {ID: "healthy", Tool: "read"}},
+	}, func(ctx context.Context, input ExecuteInput) ExecuteResult {
+		if input.StepID == "panic" {
+			panic("synthetic executor panic")
+		}
+		return ExecuteResult{Result: []byte(`{"ok":true}`)}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, timedOut, err := service.Wait(context.Background(), record.ID, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if timedOut || final.State != StateFailed {
+		t.Fatalf("panic operation=%+v timedOut=%v", final, timedOut)
+	}
+	for _, step := range final.Steps {
+		if step.ID == "panic" && step.State != StateFailed {
+			t.Fatalf("panic step=%+v", step)
+		}
+		if step.ID == "healthy" && step.State != StateSucceeded {
+			t.Fatalf("independent healthy step=%+v", step)
+		}
+	}
+
+	recovered, err := service.Submit(context.Background(), SubmitSpec{
+		RemoteSessionID: "session", WorkspaceName: "workspace", RequestID: "after_panic", Purpose: "worker recovery",
+		Steps: []StepSpec{{ID: "after", Tool: "read"}},
+	}, func(context.Context, ExecuteInput) ExecuteResult {
+		return ExecuteResult{Result: []byte(`{"recovered":true}`)}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, timedOut, err = service.Wait(context.Background(), recovered.ID, 2*time.Second)
+	if err != nil || timedOut || final.State != StateSucceeded {
+		t.Fatalf("worker did not recover: final=%+v timedOut=%v err=%v", final, timedOut, err)
+	}
+}

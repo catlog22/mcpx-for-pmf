@@ -140,6 +140,8 @@ func renderCodeChange(data map[string]any) string {
 	changesetID, _ := data["changeset_id"].(string)
 	if changesetID != "" {
 		fmt.Fprintf(&b, "### Changeset %s", changesetID)
+	} else if editID, _ := data["edit_id"].(string); editID != "" {
+		fmt.Fprintf(&b, "### Edit %s", editID)
 	}
 	digest, _ := data["digest"].(string)
 	if strings.TrimSpace(digest) == "" {
@@ -159,13 +161,21 @@ func renderCodeChange(data map[string]any) string {
 	if diffText == "" {
 		diffText, _ = diffMeta["unified_diff_preview"].(string)
 	}
+	if diffText == "" {
+		diffText, _ = data["diff_summary"].(string)
+	}
 	totalAdded, totalRemoved := countDiffLines(diffText)
 	if totalAdded > 0 || totalRemoved > 0 {
 		fmt.Fprintf(&b, " · +%d −%d", totalAdded, totalRemoved)
 	}
 	fileStats := diffStatsByPath(diffText)
 	files := changeFiles(data["files"])
-	if len(files) > 0 {
+	if len(files) == 0 {
+		files = changeFiles(data["results"])
+	}
+	fileDiffRendered := hasFileDiffs(files)
+	var fileDiffTruncated bool
+	if len(files) > 0 && !fileDiffRendered {
 		b.WriteString("\n\n| 文件 | 操作 | 变更 |\n|---|---|---|\n")
 		for _, file := range files {
 			path, _ := file["path"].(string)
@@ -176,11 +186,11 @@ func renderCodeChange(data map[string]any) string {
 			fmt.Fprintf(&b, "| `%s` | %s | %s |\n", path, op, formatDiffStats(fileStats[path]))
 		}
 	}
-	fileDiffRendered, fileDiffTruncated := renderFileDiffs(&b, files)
+	fileDiffRendered, fileDiffTruncated = renderFileDiffs(&b, files)
 	if !fileDiffRendered && diffText != "" {
 		display, truncated := trimDiffForRender(diffText)
 		b.WriteString("\n```diff\n")
-		b.WriteString(display)
+		b.WriteString(renderHumanDiff(display))
 		b.WriteString("\n```\n")
 		if truncated {
 			resourceURI, _ := diffMeta["resource_uri"].(string)
@@ -194,7 +204,13 @@ func renderCodeChange(data map[string]any) string {
 			resourceURI, _ := diffMeta["resource_uri"].(string)
 			if resourceURI != "" {
 				b.WriteString("\n\n> 完整变更见 Changeset Resource。")
+			} else if editID, _ := data["edit_id"].(string); editID != "" {
+				b.WriteString("\n\n> Diff 已截断；请使用 observe(view=diff, edit_id=\"" + editID + "\") 继续读取。")
 			}
+		}
+	} else if truncated, _ := data["diff_truncated"].(bool); truncated {
+		if editID, _ := data["edit_id"].(string); editID != "" {
+			b.WriteString("\n\n> Diff 已截断；请使用 observe(view=diff, edit_id=\"" + editID + "\") 继续读取。")
 		}
 	}
 	return strings.TrimSpace(b.String())
@@ -239,8 +255,12 @@ func renderFileDiffs(builder *strings.Builder, files []map[string]any) (rendered
 			builder.WriteString(" · ")
 			builder.WriteString(op)
 		}
+		added, removed := countDiffLines(diff)
+		if added > 0 || removed > 0 {
+			fmt.Fprintf(builder, " · [-%d,+%d]", removed, added)
+		}
 		builder.WriteString("\n\n```diff\n")
-		builder.WriteString(diff)
+		builder.WriteString(renderHumanDiff(diff))
 		builder.WriteString("\n```")
 		rendered = true
 		if value, _ := file["diff_truncated"].(bool); value {
@@ -248,6 +268,73 @@ func renderFileDiffs(builder *strings.Builder, files []map[string]any) (rendered
 		}
 	}
 	return rendered, truncated
+}
+
+func hasFileDiffs(files []map[string]any) bool {
+	for _, file := range files {
+		if diff, _ := file["diff"].(string); strings.TrimSpace(diff) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// renderHumanDiff keeps the useful source lines while hiding unified-diff
+// transport headers. Five context lines on each side are enough for a model
+// or human to understand a small edit without repeating the file name.
+func renderHumanDiff(diff string) string {
+	lines := strings.Split(strings.TrimSuffix(diff, "\n"), "\n")
+	if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
+		return ""
+	}
+	keep := make([]bool, len(lines))
+	for index, line := range lines {
+		if !isHumanDiffContentLine(line) {
+			continue
+		}
+		start := index - 5
+		if start < 0 {
+			start = 0
+		}
+		end := index + 5
+		if end >= len(lines) {
+			end = len(lines) - 1
+		}
+		for cursor := start; cursor <= end; cursor++ {
+			value := lines[cursor]
+			if !isHumanDiffContentLine(value) {
+				continue
+			}
+			keep[cursor] = true
+		}
+	}
+	var builder strings.Builder
+	gap := false
+	for index, line := range lines {
+		if !isHumanDiffContentLine(line) {
+			continue
+		}
+		if !keep[index] {
+			if builder.Len() > 0 {
+				gap = true
+			}
+			continue
+		}
+		if gap {
+			builder.WriteString("...\n")
+			gap = false
+		}
+		builder.WriteString(line)
+		builder.WriteByte('\n')
+	}
+	return strings.TrimSuffix(builder.String(), "\n")
+}
+
+func isHumanDiffContentLine(line string) bool {
+	if strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "@@") || strings.HasPrefix(line, "diff --git ") {
+		return false
+	}
+	return strings.HasPrefix(line, " ") || strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") || strings.HasPrefix(line, `\ No newline`)
 }
 
 type diffStats struct {

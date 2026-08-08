@@ -12,8 +12,8 @@ import (
 type DiffMode uint8
 
 const (
-	// DiffModeFull keeps the complete inline diff. It is the compatibility
-	// default for RenderText, which is also used by library callers.
+	// DiffModeFull keeps the complete inline diff. It is the default for
+	// RenderText, which is also used by library callers.
 	DiffModeFull DiffMode = iota
 	DiffModePreview
 	DiffModeSummary

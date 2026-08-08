@@ -180,8 +180,8 @@ func TestWrapToolResultKeepsHumanTextAndModelStructuredContent(t *testing.T) {
 	if !ok {
 		t.Fatalf("models need structuredContent, got %#v", written.StructuredContent)
 	}
-	if sc["status"] == nil || sc["type"] == nil || sc["data"] == nil {
-		t.Fatalf("structuredContent must expose status/type/data: %#v", sc)
+	if sc["status"] == nil || sc["type"] == nil || sc["context"] == nil || sc["data"] == nil {
+		t.Fatalf("structuredContent must expose status/type/context/data: %#v", sc)
 	}
 	data, _ := sc["data"].(map[string]any)
 	if data["value"] != "ready" {
@@ -193,6 +193,57 @@ func TestWrapToolResultKeepsHumanTextAndModelStructuredContent(t *testing.T) {
 	// Human text must stay prose, not dump the machine envelope.
 	if strings.Contains(text.Text, `"mcpx"`) || strings.Contains(text.Text, `"structuredContent"`) {
 		t.Fatalf("human text must not dump machine JSON: %s", text.Text)
+	}
+}
+
+func TestWrapToolResultExposesSemanticContextToARCAndHumanText(t *testing.T) {
+	raw := mcpresult.NewStructured(map[string]any{
+		"status": "succeeded",
+		"data": map[string]any{
+			"next_step": "运行单元测试",
+		},
+	}, "已完成文件读取")
+	written := WrapToolResult("file_read", ResultContext{
+		RequestID: "req_context",
+		Context: Context{
+			Goal:             "修复观测体验",
+			Purpose:          "读取目标文件",
+			ReasoningSummary: "先确认当前实现和格式",
+			ProgressSummary:  "已定位相关渲染入口",
+			NextStep:         "运行单元测试",
+			PlanID:           "pl_context",
+			TaskID:           "pt_context",
+			OperationID:      "op_context",
+		},
+	}, raw)
+
+	structured, ok := written.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("structuredContent=%T", written.StructuredContent)
+	}
+	context, ok := structured["context"].(map[string]any)
+	if !ok {
+		t.Fatalf("context=%#v", structured["context"])
+	}
+	for key, want := range map[string]string{
+		"goal":              "修复观测体验",
+		"purpose":           "读取目标文件",
+		"reasoning_summary": "先确认当前实现和格式",
+		"progress_summary":  "已定位相关渲染入口",
+		"next_step":         "运行单元测试",
+		"plan_id":           "pl_context",
+		"task_id":           "pt_context",
+		"operation_id":      "op_context",
+	} {
+		if context[key] != want {
+			t.Fatalf("context[%q]=%v, want %q", key, context[key], want)
+		}
+	}
+	text := written.Content[0].(*mcp.TextContent).Text
+	for _, want := range []string{"Context:", "- goal: 修复观测体验 · purpose: 读取目标文件", "next: 运行单元测试", "- plan: pl_context · task: pt_context · operation: op_context"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("human text missing %q: %s", want, text)
+		}
 	}
 }
 
@@ -283,12 +334,33 @@ func TestWrapToolResultPreservesNonTextContent(t *testing.T) {
 }
 
 func TestOutputSchemaAndRegistry(t *testing.T) {
+	rawOutputSchema := OutputSchema()
+	if len(rawOutputSchema) > 4096 {
+		t.Fatalf("output schema is too large for repeated tools/list exposure: %d bytes", len(rawOutputSchema))
+	}
 	var schema map[string]any
-	if err := json.Unmarshal(OutputSchema(), &schema); err != nil {
+	if err := json.Unmarshal(rawOutputSchema, &schema); err != nil {
 		t.Fatal(err)
 	}
-	if schema["$id"] != "mcpx.envelope.v1" {
+	if schema["$id"] != "mcpx.structured_content.v1.3" {
 		t.Fatalf("schema id = %v", schema["$id"])
+	}
+	required, _ := schema["required"].([]any)
+	for _, field := range []any{"status", "type", "context", "data"} {
+		if !containsAny(required, field) {
+			t.Fatalf("output schema missing required %v: %v", field, required)
+		}
+	}
+	properties, _ := schema["properties"].(map[string]any)
+	if properties["context"] == nil || properties["data"] == nil {
+		t.Fatalf("structured output schema missing context/data: %+v", properties)
+	}
+	if schema["additionalProperties"] != false {
+		t.Fatalf("structured output schema must reject unknown envelope fields: %+v", schema)
+	}
+	outputDataSchema, _ := properties["data"].(map[string]any)
+	if outputDataSchema["type"] != "object" || outputDataSchema["additionalProperties"] != true {
+		t.Fatalf("structured output schema must keep business data open: %+v", outputDataSchema)
 	}
 	registry := SchemaRegistry()
 	if len(registry) != 13 {
@@ -324,6 +396,15 @@ func TestOutputSchemaAndRegistry(t *testing.T) {
 	if OutputSchema()[0] == 'x' {
 		t.Fatal("output schema must return an independent copy")
 	}
+}
+
+func containsAny(values []any, want any) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestWrapToolResultAddsPresentationAndDiagramResult(t *testing.T) {
@@ -379,6 +460,7 @@ func TestWrapToolResultUsesStableToolSemantics(t *testing.T) {
 		{name: "context query", tool: "context_query", data: map[string]any{"content": "plain source"}, wantType: "search_result", wantView: "table"},
 		{name: "change execute", tool: "change_execute", data: map[string]any{"status": "prepared"}, wantType: "code_change", wantView: "diff"},
 		{name: "change manage", tool: "change_manage", data: map[string]any{"status": "applied"}, wantType: "code_change", wantView: "diff"},
+		{name: "clean edit", tool: "edit", data: map[string]any{"edit_id": "edit_1", "results": []any{}}, wantType: "code_change", wantView: "diff"},
 		{name: "task manage", tool: "task_manage", data: map[string]any{"status": "running"}, wantType: "log", wantView: "log"},
 	}
 	for _, tt := range tests {

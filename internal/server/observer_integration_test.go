@@ -50,7 +50,7 @@ func TestObservationRecordsToolLifecycleAndRedacts(t *testing.T) {
 			if event.Tool != "observer_test" {
 				continue
 			}
-			view := observationEventView{Type: event.Type, Sequence: event.Sequence, Intent: event.Intent, Input: string(event.Input), Output: string(event.Output)}
+			view := observationEventView{Type: event.Type, Sequence: event.Sequence, CallID: event.CallID, Phase: event.Phase, Intent: event.Intent, Input: string(event.Input), Output: string(event.Output)}
 			switch event.Type {
 			case "tool.started":
 				started = &view
@@ -68,6 +68,9 @@ func TestObservationRecordsToolLifecycleAndRedacts(t *testing.T) {
 	}
 	if started.Intent != "inspect the project configuration" {
 		t.Fatalf("intent=%q", started.Intent)
+	}
+	if started.CallID == "" || started.CallID != completed.CallID || started.Phase != observation.PhaseActionStarted || completed.Phase != observation.PhaseResult {
+		t.Fatalf("event correlation/phase invalid: started=%+v completed=%+v", started, completed)
 	}
 	if strings.Contains(started.Input, "do-not-store-this-token") || strings.Contains(completed.Output, "do-not-store-this-password") {
 		t.Fatalf("sensitive tool data leaked: input=%s output=%s", started.Input, completed.Output)
@@ -431,11 +434,16 @@ func TestObservationSocketEndToEndDeliversToolEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := map[string]bool{}
+	eventCount := 0
 	deadline := time.After(2 * time.Second)
 	for len(events) < 2 {
 		select {
 		case frame := <-frames:
 			if frame.Type == "event" && frame.Event != nil && frame.Event.Tool == "observer_e2e" {
+				eventCount++
+				if frame.Event.Sequence <= 0 {
+					t.Fatalf("live event was not durable: %+v", frame.Event)
+				}
 				events[frame.Event.Type] = true
 			}
 		case <-deadline:
@@ -444,6 +452,9 @@ func TestObservationSocketEndToEndDeliversToolEvents(t *testing.T) {
 	}
 	if !events[observation.TypeToolStarted] || !events[observation.TypeToolCompleted] {
 		t.Fatalf("missing tool lifecycle events=%+v", events)
+	}
+	if eventCount != 2 {
+		t.Fatalf("durable-first bridge duplicated live events: count=%d", eventCount)
 	}
 	cancel()
 	select {
@@ -459,6 +470,8 @@ func TestObservationSocketEndToEndDeliversToolEvents(t *testing.T) {
 type observationEventView struct {
 	Type     string
 	Sequence int64
+	CallID   string
+	Phase    string
 	Intent   string
 	Input    string
 	Output   string

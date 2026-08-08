@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -49,8 +50,8 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req *mcp.CallToolRequ
 		if mixedFull {
 			return r.toolFileReadMixedBatch(ctx, envReq, session, raw, mode)
 		}
-		if len(raw) > 20 {
-			return r.sourceError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("items exceeds maximum of 20"))
+		if len(raw) > MaxReadItems {
+			return r.sourceError(envReq, session.ID, session.WorkspaceName, &source.LimitError{Resource: "read.items", Actual: len(raw), Max: MaxReadItems})
 		}
 		items := make([]source.BatchReadRequest, 0, len(raw))
 		for _, value := range raw {
@@ -158,7 +159,7 @@ func (r *Runtime) toolFileReadFull(envReq envelope.Request, remoteSessionID, wor
 	read, err := file.ReadFull(file.FullReadOptions{
 		WorkspaceRoot: workspacePath,
 		Path:          path,
-		MaxBytes:      r.effectiveConfig(workspacePath).Security.Files.MaxReadBytes,
+		MaxBytes:      file.MaxSourceBytes,
 	})
 	if err != nil {
 		return r.sourceError(envReq, remoteSessionID, workspace, err)
@@ -185,8 +186,8 @@ func sourceReadMode(payload map[string]any) string {
 // read. The common window-only path above remains source.ReadBatch's bounded,
 // continuation-aware fast path.
 func (r *Runtime) toolFileReadMixedBatch(_ context.Context, envReq envelope.Request, session remotesession.Session, raw []any, defaultMode string) (*mcp.CallToolResult, error) {
-	if len(raw) > 20 {
-		return r.sourceError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("items exceeds maximum of 20"))
+	if len(raw) > MaxReadItems {
+		return r.sourceError(envReq, session.ID, session.WorkspaceName, &source.LimitError{Resource: "read.items", Actual: len(raw), Max: MaxReadItems})
 	}
 	effective := r.effectiveConfig(session.WorkspacePath)
 	budget := intPayload(envReq.Payload, "max_total_bytes")
@@ -233,15 +234,19 @@ func (r *Runtime) toolFileReadMixedBatch(_ context.Context, envReq envelope.Requ
 			continue
 		}
 		if itemMode == "full" {
-			maxBytes := effective.Security.Files.MaxReadBytes
-			if maxBytes <= 0 || maxBytes > int64(remaining) {
-				maxBytes = int64(remaining)
-			}
-			read, err := file.ReadFull(file.FullReadOptions{WorkspaceRoot: session.WorkspacePath, Path: path, MaxBytes: maxBytes})
+			read, err := file.ReadFull(file.FullReadOptions{WorkspaceRoot: session.WorkspacePath, Path: path, MaxBytes: file.MaxSourceBytes})
 			if err != nil {
 				results = append(results, map[string]any{
 					"path": path, "ok": false,
-					"error": map[string]any{"code": "READ_FAILED", "message": err.Error()},
+					"error": sourceReadItemError(err, path, session.ID),
+				})
+				continue
+			}
+			if len(read.Content) > remaining {
+				truncated = true
+				results = append(results, map[string]any{
+					"path": path, "ok": false,
+					"error": map[string]any{"code": "RESULT_BUDGET_EXCEEDED", "message": "full item exceeds the remaining batch result budget", "category": "validation", "retryable": true, "details": map[string]any{"remaining_bytes": remaining, "size_bytes": len(read.Content)}},
 				})
 				continue
 			}
@@ -524,14 +529,7 @@ func (r *Runtime) toolContextQueryAction(ctx context.Context, req *mcp.CallToolR
 		parallel = boolPayload(envReq.Payload, "parallel")
 	}
 	maxResults := intPayload(envReq.Payload, "max_results")
-	var seeds []string
-	if raw, ok := envReq.Payload["paths"].([]any); ok {
-		for _, value := range raw {
-			if path, ok := value.(string); ok && path != "" {
-				seeds = append(seeds, path)
-			}
-		}
-	}
+	seeds := sourcePayloadPaths(envReq.Payload)
 	include, _ := envReq.Payload["include_glob"].(string)
 	exclude, _ := envReq.Payload["exclude_glob"].(string)
 	allowed := r.sourcePathAllowedWithGlobs(session.WorkspacePath, include, exclude)
@@ -543,7 +541,7 @@ func (r *Runtime) toolContextQueryAction(ctx context.Context, req *mcp.CallToolR
 		Query: query, Mode: mode, Parallel: parallel, MaxResults: maxResults,
 		Cursor: sourcePayloadString(envReq.Payload, "cursor"), Pattern: include, ExcludePattern: exclude,
 		ContextBefore: intPayload(envReq.Payload, "context_before"), ContextAfter: intPayload(envReq.Payload, "context_after"),
-		MaxBytesPerFile: maxBytes, IncludeSHA256: boolPayload(envReq.Payload, "include_sha256"), Allowed: allowed,
+		MaxBytesPerFile: maxBytes, IncludeSHA256: boolPayload(envReq.Payload, "include_sha256"), ScopePaths: seeds, Allowed: allowed,
 	})
 	if err != nil {
 		return r.sourceError(envReq, session.ID, session.WorkspaceName, err)
@@ -581,8 +579,9 @@ func (r *Runtime) toolContextSearchAction(ctx context.Context, req *mcp.CallTool
 	if !setCase {
 		caseSensitive = true // retain existing source search behaviour by default.
 	}
+	seeds := sourcePayloadPaths(envReq.Payload)
 	resultData, err := source.SearchWith(session.WorkspacePath, source.SearchOptions{
-		Query: query, Pattern: pattern, ExcludePattern: sourcePayloadString(envReq.Payload, "exclude_glob"), Cursor: sourcePayloadString(envReq.Payload, "cursor"), Regex: regex,
+		Query: query, Pattern: pattern, ExcludePattern: sourcePayloadString(envReq.Payload, "exclude_glob"), ScopePaths: seeds, Cursor: sourcePayloadString(envReq.Payload, "cursor"), Regex: regex,
 		CaseSensitive: caseSensitive, Limit: intPayload(envReq.Payload, "limit"), ContextBefore: intPayload(envReq.Payload, "context_before"), ContextAfter: intPayload(envReq.Payload, "context_after"), IncludeSHA256: boolPayload(envReq.Payload, "include_sha256"),
 	}, r.sourcePathAllowed(session.WorkspacePath))
 	if err != nil {
@@ -593,6 +592,7 @@ func (r *Runtime) toolContextSearchAction(ctx context.Context, req *mcp.CallTool
 		data["next_cursor"] = resultData.NextCursor
 		data["next_action"] = nextAction("context_query", map[string]any{
 			"remote_session_id": session.ID, "action": "search", "query": query,
+			"paths":  seeds,
 			"cursor": resultData.NextCursor, "limit": intPayload(envReq.Payload, "limit"),
 			"include_glob": pattern, "exclude_glob": sourcePayloadString(envReq.Payload, "exclude_glob"),
 			"regex": regex, "case_sensitive": caseSensitive,
@@ -604,13 +604,33 @@ func (r *Runtime) toolContextSearchAction(ctx context.Context, req *mcp.CallTool
 	return compactToolResult(data, fmt.Sprintf("Source search returned %d match(es).", len(resultData.Matches))), nil
 }
 
+func sourcePayloadPaths(payload map[string]any) []string {
+	raw, _ := payload["paths"].([]any)
+	paths := make([]string, 0, len(raw))
+	for _, value := range raw {
+		if path, ok := value.(string); ok && strings.TrimSpace(path) != "" {
+			paths = append(paths, strings.TrimSpace(path))
+		}
+	}
+	return paths
+}
+
 func (r *Runtime) toolContextListAction(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, session, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil
 	}
 	pattern := sourcePayloadString(envReq.Payload, "include_glob")
-	list, err := source.ListWith(session.WorkspacePath, pattern, sourcePayloadString(envReq.Payload, "exclude_glob"), sourcePayloadString(envReq.Payload, "cursor"), intPayload(envReq.Payload, "limit"), boolPayload(envReq.Payload, "include_sha256"), r.sourcePathAllowed(session.WorkspacePath))
+	baseAllowed := r.sourcePathAllowed(session.WorkspacePath)
+	scopeAllowed, err := hardListScope(session.WorkspacePath, sourcePayloadString(envReq.Payload, "path"))
+	if err != nil {
+		return r.sourceError(envReq, session.ID, session.WorkspaceName, err)
+	}
+	allowed := baseAllowed
+	if scopeAllowed != nil {
+		allowed = func(candidate string) bool { return baseAllowed(candidate) && scopeAllowed(candidate) }
+	}
+	list, err := source.ListWith(session.WorkspacePath, pattern, sourcePayloadString(envReq.Payload, "exclude_glob"), sourcePayloadString(envReq.Payload, "cursor"), intPayload(envReq.Payload, "limit"), boolPayload(envReq.Payload, "include_sha256"), allowed)
 	if err != nil {
 		return r.sourceError(envReq, session.ID, session.WorkspaceName, err)
 	}
@@ -618,12 +638,44 @@ func (r *Runtime) toolContextListAction(ctx context.Context, req *mcp.CallToolRe
 	if list.NextCursor != "" {
 		data["next_cursor"] = list.NextCursor
 		data["next_action"] = nextAction("context_query", map[string]any{
-			"remote_session_id": session.ID, "action": "list", "include_glob": pattern,
+			"remote_session_id": session.ID, "action": "list", "path": sourcePayloadString(envReq.Payload, "path"), "include_glob": pattern,
 			"exclude_glob": sourcePayloadString(envReq.Payload, "exclude_glob"), "cursor": list.NextCursor,
 			"limit": intPayload(envReq.Payload, "limit"), "include_sha256": boolPayload(envReq.Payload, "include_sha256"),
 		})
 	}
 	return compactToolResult(data, fmt.Sprintf("Source list returned %d of %d file(s).", len(list.Files), list.Total)), nil
+}
+
+// hardListScope turns read(list).path into an actual boundary. include_glob
+// remains an additional filter; it can narrow this scope but can never widen
+// it. The scope is lexical after file.Resolve has rejected traversal and
+// symlink escapes, so a directory named "src" cannot leak sibling files.
+func hardListScope(workspaceRoot, requested string) (func(string) bool, error) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return nil, nil
+	}
+	absolute, err := file.Resolve(workspaceRoot, requested)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(absolute)
+	if err != nil {
+		return nil, err
+	}
+	relative := filepath.ToSlash(filepath.Clean(requested))
+	if relative == "." {
+		relative = ""
+	}
+	if info.IsDir() {
+		return func(candidate string) bool {
+			candidate = filepath.ToSlash(filepath.Clean(candidate))
+			return relative == "" || candidate == relative || strings.HasPrefix(candidate, relative+"/")
+		}, nil
+	}
+	return func(candidate string) bool {
+		return filepath.ToSlash(filepath.Clean(candidate)) == relative
+	}, nil
 }
 
 func (r *Runtime) sourcePathAllowedWithGlobs(workspacePath, include, exclude string) func(string) bool {

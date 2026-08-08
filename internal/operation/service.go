@@ -472,7 +472,7 @@ func (s *Service) runStep(job stepJob) {
 	active.stepCancel[job.stepID] = cancel
 	s.mu.Unlock()
 	s.emit(Event{OperationID: job.operationID, StepID: job.stepID, RemoteSessionID: activeSpecSession(s, job.operationID), WorkspaceName: activeSpecWorkspace(s, job.operationID), Tool: step.Tool, Type: operationEventStepStarted, State: StateRunning, Summary: "operation step started", CreatedAt: s.now().UTC()})
-	result := active.executor(stepCtx, ExecuteInput{
+	result := executeStepSafely(active.executor, stepCtx, ExecuteInput{
 		OperationID: job.operationID, StepID: job.stepID,
 		RequestID:       stepRequestID(s, job.operationID, job.stepID),
 		RemoteSessionID: activeSpecSession(s, job.operationID), WorkspaceName: activeSpecWorkspace(s, job.operationID),
@@ -500,6 +500,15 @@ func (s *Service) runStep(job stepJob) {
 	}
 	s.emit(Event{OperationID: job.operationID, StepID: job.stepID, RemoteSessionID: activeSpecSession(s, job.operationID), WorkspaceName: activeSpecWorkspace(s, job.operationID), Tool: step.Tool, Type: operationEventStepCompleted, State: state, Summary: "operation step " + string(state), CreatedAt: s.now().UTC()})
 	s.reconcile(job.operationID)
+}
+
+func executeStepSafely(executor Executor, ctx context.Context, input ExecuteInput) (result ExecuteResult) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = ExecuteResult{Err: fmt.Errorf("operation executor panic recovered: %v", recovered)}
+		}
+	}()
+	return executor(ctx, input)
 }
 
 func (s *Service) enqueueReady(operationID string) {

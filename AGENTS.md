@@ -14,6 +14,13 @@ MCPX 是运行在开发环境中的 **MCP Runtime（网关）**，Go module 为 
 
 本地产品文档 `prd/`、`docs/superpowers/` 被 `.gitignore` 排除，勿提交。
 
+## 版本策略
+
+- 永远不要考虑兼容以前的版本。
+- 新实现只维护当前契约；不得为旧版本保留别名、适配器、迁移分支、旧 Schema、旧工具入口或兼容测试。
+- 发生契约变更时，直接同步修改实现、文档和测试；旧行为应删除，不应继续隐藏保留。
+- 除非用户在当前请求中明确要求，否则不讨论、不实现历史版本兼容方案。
+
 ## 构建、测试与开发命令
 
 命令均来自 README 与 `.github/workflows/ci.yml`：
@@ -38,7 +45,7 @@ go vet ./...
 CGO_ENABLED=0 go build -o bin/mcpx-server ./cmd/mcpx-server
 ```
 
-本地运行：`./bin/mcpx-server` 或 `./bin/mcpx-server --workspace /path/to/project`。版本：`./bin/mcpx-server -version`。  
+本地运行：先执行 `./bin/mcpx-server workspace register /path/to/project`，再执行 `./bin/mcpx-server` 启动服务；终端观测使用 `./bin/mcpx-server observe <workspace-name>`。版本：`./bin/mcpx-server -version`。
 发版：推送 `v*` 标签触发 GoReleaser（见 `.github/workflows/release.yml`、`.goreleaser.yaml`）。
 
 ## 编码风格与命名

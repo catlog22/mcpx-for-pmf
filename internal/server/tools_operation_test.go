@@ -461,6 +461,20 @@ func TestOperationBatchStatusAggregation(t *testing.T) {
 	}
 }
 
+func TestValidateOperationSchemaValueHandlesUntypedSchemas(t *testing.T) {
+	if err := validateOperationSchemaValue("value", map[string]any{"type": nil}, "arguments.value"); err != nil {
+		t.Fatalf("type-less schema should not panic or reject an unconstrained value: %v", err)
+	}
+	if err := validateOperationSchemaValue(map[string]any{"name": "demo"}, map[string]any{
+		"properties": map[string]any{
+			"name": map[string]any{"type": "string"},
+		},
+		"required": []any{"name"},
+	}, "arguments"); err != nil {
+		t.Fatalf("object constraints should be inferred when type is omitted: %v", err)
+	}
+}
+
 func TestOperationManageWaitTimeoutDoesNotCancel(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	session := operationTestSession(t, rt, "demo")

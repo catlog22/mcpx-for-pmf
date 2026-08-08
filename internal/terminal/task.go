@@ -35,6 +35,7 @@ const (
 type OutputChunk struct {
 	TaskID          string
 	RequestID       string
+	CallID          string
 	Tool            string
 	RemoteSessionID string
 	WorkspaceName   string
@@ -55,6 +56,7 @@ type OutputSink func(OutputChunk)
 type Task struct {
 	ID              string
 	RequestID       string
+	CallID          string
 	Tool            string
 	RemoteSessionID string
 	WorkspaceName   string
@@ -124,6 +126,9 @@ func (m *TaskManager) SetOutputSink(sink OutputSink) {
 }
 
 func (m *TaskManager) emitOutput(chunk OutputChunk) {
+	// Output observation is best-effort. A renderer/store regression must not
+	// panic the os/exec copy goroutine and take down the MCP process.
+	defer func() { _ = recover() }()
 	m.sinkMu.RLock()
 	sink := m.outputSink
 	m.sinkMu.RUnlock()
@@ -153,16 +158,22 @@ func NewPersistentTaskManager(db *sql.DB, logDir string) (*TaskManager, error) {
 
 // StartRemote launches a durable task owned by a Remote Session.
 func (m *TaskManager) StartRemote(ctx context.Context, remoteSessionID, workspaceName, workDir, command string) (*Task, error) {
-	return m.start(ctx, "", "", remoteSessionID, workspaceName, workDir, command)
+	return m.start(ctx, "", "", "", remoteSessionID, workspaceName, workDir, command)
 }
 
 // StartRemoteWithObservation launches a task and carries its originating MCP
 // request through output callbacks without changing ordinary task callers.
 func (m *TaskManager) StartRemoteWithObservation(ctx context.Context, requestID, tool, remoteSessionID, workspaceName, workDir, command string) (*Task, error) {
-	return m.start(ctx, requestID, tool, remoteSessionID, workspaceName, workDir, command)
+	return m.StartRemoteWithObservationContext(ctx, requestID, requestID, tool, remoteSessionID, workspaceName, workDir, command)
 }
 
-func (m *TaskManager) start(_ context.Context, requestID, tool, remoteSessionID, workspaceName, workDir, command string) (*Task, error) {
+// StartRemoteWithObservationContext carries call correlation through task
+// output events. Empty callID falls back to requestID at the observation boundary.
+func (m *TaskManager) StartRemoteWithObservationContext(ctx context.Context, requestID, callID, tool, remoteSessionID, workspaceName, workDir, command string) (*Task, error) {
+	return m.start(ctx, requestID, callID, tool, remoteSessionID, workspaceName, workDir, command)
+}
+
+func (m *TaskManager) start(_ context.Context, requestID, callID, tool, remoteSessionID, workspaceName, workDir, command string) (*Task, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
@@ -187,7 +198,7 @@ func (m *TaskManager) start(_ context.Context, requestID, tool, remoteSessionID,
 	m.mu.Unlock()
 
 	t := &Task{
-		ID: id, RequestID: requestID, Tool: tool,
+		ID: id, RequestID: requestID, CallID: callID, Tool: tool,
 		RemoteSessionID: remoteSessionID, WorkspaceName: workspaceName, Command: command,
 		WorkDir: workDir, Status: TaskRunning, StartedAt: time.Now().UTC(), db: m.db,
 		cmd: cmd, cancel: cancel, done: make(chan struct{}), outputSink: m.emitOutput,
@@ -329,7 +340,7 @@ func (w *lockedWriter) Write(p []byte) (int, error) {
 	}
 	sink := w.t.outputSink
 	chunk := OutputChunk{
-		TaskID: w.t.ID, RequestID: w.t.RequestID, Tool: w.t.Tool,
+		TaskID: w.t.ID, RequestID: w.t.RequestID, CallID: w.t.CallID, Tool: w.t.Tool,
 		RemoteSessionID: w.t.RemoteSessionID, WorkspaceName: w.t.WorkspaceName,
 		Command: w.t.Command, WorkDir: w.t.WorkDir, Stream: w.stream, Offset: offset, Data: append([]byte(nil), p...),
 	}
@@ -344,8 +355,8 @@ func (t *Task) emitOutputFinal() {
 	t.mu.Lock()
 	sink := t.outputSink
 	chunks := []OutputChunk{
-		{TaskID: t.ID, RequestID: t.RequestID, Tool: t.Tool, RemoteSessionID: t.RemoteSessionID, WorkspaceName: t.WorkspaceName, Command: t.Command, WorkDir: t.WorkDir, Stream: "stdout", Offset: t.stdoutOffset, Final: true},
-		{TaskID: t.ID, RequestID: t.RequestID, Tool: t.Tool, RemoteSessionID: t.RemoteSessionID, WorkspaceName: t.WorkspaceName, Command: t.Command, WorkDir: t.WorkDir, Stream: "stderr", Offset: t.stderrOffset, Final: true},
+		{TaskID: t.ID, RequestID: t.RequestID, CallID: t.CallID, Tool: t.Tool, RemoteSessionID: t.RemoteSessionID, WorkspaceName: t.WorkspaceName, Command: t.Command, WorkDir: t.WorkDir, Stream: "stdout", Offset: t.stdoutOffset, Final: true},
+		{TaskID: t.ID, RequestID: t.RequestID, CallID: t.CallID, Tool: t.Tool, RemoteSessionID: t.RemoteSessionID, WorkspaceName: t.WorkspaceName, Command: t.Command, WorkDir: t.WorkDir, Stream: "stderr", Offset: t.stderrOffset, Final: true},
 	}
 	t.mu.Unlock()
 	if sink == nil {

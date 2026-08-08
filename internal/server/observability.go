@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"runtime/debug"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -13,15 +15,16 @@ import (
 	"mcpx/internal/mcpresult"
 
 	"mcpx/internal/arc"
+	"mcpx/internal/envelope"
 	"mcpx/internal/logging"
 )
 
 func (r *Runtime) addTool(s *mcp.Server, tool mcp.Tool, handler mcp.ToolHandler) {
 	tool = requireIntentSchema(tool)
-	// Intentionally omit OutputSchema: the full ARC envelope is ~5KB per tool and
-	// inflates tools/list past what ChatGPT Connector discovery accepts
-	// (invalid_response / "discover response was inconsistent"). Runtime still
-	// returns structuredContent via arc.WrapToolResult.
+	// OutputSchema describes structuredContent, not the larger ARC metadata
+	// envelope. Keeping one shared schema makes tools/list and actual results
+	// describe the same machine contract without duplicating it per tool.
+	tool.OutputSchema = arc.OutputSchema()
 	instrumented := r.instrumentTool(tool.Name, handler)
 	if r.toolHandlers == nil {
 		r.toolHandlers = map[string]mcp.ToolHandler{}
@@ -55,13 +58,33 @@ func boolPointerValue(value *bool) bool {
 }
 
 func requireIntentSchema(tool mcp.Tool) mcp.Tool {
+	goal := map[string]any{
+		"type":        "string",
+		"description": "本轮工作的总体目标；只填写当前任务需要保持的目标",
+	}
 	purpose := map[string]any{
 		"type":        "string",
 		"description": "本次调用的用户目标或语义用途；高风险工具会要求填写",
 	}
+	reasoningSummary := map[string]any{
+		"type":        "string",
+		"description": "简短、可展示的判断依据或操作理由；不要填写隐藏思维链",
+	}
 	progressSummary := map[string]any{
 		"type":        "string",
 		"description": "上一工具调用后的可验证进度摘要、结果和下一步；没有下一次工具调用时请使用 progress_summary",
+	}
+	nextStep := map[string]any{
+		"type":        "string",
+		"description": "本次操作完成后的下一项具体计划；没有后续动作时留空",
+	}
+	planID := map[string]any{
+		"type":        "string",
+		"description": "关联的服务端 Plan ID",
+	}
+	taskID := map[string]any{
+		"type":        "string",
+		"description": "关联的服务端 Plan Task ID",
 	}
 	rawBytes := mcpresult.ToolSchemaJSON(tool)
 	var raw map[string]any
@@ -72,8 +95,13 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 	if properties == nil {
 		properties = map[string]any{}
 	}
+	properties["goal"] = goal
 	properties["purpose"] = purpose
+	properties["reasoning_summary"] = reasoningSummary
 	properties["progress_summary"] = progressSummary
+	properties["next_step"] = nextStep
+	properties["plan_id"] = planID
+	properties["task_id"] = taskID
 	raw["type"] = "object"
 	raw["properties"] = properties
 	if branches, ok := raw["oneOf"].([]any); ok {
@@ -86,8 +114,13 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 			if branchProperties == nil {
 				branchProperties = map[string]any{}
 			}
+			branchProperties["goal"] = goal
 			branchProperties["purpose"] = purpose
+			branchProperties["reasoning_summary"] = reasoningSummary
 			branchProperties["progress_summary"] = progressSummary
+			branchProperties["next_step"] = nextStep
+			branchProperties["plan_id"] = planID
+			branchProperties["task_id"] = taskID
 			branch["properties"] = branchProperties
 		}
 	}
@@ -127,7 +160,17 @@ type interactionTiming struct {
 }
 
 func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolHandler {
-	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest) (result *mcp.CallToolResult, err error) {
+		// Keep the entire instrumentation boundary defensive. Handler calls use
+		// callToolSafely below so normal panics retain ARC wrapping; this outer
+		// guard also covers malformed observation metadata or renderer changes.
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				logging.With("component", "mcp_tool").Error("instrumentation panic recovered", "tool", name, "panic", fmt.Sprint(recovered), "stack", string(debug.Stack()))
+				result = mcpresult.NewError("EXECUTION_RUNTIME_ERROR: tool execution failed")
+				err = nil
+			}
+		}()
 		received := time.Now()
 		callCtx, runtime := ensureRuntimeContext(ctx, mcpresult.Header(req), received)
 		clientName, clientVersion := clientInfoFromContext(callCtx)
@@ -146,12 +189,14 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 			_ = r.observation.RecordToolStarted(callCtx, name, observationRequest, mcpresult.Arguments(req))
 		}
 
-		var result *mcp.CallToolResult
-		var err error
 		if !isOperationChild(callCtx) && r.operations != nil && asyncEligibleTool(name) && executionMode(req) == "async" && observationParseErr == nil {
-			result, err = r.submitAsyncTool(callCtx, name, req, observationRequest)
+			result, err = callToolSafely(name, func() (*mcp.CallToolResult, error) {
+				return r.submitAsyncTool(callCtx, name, req, observationRequest)
+			})
 		} else {
-			result, err = handler(callCtx, req)
+			result, err = callToolSafely(name, func() (*mcp.CallToolResult, error) {
+				return handler(callCtx, req)
+			})
 		}
 		completed := time.Now()
 		timing := makeInteractionTiming(runtime.StartedAtMs, received, completed)
@@ -171,6 +216,12 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 		// then snapshots that text only (never full structuredContent dump).
 		result = arc.WrapToolResult(name, arc.ResultContext{
 			RequestID: runtime.RequestID, TraceID: runtime.TraceID, SpanID: runtime.SpanID,
+			Context: arc.Context{
+				Goal: observationRequest.Goal, Purpose: firstSemanticPurpose(observationRequest),
+				ReasoningSummary: observationRequest.ReasoningSummary,
+				ProgressSummary:  observationRequest.ProgressSummary, NextStep: observationRequest.NextStep,
+				PlanID: observationRequest.PlanID, TaskID: observationRequest.TaskID, OperationID: observationRequest.OperationID,
+			},
 			Timing: arc.Timing{
 				StartedAtMs: timing.StartedAtMs, ReceivedAtMs: timing.ReceivedAtMs,
 				CompletedAtMs: timing.CompletedAtMs, NetworkLatencyMs: timing.NetworkLatencyMs,
@@ -185,6 +236,27 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 		}
 		return result, err
 	}
+}
+
+func firstSemanticPurpose(req envelope.Request) string {
+	if strings.TrimSpace(req.Purpose) != "" {
+		return req.Purpose
+	}
+	return req.Intent
+}
+
+// callToolSafely keeps a handler panic inside the MCP tool error contract. A
+// malformed request, task race, or future handler regression must not take
+// down the shared MCP server process or its other sessions.
+func callToolSafely(name string, call func() (*mcp.CallToolResult, error)) (result *mcp.CallToolResult, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logging.With("component", "mcp_tool").Error("panic recovered", "tool", name, "panic", fmt.Sprint(recovered), "stack", string(debug.Stack()))
+			result = mcpresult.NewError("EXECUTION_RUNTIME_ERROR: tool execution failed")
+			err = nil
+		}
+	}()
+	return call()
 }
 
 func makeInteractionTiming(startedAtMs int64, received, completed time.Time) interactionTiming {

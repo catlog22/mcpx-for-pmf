@@ -2,6 +2,7 @@ package envelope
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -22,6 +23,47 @@ func TestFail(t *testing.T) {
 	}
 	if r.Error == nil || r.Error.Code != "DENIED" || r.Error.Category != "permission" || r.Error.Details == nil {
 		t.Fatalf("expected full error contract, got %+v", r.Error)
+	}
+}
+
+func TestTooManyChangesUsesValidationRecoveryContract(t *testing.T) {
+	r := Fail(StatusError, "req1", "demo", nil, "TOO_MANY_CHANGES", "too many changed lines")
+	if r.Error == nil {
+		t.Fatal("missing error")
+	}
+	if r.Error.Category != "validation" || !r.Error.Retryable {
+		t.Fatalf("unexpected TOO_MANY_CHANGES classification: %+v", r.Error)
+	}
+	hint, _ := r.Error.Details["retry_hint"].(string)
+	if hint == "" || strings.Contains(strings.ToLower(hint), "server log") || !strings.Contains(strings.ToLower(hint), "split") {
+		t.Fatalf("inconsistent retry hint: %q", hint)
+	}
+}
+
+func TestBooleanConfirmationRetryHintDoesNotMentionToken(t *testing.T) {
+	response := Fail(StatusNeedConfirmation, "req_confirm", "demo", map[string]any{
+		"confirmation_required": true, "user_confirmed_required": true,
+	}, "USER_CONFIRMATION_REQUIRED", "delete requires confirmation")
+	if response.Error == nil {
+		t.Fatal("missing confirmation error")
+	}
+	hint, _ := response.Error.Details["retry_hint"].(string)
+	if strings.Contains(hint, "confirmation_token") || !strings.Contains(hint, "user_confirmed=true") {
+		t.Fatalf("boolean confirmation hint=%q", hint)
+	}
+}
+
+func TestCommandFailuresUseExecutionTaxonomy(t *testing.T) {
+	for _, code := range []string{"COMMAND_NOT_FOUND", "PROCESS_EXIT", "COMMAND_FAILED", "OPERATION_FAILED"} {
+		t.Run(code, func(t *testing.T) {
+			response := Fail(StatusError, "req1", "demo", map[string]any{"exit_code": 127}, code, "command failed")
+			if response.Error == nil || response.Error.Category != "execution" || response.Error.Retryable {
+				t.Fatalf("unexpected %s classification: %+v", code, response.Error)
+			}
+			if response.Error.Details["exit_code"] != 127 {
+				t.Fatalf("exit code missing from details: %+v", response.Error.Details)
+			}
+		})
 	}
 }
 
@@ -82,7 +124,7 @@ func TestParseRequest(t *testing.T) {
 }
 
 func TestParseRequestMergesFlatArgumentsIntoPayload(t *testing.T) {
-	req, err := ParseRequest(json.RawMessage(`{"intent":"inspect workspace","progress_summary":"已完成定位，下一步读取文件","workspace":"demo","command":"pwd","payload":{"command":"echo legacy"},"task_id":"t1"}`))
+	req, err := ParseRequest(json.RawMessage(`{"intent":"inspect workspace","progress_summary":"已完成定位，下一步读取文件","callId":"call-1","workspace":"demo","command":"pwd","payload":{"command":"echo legacy"},"task_id":"t1"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,6 +139,9 @@ func TestParseRequestMergesFlatArgumentsIntoPayload(t *testing.T) {
 	}
 	if req.ProgressSummary != "已完成定位，下一步读取文件" {
 		t.Fatalf("progress summary missing: %q", req.ProgressSummary)
+	}
+	if req.CallID != "call-1" {
+		t.Fatalf("correlation missing: %+v", req)
 	}
 	if _, exists := req.Payload["intent"]; exists {
 		t.Fatalf("intent leaked into payload: %+v", req.Payload)

@@ -21,7 +21,12 @@ func TestConfigRoundTripInNew(t *testing.T) {
 	t.Setenv("MCPX_HOME", home)
 	ws := filepath.Join(home, "p")
 	_ = os.MkdirAll(ws, 0o755)
-	rt, err := New(Options{WorkspaceFlag: ws})
+	cfg := config.DefaultConfig()
+	cfg.Workspaces = []config.WorkspaceEntry{{Name: "p", Path: ws}}
+	if err := config.WriteGlobal(filepath.Join(home, "config.yaml"), cfg); err != nil {
+		t.Fatal(err)
+	}
+	rt, err := New(Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

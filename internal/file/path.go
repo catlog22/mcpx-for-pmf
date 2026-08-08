@@ -56,6 +56,25 @@ func Resolve(workspaceRoot, rel string) (abs string, err error) {
 	return resolved, nil
 }
 
+// LexicalPath returns the cleaned absolute path without following the final
+// symbolic link. Destructive callers should use it for Lstat, then use Resolve
+// separately to validate the resolved target remains inside the workspace.
+func LexicalPath(workspaceRoot, rel string) (string, error) {
+	if strings.TrimSpace(rel) == "" {
+		return "", fmt.Errorf("path required")
+	}
+	root, err := filepath.Abs(workspaceRoot)
+	if err != nil {
+		return "", err
+	}
+	root = filepath.Clean(root)
+	joined := filepath.Clean(filepath.Join(root, rel))
+	if !withinRoot(root, joined) {
+		return "", fmt.Errorf("path escapes workspace: %s", rel)
+	}
+	return joined, nil
+}
+
 func withinRoot(root, candidate string) bool {
 	rel, err := filepath.Rel(root, candidate)
 	return err == nil && !filepath.IsAbs(rel) && rel != ".." &&

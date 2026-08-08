@@ -140,8 +140,8 @@ func (s *SocketServer) serveConnection(conn net.Conn) {
 	if request.HistoryLimit <= 0 {
 		request.HistoryLimit = DefaultHistory
 	}
-	if request.HistoryLimit > MaxHistory {
-		request.HistoryLimit = MaxHistory
+	if request.HistoryLimit > MaxObserverHistory {
+		request.HistoryLimit = MaxObserverHistory
 	}
 
 	subscription := s.broker.Subscribe(request.Workspace, DefaultBuffer)

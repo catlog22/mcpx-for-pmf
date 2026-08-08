@@ -10,9 +10,14 @@ import (
 type HumanObsSnapshot struct {
 	Tool             string
 	Status           string
+	Goal             string
 	Purpose          string
 	Intent           string
+	ReasoningSummary string
 	ProgressSummary  string
+	NextStep         string
+	PlanID           string
+	TaskID           string
 	Summary          string
 	Command          string
 	WorkingDirectory string
@@ -35,6 +40,19 @@ func NormalizeHumanToolOutput(snap HumanObsSnapshot, maxBytes int) (json.RawMess
 		"available": true,
 		"status":    coalesceObsStatus(snap.Status),
 		"summary":   summary,
+	}
+	for key, value := range map[string]string{
+		"goal":              snap.Goal,
+		"purpose":           snap.Purpose,
+		"reasoning_summary": snap.ReasoningSummary,
+		"progress_summary":  snap.ProgressSummary,
+		"next_step":         snap.NextStep,
+		"plan_id":           snap.PlanID,
+		"task_id":           snap.TaskID,
+	} {
+		if value = strings.TrimSpace(value); value != "" {
+			payload[key] = value
+		}
 	}
 	if snap.Command != "" {
 		payload["command"] = snap.Command

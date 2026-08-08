@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -16,7 +17,7 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	runtime.registerTools(protocol)
 
 	want := []string{
-		"session", "read", "edit", "observe",
+		"session", "read", "edit", "remove_prepare", "submit_remove", "observe",
 		"operation_batch", "operation_manage",
 		"execute", "plan", "artifact", "discover", "skill_call", "mcp_call",
 		"runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide",
@@ -32,11 +33,17 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	}
 
 	for name, registered := range runtime.listedToolMap() {
+		if registered.OutputSchema == nil {
+			t.Fatalf("%s must expose the ARC structuredContent output schema", name)
+		}
 		var schema map[string]any
 		if err := json.Unmarshal(mcpresult.ToolSchemaJSON(registered), &schema); err != nil {
 			t.Fatalf("%s schema: %v", name, err)
 		}
-		if schema["additionalProperties"] != false {
+		if _, union := schema["oneOf"]; union && schema["additionalProperties"] == nil {
+			// Discriminated action roots stay open for connectors that inspect
+			// object properties before evaluating oneOf.
+		} else if schema["additionalProperties"] != false {
 			t.Fatalf("%s must reject unknown arguments: %s", name, mcpresult.ToolSchemaJSON(registered))
 		}
 		properties, _ := schema["properties"].(map[string]any)
@@ -55,6 +62,22 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 		}
 	}
 	editTool := runtime.listedToolMap()["edit"]
+	if editTool.Annotations == nil || editTool.Annotations.ReadOnlyHint || editTool.Annotations.DestructiveHint == nil || !*editTool.Annotations.DestructiveHint || !editTool.Annotations.IdempotentHint || editTool.Annotations.OpenWorldHint == nil || *editTool.Annotations.OpenWorldHint {
+		t.Fatalf("edit must expose the constrained destructive annotation: %+v", editTool.Annotations)
+	}
+	if editTool.Title != "Workspace 文件变更（不提供删除）" || editTool.Annotations.Title != editTool.Title {
+		t.Fatalf("edit title=%q annotations=%+v", editTool.Title, editTool.Annotations)
+	}
+	safety := toolSafetyMetadata(map[string]any{"_meta": editTool.Meta})
+	if safety == nil {
+		t.Fatalf("edit must expose mcpx/safety metadata: %+v", editTool.Meta)
+	}
+	if safety["scope"] != "registered_workspace_root" || safety["approval"] == "host_user_approval_required" {
+		t.Fatalf("edit safety metadata is incomplete: %+v", safety)
+	}
+	if !strings.Contains(editTool.Description, "不提供文件删除") || !strings.Contains(editTool.Description, "remove_prepare") {
+		t.Fatalf("edit description must explain the removal boundary: %s", editTool.Description)
+	}
 	var editSchema map[string]any
 	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(editTool), &editSchema); err != nil {
 		t.Fatal(err)
@@ -70,6 +93,27 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 		if itemProperties[field] == nil {
 			t.Fatalf("edit item missing %q: %s", field, mcpresult.ToolSchemaJSON(editTool))
 		}
+	}
+	removeTool := runtime.listedToolMap()["submit_remove"]
+	if removeTool.Annotations == nil || removeTool.Annotations.ReadOnlyHint || removeTool.Annotations.DestructiveHint == nil || !*removeTool.Annotations.DestructiveHint || !removeTool.Annotations.IdempotentHint || removeTool.Annotations.OpenWorldHint == nil || *removeTool.Annotations.OpenWorldHint {
+		t.Fatalf("submit_remove annotations=%+v", removeTool.Annotations)
+	}
+	if safety := toolSafetyMetadata(map[string]any{"_meta": removeTool.Meta}); safety["approval"] != "web_model_user_confirmation_required" || safety["filesystem_only"] != true || safety["registered_workspace"] != true || safety["confirmation_credential"] != "server_generated_confirmation_uuid" {
+		t.Fatalf("submit_remove safety metadata=%+v", safety)
+	}
+	observeTool := runtime.listedToolMap()["observe"]
+	var observeSchema map[string]any
+	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(observeTool), &observeSchema); err != nil {
+		t.Fatal(err)
+	}
+	observeProperties, _ := observeSchema["properties"].(map[string]any)
+	for _, field := range []string{"workspace", "view", "event_ids", "request_ids", "operation_ids", "task_ids", "changeset_ids", "keyword", "kinds", "statuses", "created_after", "created_before"} {
+		if observeProperties[field] == nil {
+			t.Fatalf("observe history schema missing %q: %s", field, mcpresult.ToolSchemaJSON(observeTool))
+		}
+	}
+	if observeProperties["room_id"] != nil {
+		t.Fatalf("observe schema must not expose room_id: %s", mcpresult.ToolSchemaJSON(observeTool))
 	}
 	operationManage := runtime.listedToolMap()["operation_manage"]
 	var operationSchema map[string]any
@@ -119,4 +163,40 @@ func containsSchemaRequired(required []any, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestActionSchemasExposeBranchPropertiesAtRoot(t *testing.T) {
+	runtime := &Runtime{}
+	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
+	runtime.registerTools(protocol)
+
+	for name, registered := range runtime.listedToolMap() {
+		var schema map[string]any
+		if err := json.Unmarshal(mcpresult.ToolSchemaJSON(registered), &schema); err != nil {
+			t.Fatalf("%s schema: %v", name, err)
+		}
+		branches, ok := schema["oneOf"].([]any)
+		if !ok {
+			continue
+		}
+		rootProperties, ok := schema["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s union schema has no root properties", name)
+		}
+		for index, rawBranch := range branches {
+			branch, ok := rawBranch.(map[string]any)
+			if !ok {
+				t.Fatalf("%s branch %d has invalid schema %T", name, index, rawBranch)
+			}
+			branchProperties, ok := branch["properties"].(map[string]any)
+			if !ok {
+				t.Fatalf("%s branch %d has no properties", name, index)
+			}
+			for field := range branchProperties {
+				if _, exists := rootProperties[field]; !exists {
+					t.Fatalf("%s branch %d field %q is rejected by root additionalProperties", name, index, field)
+				}
+			}
+		}
+	}
 }

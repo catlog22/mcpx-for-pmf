@@ -49,8 +49,10 @@ func TestEveryRegisteredToolExposesSemanticPurpose(t *testing.T) {
 				continue
 			}
 		}
-		if schema.Properties["purpose"] == nil {
-			t.Errorf("tool %q does not expose purpose: %+v", name, schema.Properties)
+		for _, field := range []string{"goal", "purpose", "reasoning_summary", "progress_summary", "next_step", "plan_id", "task_id"} {
+			if schema.Properties[field] == nil {
+				t.Errorf("tool %q does not expose %s: %+v", name, field, schema.Properties)
+			}
 		}
 	}
 }

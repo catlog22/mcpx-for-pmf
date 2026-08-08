@@ -127,10 +127,13 @@ func TestAgentGuidanceIncludesEditPayloadCheatSheet(t *testing.T) {
 		t.Fatalf("edit_item type = %T", payload["edit_item"])
 	}
 	operation, _ := item["operation"].(string)
-	for _, wanted := range []string{"create", "update", "rename", "delete"} {
+	for _, wanted := range []string{"create", "update", "rename"} {
 		if !strings.Contains(operation, wanted) {
 			t.Fatalf("edit_item.operation %q missing %q", operation, wanted)
 		}
+	}
+	if strings.Contains(operation, "delete") {
+		t.Fatalf("edit guidance must route deletion to remove_prepare/submit_remove: %q", operation)
 	}
 	replacement, ok := item["replacement"].(string)
 	if !ok || !strings.Contains(replacement, "精确唯一") {

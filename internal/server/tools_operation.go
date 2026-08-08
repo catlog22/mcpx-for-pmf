@@ -233,7 +233,14 @@ func parseNonEmptyStringSlice(value any, field string) ([]string, error) {
 	return result, nil
 }
 
-func (r *Runtime) validateOperationToolArguments(toolName string, arguments map[string]any, sessionID, purpose string) error {
+func (r *Runtime) validateOperationToolArguments(toolName string, arguments map[string]any, sessionID, purpose string) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			// Tool schemas are server-owned data, but a malformed schema must remain
+			// a request error and must never be able to crash the MCP process.
+			err = fmt.Errorf("invalid schema for tool %q: %v", toolName, recovered)
+		}
+	}()
 	r.toolIndexMu.RLock()
 	tool, exists := r.toolIndex[toolName]
 	r.toolIndexMu.RUnlock()
@@ -600,7 +607,16 @@ func validateOperationSchemaValue(value any, schema map[string]any, path string)
 	if constant, exists := schema["const"]; exists && fmt.Sprint(constant) != fmt.Sprint(value) {
 		return fmt.Errorf("%s has an unsupported value", path)
 	}
-	switch schemaType := schema["type"].(string); schemaType {
+	schemaType, _ := schema["type"].(string)
+	if schemaType == "" {
+		// JSON Schema permits type-less constraint objects. The generated MCP
+		// schemas use this shape for some nested values; infer object only when
+		// object constraints are present and otherwise leave the value open.
+		if _, hasProperties := schema["properties"]; hasProperties {
+			schemaType = "object"
+		}
+	}
+	switch schemaType {
 	case "object":
 		object, ok := value.(map[string]any)
 		if !ok {

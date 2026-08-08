@@ -13,6 +13,7 @@ import (
 type HistoryQuery struct {
 	Workspace     string
 	SessionID     string
+	CallID        string
 	EventIDs      []string
 	RequestIDs    []string
 	OperationIDs  []string
@@ -50,6 +51,10 @@ func (s *Store) Query(ctx context.Context, query HistoryQuery) ([]Event, string,
 		where = append(where, "remote_session_id = ?")
 		args = append(args, query.SessionID)
 	}
+	if query.CallID != "" {
+		where = append(where, "call_id = ?")
+		args = append(args, query.CallID)
+	}
 	if err := appendIntFilter(&where, &args, "sequence", query.EventIDs); err != nil {
 		return nil, "", err
 	}
@@ -85,8 +90,8 @@ func (s *Store) Query(ctx context.Context, query HistoryQuery) ([]Event, string,
 	}
 
 	statement := `SELECT sequence, workspace_name,
-        remote_session_id, request_id, operation_id, tool_name, event_type,
-		intent, progress_summary, input_json, output_json, summary, status, purpose, parent_operation_id, step_id,
+	        remote_session_id, request_id, call_id, operation_id, tool_name, event_type, phase,
+		intent, progress_summary, input_json, output_json, summary, status, purpose, goal, reasoning_summary, next_step, plan_id, task_id, parent_operation_id, step_id,
         command, working_directory, exit_code, duration_ms, skill_name, mcp_server, mcp_tool, path,
         resource_uri, stream, stream_offset, truncated, created_at
         FROM observation_events WHERE ` + strings.Join(where, " AND ") + `

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -29,8 +30,12 @@ type workspaceObserverOptions struct {
 	Path      string
 }
 
+type workspaceRegisterOptions struct {
+	Path string
+}
+
 func parseWorkspaceObserverArgs(args []string) (workspaceObserverOptions, error) {
-	fs := flag.NewFlagSet("workspace", flag.ContinueOnError)
+	fs := flag.NewFlagSet("observe", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	history := fs.Int("history", observation.DefaultHistory, "number of recent events to replay")
 	format := fs.String("format", "text", "text|json")
@@ -49,8 +54,8 @@ func parseWorkspaceObserverArgs(args []string) (workspaceObserverOptions, error)
 	if *history <= 0 {
 		return workspaceObserverOptions{}, fmt.Errorf("history must be a positive integer")
 	}
-	if *history > observation.MaxHistory {
-		*history = observation.MaxHistory
+	if *history > observation.MaxObserverHistory {
+		*history = observation.MaxObserverHistory
 	}
 	*format = strings.ToLower(strings.TrimSpace(*format))
 	if *format != "text" && *format != "json" {
@@ -66,16 +71,74 @@ func parseWorkspaceObserverArgs(args []string) (workspaceObserverOptions, error)
 	}, nil
 }
 
-func runWorkspaceObserver(args []string) int {
+func parseWorkspaceRegisterArgs(args []string) (workspaceRegisterOptions, error) {
+	fs := flag.NewFlagSet("workspace register", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return workspaceRegisterOptions{}, err
+	}
+	if fs.NArg() != 1 || strings.TrimSpace(fs.Arg(0)) == "" {
+		return workspaceRegisterOptions{}, fmt.Errorf("workspace path is required")
+	}
+	return workspaceRegisterOptions{Path: strings.TrimSpace(fs.Arg(0))}, nil
+}
+
+func runWorkspaceCommand(args []string) int {
+	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
+		printWorkspaceCommandUsage(os.Stderr)
+		return 0
+	}
+	if args[0] != "register" {
+		fmt.Fprintf(os.Stderr, "workspace: unknown command %q\n", args[0])
+		printWorkspaceCommandUsage(os.Stderr)
+		return 2
+	}
+	return runWorkspaceRegister(args[1:])
+}
+
+func runWorkspaceRegister(args []string) int {
+	options, err := parseWorkspaceRegisterArgs(args)
+	if err != nil {
+		if err == flag.ErrHelp {
+			printWorkspaceRegisterUsage(os.Stderr)
+			return 0
+		}
+		fmt.Fprintf(os.Stderr, "workspace register: %v\n", err)
+		printWorkspaceRegisterUsage(os.Stderr)
+		return 2
+	}
+	path := config.ExpandHome(options.Path)
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "workspace register: resolve path: %v\n", err)
+		return 1
+	}
+	if err := config.RegisterWorkspace("", absPath); err != nil {
+		fmt.Fprintf(os.Stderr, "workspace register: %v\n", err)
+		return 1
+	}
+	fmt.Printf("已注册 Workspace：%s\n路径：%s\n", filepath.Base(absPath), absPath)
+	return 0
+}
+
+func runObserve(args []string) int {
+	return runObserver(args, "observe")
+}
+
+func runObserver(args []string, commandName string) int {
 	options, err := parseWorkspaceObserverArgs(args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "workspace: %v\n", err)
-		printWorkspaceUsage(os.Stderr)
+		if err == flag.ErrHelp {
+			printObserveUsage(os.Stderr)
+			return 0
+		}
+		fmt.Fprintf(os.Stderr, "%s: %v\n", commandName, err)
+		printObserveUsage(os.Stderr)
 		return 2
 	}
 	home, err := config.HomeDir()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "workspace: resolve MCPX home: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%s: resolve MCPX home: %v\n", commandName, err)
 		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -102,7 +165,7 @@ func runWorkspaceObserver(args []string) int {
 		return renderWorkspaceFrameWithRenderer(os.Stdout, frame, options.Format, color, textRenderer)
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "workspace observer: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%s: %v\n", commandName, err)
 		return 1
 	}
 	return 0
@@ -130,8 +193,8 @@ func renderWorkspaceFrame(w io.Writer, frame observation.Frame, format string, c
 
 func renderWorkspaceFrameWithRenderer(w io.Writer, frame observation.Frame, format string, color bool, renderer *observation.TextRenderer) error {
 	if format == "text" && renderer != nil {
-		// Refresh on every frame so a terminal resize cannot leave body lines
-		// wider than the current viewport and wrap their continuation at column 0.
+		// Refresh on every frame so a terminal resize cannot leave newly-rendered
+		// lines wider than the current viewport.
 		renderer.SetWidth(terminalColumns())
 	}
 	if frame.Type == "event" && frame.Event != nil {
@@ -186,12 +249,14 @@ func renderWorkspaceFrameWithRenderer(w io.Writer, frame observation.Frame, form
 	}
 }
 
-func printWorkspaceUsage(w io.Writer) {
+func printObserveUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  mcpx-server workspace [flags] <workspace name>")
+	fmt.Fprintln(w, "  mcpx-server observe [flags] <workspace name>")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Observe persisted Workspace events and terminal output.")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Flags:")
-	fmt.Fprintln(w, "  -history int     recent events to replay (1-200, default 100)")
+	fmt.Fprintln(w, "  -history int     recent events to replay (1-100, default 100)")
 	fmt.Fprintln(w, "  -format string   text or json (default text)")
 	fmt.Fprintln(w, "  -detail          show semantic purpose, operation IDs, and execution facts")
 	fmt.Fprintln(w, "  -diff string     summary, preview, or full (default full)")
@@ -199,6 +264,23 @@ func printWorkspaceUsage(w io.Writer) {
 	fmt.Fprintln(w, "  -status string   filter by event status")
 	fmt.Fprintln(w, "  -operation string filter by operation ID")
 	fmt.Fprintln(w, "  -path string     filter by file path")
+}
+
+func printWorkspaceCommandUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  mcpx-server workspace register <path>")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Register or update a Workspace in the global config without starting the Runtime.")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "For terminal observation, use:")
+	fmt.Fprintln(w, "  mcpx-server observe [flags] <workspace name>")
+}
+
+func printWorkspaceRegisterUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  mcpx-server workspace register <path>")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Register or update a Workspace in the global config without starting the Runtime.")
 }
 
 func stdoutIsTTY() bool {

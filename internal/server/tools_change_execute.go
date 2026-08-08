@@ -531,7 +531,7 @@ func (r *Runtime) runVerifySteps(ctx context.Context, envReq envelope.Request, s
 			results = append(results, item)
 			continue
 		}
-		task, err := r.tasks.StartRemoteWithObservation(ctx, envReq.RequestID, "change_execute", session.ID, session.WorkspaceName, session.WorkspacePath, project.Command)
+		task, err := r.tasks.StartRemoteWithObservationContext(ctx, envReq.RequestID, observationCallID(envReq), "change_execute", session.ID, session.WorkspaceName, session.WorkspacePath, project.Command)
 		if err != nil {
 			item["status"] = "failed"
 			item["error"] = err.Error()

@@ -121,7 +121,14 @@ func (r *Runtime) waitForOperationTask(ctx context.Context, input operation.Exec
 	capTaskExecutionOutput(data, 256<<10)
 	exitCode, hasExitCode := data["exit_code"].(int)
 	if task.Status != terminal.TaskExited || !hasExitCode || exitCode != 0 {
-		response := envelope.Fail(envelope.StatusError, input.RequestID, input.WorkspaceName, data, "COMMAND_FAILED", fmt.Sprintf("命令 Task %s 以状态 %s 结束，退出码为 %d", task.ID, task.Status, exitCode))
+		code := "EXECUTION_FAILED"
+		message := fmt.Sprintf("command Task %s ended with status %s", task.ID, task.Status)
+		if hasExitCode {
+			stderr, _ := data["stderr"].(string)
+			code = commandFailureCode(exitCode, stderr)
+			message = commandFailureMessage(code, exitCode)
+		}
+		response := envelope.Fail(envelope.StatusError, input.RequestID, input.WorkspaceName, data, code, message)
 		response.RemoteSessionID = input.RemoteSessionID
 		return r.resultJSON(response)
 	}

@@ -39,8 +39,8 @@ func (c *Client) Run(ctx context.Context, request SubscribeRequest, onFrame func
 	if request.HistoryLimit <= 0 {
 		request.HistoryLimit = DefaultHistory
 	}
-	if request.HistoryLimit > MaxHistory {
-		request.HistoryLimit = MaxHistory
+	if request.HistoryLimit > MaxObserverHistory {
+		request.HistoryLimit = MaxObserverHistory
 	}
 	delay := c.RetryDelay
 	if delay <= 0 {

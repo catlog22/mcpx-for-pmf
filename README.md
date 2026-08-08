@@ -71,10 +71,16 @@ CGO_ENABLED=0 go build -o bin/mcpx-server ./cmd/mcpx-server
 ./bin/mcpx-server
 ```
 
-启动时注册并使用一个 Workspace：
+注册或更新一个 Workspace：
 
 ```bash
-./bin/mcpx-server --workspace /path/to/your/project
+./bin/mcpx-server workspace register /path/to/your/project
+```
+
+然后启动服务：
+
+```bash
+./bin/mcpx-server
 ```
 
 默认监听地址和 MCP 端点：
@@ -106,7 +112,8 @@ http://127.0.0.1:9090/mcp
 
 ```text
 mcpx-server [flags]                   启动 Streamable HTTP 服务
-mcpx-server workspace [flags] <name>  只读观测 Workspace 事件
+mcpx-server observe [flags] <name>    终端只读观测 Workspace 事件
+mcpx-server workspace register <path> 注册或更新 Workspace
 mcpx-server oauth-register [url]      动态注册 OAuth 客户端
 ```
 
@@ -163,9 +170,9 @@ limits:
   max_result_bytes: 262144
 ```
 
-默认值包括：监听 `127.0.0.1:9090`、文件读取上限 1 MiB、单次 Edit
-最多 20 个文件和 2000 行真实差异、工具内联结果上限 256 KiB、终端、Skill
-和上游 MCP 发现默认启用。
+默认值包括：监听 `127.0.0.1:9090`、窗口读取返回上限 1 MiB、显式 full 源文件上限
+4 MiB、单次 Edit 最多 20 个文件和 2000 行真实差异、工具内联结果上限 256 KiB、
+终端、Skill 和上游 MCP 发现默认启用。
 
 命令策略按 `deny`、`confirm`、`allow` 和默认决策执行。显式 `deny` 或
 `confirm` 规则优先于默认值。公网部署不要使用 `open`，应使用 `oauth`、
@@ -342,10 +349,19 @@ bootstrap、capability manifest 和 recovery action 使用同一组名称与 Sch
 5. 后续 `session(action="open")` 或 `runtime_read` 传 `known_revisions`，已知版本未变化时
    直接复用本地缓存。
 
-每次重要调用都应提供 `purpose`；`intent` 仍作为兼容别名接受。
-下一次工具调用可以提供 `progress_summary`，写入上一调用已验证的结果和下一步，
-不要写入隐藏思维链。没有下一次工具调用、需要等待用户或发生阻塞时，直接在响应中
-说明状态和下一步。
+每次重要调用都可以提供统一的语义上下文：`goal` 表示总体目标，`purpose` 表示本次
+操作作用，`reasoning_summary` 表示可公开的简短判断依据，`progress_summary` 表示
+已验证进展，`next_step` 表示下一项具体计划；`plan_id`、`task_id`、`operation_id` 用于绑定执行上下文。
+`reasoning_summary` 不是隐藏思维链，不得写入私有推理过程。上述字段会原样进入 ARC
+`structuredContent.context`、`_meta["mcpx.result"].mcpx.result.context` 和持久化观测事件。
+没有下一次工具调用、需要等待用户或发生阻塞时，直接在响应中说明状态和下一步。
+
+终端观测使用普通 stdout/stderr pipe，不依赖 PTY、tmux 或 ConPTY。观测事件先写入
+durable Store，再通过本地 JSONL 帧推送；`observe --format=json`、终端 text 渲染和
+其他 JSONL 客户端消费同一事件。事件的 `phase` 表示 `action_started`、`output`、
+`result` 或 `error`，语义上下文字段会在 JSONL、历史和 text observer 中保留。`call_id` 缺省回退为
+`request_id` 用于内部请求关联；不同客户端接力时使用同一个 `remote_session_id`，并可结合
+`workspace` 调用 `observe(view="history")` 查询历史操作。`task_id`、`operation_id` 负责执行归属。
 
 ### 2. 读取源码
 
@@ -392,6 +408,28 @@ read(view="file") → edit → observe(view="changes")
 精确唯一 `replacements`。同一请求带 `idempotency_key` 时，重试返回原终态，
 参数变化返回 `IDEMPOTENCY_CONFLICT`。默认只返回有界 diff 预览；需要完整内容时
 使用 `observe(view="diff", edit_id, offset, limit)` 分片读取。
+
+生产限制和破坏性操作契约：完整 `read` 的源文件上限为 4 MiB，超大文件使用
+`mode="window"` 流式读取；单次 `read.items` 最多 20 项；`operation_batch` 最多
+32 步；`edit` 最多 1000 条真实变更行。`read(view="list", path=...)` 的 `path`
+是硬作用域。
+
+`edit` 只支持 create、update、rename；删除必须使用两阶段的
+`remove_prepare → submit_remove`，禁止通过 `execute`、shell、glob 或 symlink 绕过：
+
+1. `remove_prepare` 接收 Workspace 内明确的 `file` 或 `directory` 目标，冻结文件
+   SHA、目录树、数量和字节数，不产生文件变更。
+2. 服务端返回 `confirmation_uuid`、`delete_request_id`、`manifest_sha256` 和原始
+   `idempotency_key`，并在 `submit_remove_arguments` 中给出可直接复制的完整提交参数。
+3. 网页端模型向用户展示冻结清单并询问；用户确认后，模型将
+   `submit_remove_arguments` 原样提交给 `submit_remove`。
+4. `submit_remove` 重新校验 Workspace 范围、UUID、manifest、SHA、过期时间和
+   TOCTOU，服务端内部按 bounded chunks 删除并写入持久化审计。
+
+删除能力支持明确指定的非空目录树，但拒绝越界路径、symlink 和特殊文件。`submit_remove`
+在 MCP `tools/list` 中声明 `readOnlyHint=false`、`destructiveHint=true`、
+`idempotentHint=true` 和 `openWorldHint=false`，并发布仅限注册 Workspace、仅文件系统、
+无 shell、revision guarded、持久化审计等机器可读约束。
 
 示例：
 
@@ -442,6 +480,11 @@ execute(action="attach", task_id="task_...", yield_time_ms=30000)
 直接给出下一次调用模板。`stop` 和 `stdin` 通过 `execute(action="stop|stdin")`
 完成，并重新执行权限与 Workspace 校验。
 
+`execution_mode="async"` 只表示把本次工具调用提交为异步 Operation，不保证立即返回
+`task_id`。命令是否脱离为持久化 Task 由 `yield_time_ms` 决定：命令在等待窗口内结束时，
+Operation 结果直接包含 `completed_in_call=true`；需要 Task 生命周期时，应设置小于预期
+运行时长的 `yield_time_ms`，再使用返回的 `task_id` 调用 `observe` 或 `execute(action="attach")`。
+
 ### 5. Plan、Artifact 与扩展
 
 `plan(action="create|read|advance|complete|block|replan|deliver")` 只引用服务端
@@ -486,8 +529,12 @@ operation_manage(action="result", operation_id="op_...")
 
 ### 6. 统一响应
 
-工具默认文本适合模型和宿主直接展示；机器结果保存在 ARC 元数据
-`_meta["mcpx.result"]`。响应状态包括：
+工具默认文本适合模型和宿主直接展示；机器结果同时保存在
+`structuredContent` 和 ARC 元数据 `_meta["mcpx.result"]`。响应状态包括：
+
+`tools/list` 同时为 MCPX 工具公布 `outputSchema`，其描述的是实际返回的
+`structuredContent` 公共结构（`status`、`type`、`context`、`data`、`error`、`hints`、`actions`），
+而不是包含 trace 的完整 ARC metadata。`data` 按 `type` 承载具体业务结果，工具调用返回值仍是最终事实来源。
 
 | 状态 | 含义 |
 | --- | --- |
@@ -505,12 +552,32 @@ mcpx://remote-sessions/{remote_session_id}/tasks/{task_id}/logs
 mcpx://remote-sessions/{remote_session_id}/artifacts/{artifact_id}
 ```
 
+ARC 的机器结果固定包含 `context`：
+
+```json
+{
+  "context": {
+    "goal": "修复终端观测体验",
+    "purpose": "验证命令执行结果",
+    "reasoning_summary": "先确认最小执行链路",
+    "progress_summary": "命令已完成并返回 exit_code=0",
+    "next_step": "检查异常任务恢复",
+    "plan_id": "pl_...",
+    "task_id": "pt_...",
+    "operation_id": "op_..."
+  }
+}
+```
+
+终端文本会将这些字段压缩为三组：目标与作用、判断/进展/下一步、计划/任务/操作
+标识；普通结果不会因为只有内部 `operation_id` 而额外生成 Context 区块。
+
 ## 本机终端观测
 
 服务运行期间，可以在另一个终端只读观察指定 Workspace：
 
 ```bash
-./bin/mcpx-server workspace my-app
+./bin/mcpx-server observe my-app
 ```
 
 命令使用本机 Socket 订阅服务端事件，不启动第二个 HTTP 服务，不执行工具、命令
@@ -519,7 +586,7 @@ mcpx://remote-sessions/{remote_session_id}/artifacts/{artifact_id}
 可用参数：
 
 ```text
--history int       回放最近事件数量，范围 1-200，默认 100
+-history int       回放最近事件数量，范围 1-100，默认 100
 -format text|json  文本或一行一个 JSON 事件，默认 text
 -detail            显示语义用途、操作 ID 和执行事实
 -diff summary|preview|full
@@ -532,15 +599,22 @@ mcpx://remote-sessions/{remote_session_id}/artifacts/{artifact_id}
 示例：
 
 ```bash
-./bin/mcpx-server workspace -format json -history 200 my-app
-./bin/mcpx-server workspace -detail -diff full -tool edit my-app
+./bin/mcpx-server observe -format json -history 100 my-app
+./bin/mcpx-server observe -detail -diff full -tool edit my-app
 ```
 
-文本模式按一次工具调用聚合为一个交互块，使用 `Read`、`Edited`、`Ran`、
-`Searched` 等语义动作，并压缩重复的内部操作步骤。Diff 展示会区分新增、删除
-和上下文；支持真彩色终端时使用更明确的前景色和低饱和背景色，普通终端降级为
-ANSI 16 色。设置 `NO_COLOR=1` 关闭颜色，`COLORTERM=truecolor` 或 `24bit`
-启用真彩色，`COLUMNS` 可显式指定终端宽度。
+文本模式使用紧凑的行式 CLI 输出：先显示 `Read`、`Edited`、`Ran`、`Searched`
+等语义动作，再缩进显示 Context（目标、作用、判断依据、进展、下一步）、执行事实和结果；命令 stdout/stderr 按流合并
+并带行号。内部 `operation.*` 调度事件、重复的远端 `*.started`/`*.completed`
+notice 默认静默，只保留失败、取消等对人有用的最终结果，不再绘制大块边框。
+ARC 人类展示层会按工具使用稳定的动作色（读取/发现、编辑、执行、计划、会话等），
+再按状态覆盖为运行中、等待确认、失败或中断色；相邻操作块之间显示带工具和状态的细分隔线。
+这些颜色和分隔线只属于 text observer 的人类展示；Context 字段进入 ARC JSON、structuredContent 和持久化机器事件，但颜色与分隔线不进入机器协议。
+超长输出按终端宽度换行并设置正文预算，超出时提示改用 JSON 查看完整事件。Diff
+展示会区分新增、删除和上下文；支持真彩色终端时使用更明确的前景色和低饱和背景色，
+普通终端降级为 ANSI 16 色。文本模式会清理命令输出中的 ANSI/C0 控制字符；设置
+`NO_COLOR=1` 关闭颜色，`COLORTERM=truecolor` 或 `24bit` 启用真彩色，`COLUMNS`
+可显式指定终端宽度。
 
 机器处理日志时使用 `--format json`，不要解析文本中的颜色、缩进或装饰边框。
 事件中保留 `event_id`、`sequence`、`request_id`、`operation_id`、`task_id`、
@@ -568,7 +642,7 @@ ANSI 16 色。设置 `NO_COLOR=1` 关闭颜色，`COLORTERM=truecolor` 或 `24bi
 仓库结构：
 
 ```text
-cmd/mcpx-server       服务入口、workspace 观测和 oauth-register
+cmd/mcpx-server       服务入口、observe 终端观测、workspace 注册和 oauth-register
 internal/server       HTTP Gateway、公开工具和 Resource 注册
 internal/edit         Edit 解析、原子写、格式保留和变更摘要
 internal/operation    异步 Operation、依赖调度和结果分页

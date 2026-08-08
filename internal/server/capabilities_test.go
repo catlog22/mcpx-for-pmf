@@ -13,6 +13,9 @@ import (
 
 	"mcpx/internal/auth"
 	"mcpx/internal/config"
+	"mcpx/internal/edit"
+	"mcpx/internal/file"
+	"mcpx/internal/operation"
 	"mcpx/internal/remotesession"
 )
 
@@ -53,6 +56,30 @@ func TestMachineToolCapabilitiesApplyRoleAndFeatureState(t *testing.T) {
 	}
 	if states["read"] != "available" || states["edit"] != "forbidden" || states["execute"] != "disabled" {
 		t.Fatalf("unexpected capability states: %+v", states)
+	}
+}
+
+func TestMachineCapabilitiesPublishHardLimits(t *testing.T) {
+	limits := publishedLimits()
+	read := limits["read"].(map[string]any)
+	if read["max_source_bytes"] != file.MaxSourceBytes || read["max_items"] != MaxReadItems {
+		t.Fatalf("read limits=%+v", read)
+	}
+	if limits["operation_batch"].(map[string]any)["max_steps"] != operation.MaxSteps {
+		t.Fatalf("operation limits=%+v", limits["operation_batch"])
+	}
+	if limits["edit"].(map[string]any)["max_changed_lines"] != edit.MaxChangedLines {
+		t.Fatalf("edit limits=%+v", limits["edit"])
+	}
+	remove := limits["remove_prepare"].(map[string]any)
+	if remove["max_targets"] != MaxRemoveTargets || remove["max_manifest_entries"] != MaxRemoveManifestEntries {
+		t.Fatalf("remove limits=%+v", remove)
+	}
+	items := machineToolCapabilities(config.DefaultConfig(), nil)
+	for _, item := range items {
+		if item["name"] == "read" && item["limits"] == nil {
+			t.Fatalf("read tool limits missing: %+v", item)
+		}
 	}
 }
 

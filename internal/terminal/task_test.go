@@ -127,6 +127,31 @@ func TestTaskSeparatesOutputStreamsAndSupportsStdin(t *testing.T) {
 	}
 }
 
+func TestTaskDrainsLargeOutputWithoutObserverPanic(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell assertion is Unix-specific")
+	}
+	manager := NewTaskManager()
+	manager.SetOutputSink(func(OutputChunk) {})
+	task, err := manager.StartRemote(context.Background(), "rs_large_output", "project", t.TempDir(), "head -c 1048576 /dev/zero | tr '\\000' x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	waitCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if !task.Wait(waitCtx) {
+		t.Fatal("large-output task did not exit")
+	}
+	status := task.StatusView()
+	if status["status"] != TaskExited || status["exit_code"] != 0 {
+		t.Fatalf("large-output status=%+v", status)
+	}
+	if task.LogStreamSize("stdout") != 1<<20 {
+		t.Fatalf("stdout log size=%d, want %d", task.LogStreamSize("stdout"), 1<<20)
+	}
+}
+
 func TestParseLsofPorts(t *testing.T) {
 	ports := parseLsof("p123\nn*:3000\nn127.0.0.1:8080\nn[::1]:3000\n")
 	if len(ports) != 3 || ports[0].Port != 3000 || ports[2].Port != 8080 {

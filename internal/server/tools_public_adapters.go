@@ -139,8 +139,9 @@ func (r *Runtime) toolWorkspaceHistoryRead(ctx context.Context, req *mcp.CallToo
 	query := observation.HistoryQuery{
 		Workspace:    workspaceName,
 		SessionID:    firstString(envReq.RemoteSessionID, stringPayload(envReq.Payload, "session_id")),
+		CallID:       firstString(envReq.CallID, stringPayload(envReq.Payload, "call_id")),
 		EventIDs:     stringSlicePayload(envReq.Payload, "event_ids"),
-		RequestIDs:   stringSlicePayload(envReq.Payload, "request_ids"),
+		RequestIDs:   append(stringSlicePayload(envReq.Payload, "request_ids"), stringPayload(envReq.Payload, "request_id")),
 		OperationIDs: stringSlicePayload(envReq.Payload, "operation_ids"),
 		TaskIDs:      stringSlicePayload(envReq.Payload, "task_ids"),
 		ChangesetIDs: stringSlicePayload(envReq.Payload, "changeset_ids"),
@@ -173,10 +174,12 @@ func (r *Runtime) toolWorkspaceHistoryRead(ctx context.Context, req *mcp.CallToo
 func historyEventView(event observation.Event) map[string]any {
 	view := map[string]any{
 		"event_id": event.EventID, "sequence": event.Sequence, "workspace": event.Workspace,
-		"session_id": event.RemoteSessionID, "request_id": event.RequestID, "operation_id": event.OperationID,
+		"session_id": event.RemoteSessionID, "request_id": event.RequestID, "call_id": event.CallID, "operation_id": event.OperationID,
 		"parent_operation_id": event.ParentOperationID, "step_id": event.StepID, "kind": event.Type, "type": event.Type,
-		"name": event.Tool, "tool": event.Tool, "status": event.Status, "purpose": event.Purpose,
-		"progress_summary": event.ProgressSummary, "summary": event.Summary, "command": event.Command,
+		"name": event.Tool, "tool": event.Tool, "phase": event.Phase, "status": event.Status,
+		"goal": event.Goal, "purpose": event.Purpose, "reasoning_summary": event.ReasoningSummary,
+		"progress_summary": event.ProgressSummary, "next_step": event.NextStep, "plan_id": event.PlanID,
+		"task_id": event.TaskID, "summary": event.Summary, "command": event.Command,
 		"working_directory": event.WorkingDirectory, "duration_ms": event.DurationMs,
 		"skill_name": event.SkillName, "mcp_server": event.MCPServer, "mcp_tool": event.MCPTool,
 		"path": event.Path, "resource_uri": event.ResourceURI, "stream": event.Stream,

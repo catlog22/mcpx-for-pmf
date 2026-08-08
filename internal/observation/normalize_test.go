@@ -26,9 +26,16 @@ func TestNormalizeToolInputRedactsSensitiveArguments(t *testing.T) {
 
 func TestNormalizeHumanToolOutputOmitsStructuredContent(t *testing.T) {
 	encoded, truncated := NormalizeHumanToolOutput(HumanObsSnapshot{
-		Status:  "succeeded",
-		Summary: "visible output",
-		Command: "echo hi",
+		Status:           "succeeded",
+		Goal:             "verify output",
+		Purpose:          "run the command",
+		ReasoningSummary: "the command is the smallest probe",
+		ProgressSummary:  "command started",
+		NextStep:         "inspect the result",
+		PlanID:           "pl_1",
+		TaskID:           "pt_1",
+		Summary:          "visible output",
+		Command:          "echo hi",
 	}, MaxEventBytes)
 	if truncated {
 		t.Fatal("small output was truncated")
@@ -43,6 +50,14 @@ func TestNormalizeHumanToolOutputOmitsStructuredContent(t *testing.T) {
 	}
 	if payload["summary"] != "visible output" || payload["command"] != "echo hi" {
 		t.Fatalf("human fields missing: %s", text)
+	}
+	for key, want := range map[string]string{
+		"goal": "verify output", "purpose": "run the command", "reasoning_summary": "the command is the smallest probe",
+		"progress_summary": "command started", "next_step": "inspect the result", "plan_id": "pl_1", "task_id": "pt_1",
+	} {
+		if payload[key] != want {
+			t.Fatalf("human context[%q]=%v, want %q", key, payload[key], want)
+		}
 	}
 }
 

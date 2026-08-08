@@ -13,7 +13,7 @@ func TestParseWorkspaceObserverArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.Workspace != "demo" || options.History != observation.MaxHistory || options.Format != "json" || options.Diff != "summary" || options.Tool != "change_read" || options.Status != "succeeded" || options.Operation != "op_1" || options.Path != "src/demo.go" {
+	if options.Workspace != "demo" || options.History != observation.MaxObserverHistory || options.Format != "json" || options.Diff != "summary" || options.Tool != "change_read" || options.Status != "succeeded" || options.Operation != "op_1" || options.Path != "src/demo.go" {
 		t.Fatalf("options=%+v", options)
 	}
 	if _, err := parseWorkspaceObserverArgs(nil); err == nil {
@@ -27,6 +27,22 @@ func TestParseWorkspaceObserverArgs(t *testing.T) {
 	}
 	if _, err := parseWorkspaceObserverArgs([]string{"-diff", "invalid", "demo"}); err == nil {
 		t.Fatal("unsupported diff mode should fail")
+	}
+}
+
+func TestParseWorkspaceRegisterArgs(t *testing.T) {
+	options, err := parseWorkspaceRegisterArgs([]string{"/tmp/demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.Path != "/tmp/demo" {
+		t.Fatalf("options=%+v", options)
+	}
+	if _, err := parseWorkspaceRegisterArgs(nil); err == nil {
+		t.Fatal("missing workspace path should fail")
+	}
+	if _, err := parseWorkspaceRegisterArgs([]string{"one", "two"}); err == nil {
+		t.Fatal("multiple workspace paths should fail")
 	}
 }
 
@@ -88,8 +104,8 @@ func TestRenderWorkspaceFrameReusesTextRendererAcrossEvents(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if strings.Count(output.String(), "╭─") != 1 || strings.Count(output.String(), "╰") != 1 {
-		t.Fatalf("frames did not share one interaction block: %q", output.String())
+	if strings.Contains(output.String(), "╭─") || strings.Count(output.String(), "Read main.go") != 1 {
+		t.Fatalf("frames did not render one compact interaction: %q", output.String())
 	}
 
 	if err := renderWorkspaceFrameWithRenderer(&output, observation.Frame{Type: "gap"}, "text", false, renderer); err != nil {
@@ -98,7 +114,7 @@ func TestRenderWorkspaceFrameReusesTextRendererAcrossEvents(t *testing.T) {
 	if err := renderWorkspaceFrameWithRenderer(&output, observation.Frame{Type: "event", Event: &observation.Event{Sequence: 3, RequestID: "req_workspace", Tool: "file_read", Type: observation.TypeToolCompleted, Output: []byte(`{"status":"ok"}`)}}, "text", false, renderer); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(output.String(), "╭─") != 2 {
+	if strings.Contains(output.String(), "╭─") || !strings.Contains(output.String(), "Read files") {
 		t.Fatalf("gap did not reset interaction state: %q", output.String())
 	}
 }

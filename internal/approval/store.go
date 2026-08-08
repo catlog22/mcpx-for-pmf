@@ -30,7 +30,17 @@ type Pending struct {
 	ChangesetDigest   string
 	ConfirmationToken string
 	ContentKey        string
+	DeleteFiles       []DeleteFile `json:"delete_files,omitempty"`
 	CreatedAt         time.Time
+}
+
+// DeleteFile is the immutable file snapshot shown before a clean edit delete
+// is allowed to proceed. The snapshot prevents a confirmation for one file
+// revision from authorizing a later revision.
+type DeleteFile struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
 }
 
 // Store holds Remote Session-scoped pending approvals.
@@ -67,6 +77,8 @@ func contentKey(p Pending) string {
 			return ""
 		}
 		return strings.Join([]string{p.PrincipalID, p.ChangesetID, p.ChangesetDigest}, "\x00")
+	case "edit_delete":
+		return p.ContentKey
 	default:
 		return ""
 	}

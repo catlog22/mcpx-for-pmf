@@ -36,6 +36,8 @@ type renderOptions struct {
 	diffMode             DiffMode
 	diffCache            *diffDocumentCache
 	suppressOutputAction bool
+	suppressContext      bool
+	suppressDuration     bool
 	outputLineStart      int
 }
 
@@ -45,7 +47,10 @@ func renderTextWithOptions(w io.Writer, event Event, options renderOptions, supp
 	}
 	switch event.Type {
 	case TypeToolStarted:
-		return nil
+		if !hasSemanticContext(event) {
+			return nil
+		}
+		return renderProgressSummary(w, event, options)
 	case TypeToolCompleted:
 		return renderToolCompleted(w, event, options, suppressCommandOutput)
 	case TypeCommandOutput:
@@ -57,7 +62,11 @@ func renderTextWithOptions(w io.Writer, event Event, options renderOptions, supp
 	case TypeObserverNotice:
 		return renderSummaryEvent(w, event, "Observed", event.Summary, event.Output, options.colorMode != ColorModeNone)
 	default:
-		return renderSummaryEvent(w, event, "Observed", event.Type, event.Output, options.colorMode != ColorModeNone)
+		summary := event.Summary
+		if strings.TrimSpace(summary) == "" {
+			summary = event.Type
+		}
+		return renderSummaryEvent(w, event, "Observed", summary, event.Output, options.colorMode != ColorModeNone)
 	}
 }
 
@@ -67,6 +76,7 @@ func RenderJSON(w io.Writer, event Event) error {
 	if w == nil {
 		return fmt.Errorf("render writer is required")
 	}
+	event.SetDefaults()
 	return json.NewEncoder(w).Encode(event)
 }
 
@@ -88,7 +98,7 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 	}
 
 	details := make([]string, 0, 3)
-	if facts := eventFactLine(event, options.detail); facts != "" {
+	if facts := eventFactLine(event, options.detail, options.suppressDuration); facts != "" {
 		details = append(details, facts)
 	}
 	if failed {
@@ -99,9 +109,8 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 			details = append(details, "failed: "+compactLine(message))
 		}
 	} else {
-		// Model-authored progress_summary must not be ellipsis-truncated for operators.
-		if event.ProgressSummary != "" && len(details) < 3 {
-			details = append(details, strings.TrimSpace(event.ProgressSummary))
+		if !options.suppressContext && hasSemanticContext(event) && len(details) < 3 {
+			details = append(details, semanticContextText(event))
 		}
 		if result, ok := payload["result"].(map[string]any); ok && len(details) < 3 {
 			if output := humanToolOutput(event.Tool, result); output != "" {
@@ -121,10 +130,66 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 	return writeChildren(w, details, options.colorMode != ColorModeNone)
 }
 
+func renderProgressSummary(w io.Writer, event Event, options renderOptions) error {
+	return writeChildren(w, semanticContextLines(event), options.colorMode != ColorModeNone)
+}
+
+func hasSemanticContext(event Event) bool {
+	return strings.TrimSpace(event.Goal) != "" || strings.TrimSpace(event.Purpose) != "" ||
+		strings.TrimSpace(event.ReasoningSummary) != "" || strings.TrimSpace(event.ProgressSummary) != "" ||
+		strings.TrimSpace(event.NextStep) != ""
+}
+
+func semanticContextLines(event Event) []string {
+	return semanticContextGroups([]semanticContextGroup{
+		{
+			{label: "goal", value: event.Goal},
+			{label: "purpose", value: event.Purpose},
+		},
+		{
+			{label: "reasoning", value: event.ReasoningSummary},
+			{label: "progress", value: event.ProgressSummary},
+			{label: "next", value: event.NextStep},
+		},
+		{
+			{label: "plan", value: event.PlanID},
+			{label: "task", value: event.TaskID},
+		},
+	})
+}
+
+type semanticContextField struct {
+	label string
+	value string
+}
+
+type semanticContextGroup []semanticContextField
+
+func semanticContextGroups(groups []semanticContextGroup) []string {
+	lines := make([]string, 0, len(groups))
+	for _, group := range groups {
+		parts := make([]string, 0, len(group))
+		for _, field := range group {
+			if value := compactLine(field.value); value != "" {
+				parts = append(parts, field.label+": "+value)
+			}
+		}
+		if len(parts) > 0 {
+			lines = append(lines, strings.Join(parts, " · "))
+		}
+	}
+	return lines
+}
+
+func semanticContextText(event Event) string {
+	return strings.Join(semanticContextLines(event), "\n")
+}
+
 func renderCommandOutput(w io.Writer, event Event, options renderOptions) error {
 	var payload map[string]any
 	_ = json.Unmarshal(event.Output, &payload)
 	text, _ := payload["text"].(string)
+	text = sanitizeTerminalText(text)
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
@@ -156,32 +221,45 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 		DeleteSummary *struct {
 			Display string `json:"display"`
 		} `json:"delete_summary"`
-		Files []struct {
-			Path            string         `json:"path"`
-			NewPath         string         `json:"new_path"`
-			Operation       string         `json:"operation"`
-			Diff            string         `json:"diff"`
-			DiffTruncated   bool           `json:"diff_truncated"`
-			OriginalFormat  fileFormatView `json:"original_format"`
-			ProposedFormat  fileFormatView `json:"proposed_format"`
-			FormatPreserved bool           `json:"format_preserved"`
-		} `json:"files"`
+		Files   []fileChangeView `json:"files"`
+		Results []fileChangeView `json:"results"`
 	}
-	if err := json.Unmarshal(event.Output, &payload); err != nil || len(payload.Files) == 0 {
+	if err := json.Unmarshal(event.Output, &payload); err != nil {
+		payload.Files = nil
+	}
+	files := payload.Files
+	if len(files) == 0 {
+		files = payload.Results
+	}
+	if len(files) == 0 {
 		label := compactLine(event.Summary)
 		if label == "" {
 			label = "files"
 		}
-		if err := writeEventAction(w, event, "Edited", label, ansiGreen, options.colorMode != ColorModeNone); err != nil {
+		if err := writeEventAction(w, event, "Changed", label, ansiGreen, options.colorMode != ColorModeNone); err != nil {
 			return err
 		}
 		return writeChildren(w, []string{"file details unavailable"}, options.colorMode != ColorModeNone)
 	}
-	label := fmt.Sprintf("%d files", len(payload.Files))
-	if len(payload.Files) == 1 {
-		label = payload.Files[0].Path
+	label := fmt.Sprintf("%d files", len(files))
+	if len(files) == 1 {
+		label = files[0].Path
 	}
-	if err := writeEventAction(w, event, "Edited", label, actionColor(event.toolOrType(), false), options.colorMode != ColorModeNone); err != nil {
+	added, removed := 0, 0
+	for _, file := range files {
+		document := options.diffCache.get(file.Diff)
+		added += document.added
+		removed += document.removed
+	}
+	if added > 0 || removed > 0 {
+		label += formatCompactDiffStats(added, removed)
+	}
+	if len(files) == 1 {
+		if format := fileFormatSummary(files[0]); format != "" {
+			label += " [" + format + "]"
+		}
+	}
+	if err := writeEventAction(w, event, fileChangeVerb(files), label, actionColor(event.toolOrType(), false), options.colorMode != ColorModeNone); err != nil {
 		return err
 	}
 	if payload.DeleteSummary != nil && strings.TrimSpace(payload.DeleteSummary.Display) != "" {
@@ -189,7 +267,7 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 			return err
 		}
 	}
-	for index, file := range payload.Files {
+	for index, file := range files {
 		if index >= maxChangedFiles {
 			break
 		}
@@ -202,12 +280,33 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 		}
 		document := options.diffCache.get(file.Diff)
 		stats := document.stats()
+		// The single-file action line already contains the path and aggregate
+		// stats. Repeating it as a child line makes large edits look noisy.
+		if len(files) == 1 {
+			if file.Diff != "" && options.diffMode != DiffModeSummary {
+				document := options.diffCache.get(file.Diff)
+				limit := 0
+				if options.diffMode == DiffModePreview {
+					limit = defaultDiffPreviewLines
+				}
+				truncated, err := renderDiffDocument(w, document, options, limit)
+				if err != nil {
+					return err
+				}
+				if truncated || file.DiffTruncated {
+					if err := writeChild(w, "diff preview truncated; use -diff full for complete output", options.colorMode != ColorModeNone); err != nil {
+						return err
+					}
+				}
+			}
+			continue
+		}
 		line := path
 		if file.Operation != "" {
 			line += " (" + file.Operation + ")"
 		}
 		if stats != "" {
-			line += " " + stats
+			line += " " + formatCompactDiffStats(document.added, document.removed)
 		}
 		if format := fileFormatSummary(file); format != "" {
 			line += " [" + format + "]"
@@ -231,15 +330,19 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 			}
 		}
 	}
-	if len(payload.Files) > maxChangedFiles {
-		if err := writeChild(w, fmt.Sprintf("... and %d more files", len(payload.Files)-maxChangedFiles), options.colorMode != ColorModeNone); err != nil {
+	if len(files) > maxChangedFiles {
+		if err := writeChild(w, fmt.Sprintf("... and %d more files", len(files)-maxChangedFiles), options.colorMode != ColorModeNone); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func fileFormatSummary(file struct {
+func formatCompactDiffStats(added, removed int) string {
+	return fmt.Sprintf(" [-%d,+%d]", removed, added)
+}
+
+type fileChangeView struct {
 	Path            string         `json:"path"`
 	NewPath         string         `json:"new_path"`
 	Operation       string         `json:"operation"`
@@ -248,7 +351,32 @@ func fileFormatSummary(file struct {
 	OriginalFormat  fileFormatView `json:"original_format"`
 	ProposedFormat  fileFormatView `json:"proposed_format"`
 	FormatPreserved bool           `json:"format_preserved"`
-}) string {
+}
+
+func fileChangeVerb(files []fileChangeView) string {
+	if len(files) == 0 {
+		return "Changed"
+	}
+	verb := ""
+	for _, file := range files {
+		current := map[string]string{
+			"create": "Created", "update": "Edited", "delete": "Deleted", "rename": "Renamed",
+		}[strings.ToLower(strings.TrimSpace(file.Operation))]
+		if current == "" {
+			current = "Changed"
+		}
+		if verb == "" {
+			verb = current
+			continue
+		}
+		if verb != current {
+			return "Changed"
+		}
+	}
+	return verb
+}
+
+func fileFormatSummary(file fileChangeView) string {
 	original := formatViewSummary(file.OriginalFormat)
 	proposed := formatViewSummary(file.ProposedFormat)
 	if original == "" {
@@ -296,6 +424,8 @@ type fileFormatView struct {
 }
 
 func writeEventAction(w io.Writer, event Event, verb, label, fallbackColor string, color bool) error {
+	verb = sanitizeTerminalText(verb)
+	label = sanitizeTerminalText(label)
 	if label == "" {
 		label = "operation"
 	}
@@ -332,7 +462,7 @@ func writeChild(w io.Writer, value string, color bool) error {
 	// Preserve full model-authored text (progress_summary / purpose notes).
 	// Only collapse to a single logical line when the value is already one line;
 	// multi-line notes keep every line (indented under the first ↳).
-	value = strings.TrimRight(value, "\r\n")
+	value = strings.TrimRight(sanitizeTerminalText(value), "\r\n")
 	if value == "" {
 		return nil
 	}
@@ -353,7 +483,7 @@ func writeChild(w io.Writer, value string, color bool) error {
 }
 
 func writeCodeChild(w io.Writer, value string, options renderOptions, width int) error {
-	value = compactCodeLine(value)
+	value = compactCodeLine(sanitizeTerminalText(value))
 	if width > 0 {
 		value = formatDiffLine(value, options.colorMode, width)
 	} else {
@@ -519,11 +649,8 @@ func publicView(raw []byte) string {
 	return strings.ToLower(strings.TrimSpace(view))
 }
 
-func eventFactLine(event Event, detail bool) string {
+func eventFactLine(event Event, detail, suppressDuration bool) string {
 	parts := make([]string, 0, 9)
-	if event.Tool != "" {
-		parts = append(parts, "tool="+event.Tool)
-	}
 	if event.Command != "" {
 		parts = append(parts, "command="+compactCommand(event.Command))
 	}
@@ -533,7 +660,7 @@ func eventFactLine(event Event, detail bool) string {
 	if event.ExitCode != nil {
 		parts = append(parts, fmt.Sprintf("exit=%d", *event.ExitCode))
 	}
-	if event.DurationMs > 0 {
+	if event.DurationMs > 0 && !suppressDuration {
 		parts = append(parts, fmt.Sprintf("duration=%dms", event.DurationMs))
 	}
 	if event.SkillName != "" {
@@ -552,6 +679,12 @@ func eventFactLine(event Event, detail bool) string {
 	if detail && event.Purpose != "" {
 		// Purpose is model input; do not ellipsis-truncate.
 		parts = append(parts, "purpose="+strings.TrimSpace(event.Purpose))
+	}
+	if detail && event.Phase != "" {
+		parts = append(parts, "phase="+event.Phase)
+	}
+	if detail && event.CallID != "" {
+		parts = append(parts, "call="+event.CallID)
 	}
 	if detail && event.OperationID != "" {
 		parts = append(parts, "operation="+event.OperationID)
@@ -894,15 +1027,22 @@ func renderFullDiffWithContext(w io.Writer, diff string, options renderOptions) 
 }
 
 func renderDiffDocument(w io.Writer, document diffDocument, options renderOptions, limit int) (bool, error) {
-	if len(document.lines) == 0 {
+	lines := visibleDiffLines(document)
+	if len(lines) == 0 {
 		return false, nil
 	}
-	for index, line := range document.lines {
+	for index, line := range lines {
 		if limit > 0 && index >= limit {
 			return true, nil
 		}
+		if line.kind == diffLineMetadata {
+			if err := writeCodeChild(w, "    | ...", options, options.terminalWidth-8); err != nil {
+				return false, err
+			}
+			continue
+		}
 		prefix := diffLinePrefix(line)
-		value := compactCodeLine(prefix + line.text)
+		value := compactCodeLine(sanitizeTerminalText(prefix + line.text))
 		value = styleRenderedDiffLine(value, line.kind, options.colorMode)
 		if width := options.terminalWidth - 8; width > 0 {
 			value = truncateRenderedLine(value, width)
@@ -912,6 +1052,54 @@ func renderDiffDocument(w io.Writer, document diffDocument, options renderOption
 		}
 	}
 	return false, nil
+}
+
+// visibleDiffLines removes transport-only unified-diff headers and keeps at
+// most five context lines around each changed line. The terminal already
+// prints the file path and change counts in the action row, so repeating
+// ---/+++/@@ makes human observation harder to scan without adding meaning.
+func visibleDiffLines(document diffDocument) []diffLine {
+	if len(document.lines) == 0 {
+		return nil
+	}
+	keep := make([]bool, len(document.lines))
+	for index, line := range document.lines {
+		if line.kind != diffLineAdded && line.kind != diffLineRemoved {
+			continue
+		}
+		start := index - 5
+		if start < 0 {
+			start = 0
+		}
+		end := index + 5
+		if end >= len(document.lines) {
+			end = len(document.lines) - 1
+		}
+		for cursor := start; cursor <= end; cursor++ {
+			if document.lines[cursor].kind == diffLineContext || document.lines[cursor].kind == diffLineAdded || document.lines[cursor].kind == diffLineRemoved || document.lines[cursor].kind == diffLineNoNewline {
+				keep[cursor] = true
+			}
+		}
+	}
+	visible := make([]diffLine, 0, len(document.lines))
+	gap := false
+	for index, line := range document.lines {
+		if line.kind == diffLineFileHeader || line.kind == diffLineHunkHeader || line.kind == diffLineMetadata {
+			continue
+		}
+		if !keep[index] {
+			if len(visible) > 0 {
+				gap = true
+			}
+			continue
+		}
+		if gap {
+			visible = append(visible, diffLine{kind: diffLineMetadata})
+			gap = false
+		}
+		visible = append(visible, line)
+	}
+	return visible
 }
 
 func diffLinePrefix(line diffLine) string {

@@ -50,6 +50,17 @@ func (r *Runtime) toolEdit(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	if err != nil {
 		return r.editToolError(envReq, session, err)
 	}
+	for index, item := range edits {
+		if item.Operation == edit.OpDelete {
+			return r.editToolError(envReq, session, &edit.ApplyError{
+				Code:    "DELETE_USE_REMOVE",
+				Message: "file removal requires remove_prepare followed by submit_remove",
+				Path:    item.Path,
+				Index:   index,
+				Err:     edit.ErrUnsupportedOp,
+			})
+		}
+	}
 	effective := r.effectiveConfig(session.WorkspacePath)
 	for _, item := range edits {
 		for _, path := range []string{item.Path, item.NewPath} {
@@ -65,6 +76,22 @@ func (r *Runtime) toolEdit(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 
 	idempotencyKey := strings.TrimSpace(stringPayload(envReq.Payload, "idempotency_key"))
 	fingerprint := cleanEditFingerprint(envReq, edits)
+	apply := true
+	if value, exists := envReq.Payload["apply"].(bool); exists {
+		apply = value
+	}
+	if !apply {
+		result, dryRunErr := edit.ApplyBatch(edit.BatchRequest{WorkspaceRoot: session.WorkspacePath, Edits: edits, DryRun: true})
+		if dryRunErr != nil {
+			return r.editToolError(envReq, session, dryRunErr)
+		}
+		data := editResponseData(session.ID, "", result, false)
+		data["applied"] = false
+		data["apply"] = false
+		data["preview_only"] = true
+		data["remote_session_id"] = session.ID
+		return r.remoteResult(envReq, session.ID, session.WorkspaceName, data)
+	}
 	var idemKey idempotency.Key
 	var claim idempotency.Claim
 	claimed := idempotencyKey != "" && r.idempotency != nil
@@ -155,7 +182,6 @@ func (r *Runtime) toolEdit(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 			return r.editIdempotencyInDoubt(envReq, session, idempotency.Record{Key: idemKey, Fingerprint: fingerprint, State: idempotency.StateInDoubt})
 		}
 	}
-
 	_ = r.remote.AddEvent(ctx, principal, remotesession.Event{
 		RemoteSessionID: session.ID,
 		Type:            "edit.applied",
@@ -165,7 +191,7 @@ func (r *Runtime) toolEdit(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	r.logAudit(audit.Event{
 		RequestID: envReq.RequestID, RemoteSessionID: session.ID, Workspace: session.WorkspaceName,
 		Tool: "edit", Status: "ok",
-		Detail: map[string]any{"files": len(result.Results), "total_changed_lines": result.TotalChangedLines},
+		Detail: map[string]any{"files": len(result.Results), "deleted_files": 0, "total_changed_lines": result.TotalChangedLines},
 	})
 	return r.editToolSuccess(envReq, session, editID, result, false)
 }
@@ -205,13 +231,21 @@ func (r *Runtime) editToolError(envReq envelope.Request, session remotesession.S
 		for key, value := range details {
 			response.Error.Details[key] = value
 		}
+		recoveryAction := suggestedNext["tool"].(string)
+		if action, ok := suggestedNext["action"].(string); ok && action != "" {
+			recoveryAction = action
+		}
+		arguments := map[string]any{
+			"remote_session_id": session.ID,
+			"path":              ae.Path,
+		}
+		if maxLines, ok := suggestedNext["max_changed_lines"]; ok {
+			arguments["max_changed_lines"] = maxLines
+		}
 		response.Error.Recovery = &envelope.Recovery{
-			Action: suggestedNext["tool"].(string),
-			Tool:   suggestedNext["tool"].(string),
-			Arguments: map[string]any{
-				"remote_session_id": session.ID,
-				"path":              ae.Path,
-			},
+			Action:    recoveryAction,
+			Tool:      suggestedNext["tool"].(string),
+			Arguments: arguments,
 		}
 		response.RemoteSessionID = session.ID
 		return r.resultJSON(response)
@@ -221,14 +255,22 @@ func (r *Runtime) editToolError(envReq envelope.Request, session remotesession.S
 	return r.resultJSON(response)
 }
 
-func editRecovery(code string, ae *edit.ApplyError) string {
+func editRecovery(code string, ae *edit.ApplyError) any {
 	switch code {
 	case "STALE_REVISION":
-		return "re-read the file to get the latest sha256, then retry edit with the same idempotency_key and updated base_sha256"
+		return "re-read the file to get the latest sha256, update base_sha256, and retry with a new idempotency_key; the old key remains bound to the stale request"
 	case "MATCH_NOT_FOUND", "MATCH_AMBIGUOUS":
 		return "re-read the file and use a longer unique match snippet for the failed replacement"
 	case "TOO_MANY_CHANGES":
-		return fmt.Sprintf("split the edit into smaller batches; max total changed lines is %d", edit.MaxChangedLines)
+		return map[string]any{
+			"action":            "split_edit",
+			"max_changed_lines": edit.MaxChangedLines,
+			"message":           fmt.Sprintf("split the edit into smaller batches; max total changed lines is %d", edit.MaxChangedLines),
+		}
+	case "SYMLINK_NOT_ALLOWED", "DELETE_FILE_ONLY":
+		return "delete only a regular workspace file; do not follow or remove symlink paths"
+	case "DELETE_USE_REMOVE":
+		return "use remove_prepare, ask the web user to confirm the frozen manifest, then submit_remove with confirmation_uuid; edit never removes files"
 	case "FILE_DENIED", "POLICY_DENIED":
 		return "adjust the path or obtain policy approval"
 	default:
@@ -250,11 +292,16 @@ func editSuggestedNext(code, remoteSessionID string, ae *edit.ApplyError) map[st
 			next["path"] = ae.Path
 		}
 		if ae != nil && ae.Current != "" {
-			next["note"] = "use current_sha256 as base_sha256 on retry"
+			next["note"] = "use current_sha256 as base_sha256 and generate a new idempotency_key; the old key is bound to the stale request"
 		}
 	case "TOO_MANY_CHANGES":
 		next["tool"] = "edit"
+		next["action"] = "split_edit"
+		next["max_changed_lines"] = edit.MaxChangedLines
 		next["note"] = "split edits so total +/- lines <= 1000"
+	case "DELETE_USE_REMOVE":
+		next["tool"] = "remove_prepare"
+		next["purpose"] = "prepare the explicitly confirmed workspace deletion"
 	default:
 		next["tool"] = "edit"
 	}
@@ -283,6 +330,7 @@ func (r *Runtime) observeCleanEdit(ctx context.Context, envReq envelope.Request,
 		Workspace:       session.WorkspaceName,
 		RemoteSessionID: session.ID,
 		RequestID:       envReq.RequestID,
+		CallID:          observationCallID(envReq),
 		Tool:            "edit",
 		Type:            observation.TypeFileChanged,
 		Status:          "succeeded",

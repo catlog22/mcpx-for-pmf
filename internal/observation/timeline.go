@@ -3,18 +3,15 @@ package observation
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
-
-	"github.com/google/uuid"
 )
 
-// TextRenderer groups related observation events into one bounded terminal
-// block. It is intentionally stateful because a command's output can arrive
-// between its tool.started and tool.completed events.
+// TextRenderer renders a compact, line-oriented terminal stream. It remains
+// stateful only for streamed command output, duplicate read folding, filters,
+// and terminal-width bookkeeping; durable event grouping is left to JSON.
 type TextRenderer struct {
 	colorMode               ColorMode
 	width                   int
@@ -26,26 +23,24 @@ type TextRenderer struct {
 	fallbackSeq             uint64
 	lastProgressFingerprint string
 	lastSemanticFingerprint string
+	lastClosedKey           string
 	duplicateCount          int
 	detail                  bool
 }
 
 type interactionBlock struct {
 	key              string
-	sequence         int64
-	remoteSessionID  string
-	tool             string
-	failed           bool
-	continuation     bool
 	opened           bool
 	closed           bool
+	pendingEvent     Event
+	pendingLines     []string
+	pendingStarted   bool
 	bodyLines        int
-	pendingLine      string
 	ellipsis         bool
 	commandOutput    bool
-	status           string
 	outputLines      map[string]int
 	lastOutputStream string
+	contextShown     bool
 }
 
 // NewTextRenderer creates a text renderer for one observer stream.
@@ -144,6 +139,9 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 	if !eventMatchesFilter(event, r.filter) {
 		return nil
 	}
+	if !r.detail && isCompactObservationNoise(event) {
+		return nil
+	}
 	if event.Tool == "progress_report" && event.Type == TypeToolCompleted {
 		fingerprint := progressFingerprint(event)
 		if fingerprint != "" && fingerprint == r.lastProgressFingerprint {
@@ -160,34 +158,16 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 	block := r.blocks[key]
 	if block == nil || block.closed {
 		block = &interactionBlock{
-			key:             key,
-			sequence:        event.Sequence,
-			remoteSessionID: formatRemoteSessionID(event.RemoteSessionID),
-			tool:            event.toolOrType(),
-			failed:          eventFailed(event),
-			status:          eventStatus(event),
-			continuation:    block != nil && block.closed,
-			outputLines:     make(map[string]int),
+			key:         key,
+			outputLines: make(map[string]int),
 		}
 		r.blocks[key] = block
-	} else {
-		if event.RemoteSessionID != "" {
-			block.remoteSessionID = formatRemoteSessionID(event.RemoteSessionID)
-		}
-		if event.Tool != "" {
-			block.tool = event.Tool
-		}
-		block.failed = block.failed || eventFailed(event)
-		if status := eventStatus(event); status != "" {
-			block.status = status
-		}
 	}
 
 	if event.Type == TypeToolStarted {
-		if event.Tool != "" {
-			block.tool = event.Tool
+		if !hasSemanticContext(event) {
+			return nil
 		}
-		return nil
 	}
 	wasCommandOutput := block.commandOutput
 	if event.Type == TypeCommandOutput {
@@ -212,6 +192,8 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 		diffMode:             r.diffMode,
 		diffCache:            r.diffCache,
 		suppressOutputAction: suppressOutputAction,
+		suppressContext:      block.contextShown,
+		suppressDuration:     block.pendingStarted && event.Type == TypeToolCompleted,
 		outputLineStart:      outputLineStart,
 	}, block.commandOutput && event.Type == TypeToolCompleted); err != nil {
 		return err
@@ -220,7 +202,33 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 	if len(lines) == 0 {
 		return nil
 	}
-	if err := r.activate(w, block); err != nil {
+	if event.Type == TypeToolStarted {
+		// Delay the operation header until the first output/completion event so
+		// the header can carry the actual duration when a short call finishes.
+		block.pendingEvent = event
+		block.pendingLines = append([]string(nil), lines...)
+		block.pendingStarted = true
+		block.contextShown = true
+		return nil
+	}
+	if block.pendingStarted {
+		header := block.pendingEvent
+		if event.DurationMs > 0 {
+			header.DurationMs = event.DurationMs
+		}
+		if err := r.activate(w, block, header); err != nil {
+			return err
+		}
+		for _, line := range block.pendingLines {
+			if err := r.writeBodyLine(w, block, line); err != nil {
+				return err
+			}
+		}
+		block.pendingEvent = Event{}
+		block.pendingLines = nil
+		block.pendingStarted = false
+	}
+	if err := r.activate(w, block, event); err != nil {
 		return err
 	}
 	for _, line := range lines {
@@ -233,7 +241,7 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 		block.lastOutputStream = stream
 	}
 	switch event.Type {
-	case TypeCommandOutput, TypeFileChanged:
+	case TypeCommandOutput, TypeFileChanged, TypeToolStarted:
 		return nil
 	default:
 		return r.close(w, block)
@@ -251,6 +259,7 @@ func (r *TextRenderer) ResetAfterGap() {
 	r.fallbackSeq = 0
 	r.lastProgressFingerprint = ""
 	r.lastSemanticFingerprint = ""
+	r.lastClosedKey = ""
 	r.duplicateCount = 0
 }
 
@@ -424,7 +433,7 @@ func eventPath(event Event) string {
 	return strings.Join(paths, " ")
 }
 
-func (r *TextRenderer) activate(w io.Writer, block *interactionBlock) error {
+func (r *TextRenderer) activate(w io.Writer, block *interactionBlock, event Event) error {
 	if r.activeKey != "" && r.activeKey != block.key {
 		if active := r.blocks[r.activeKey]; active != nil && !active.closed {
 			if err := r.close(w, active); err != nil {
@@ -432,54 +441,18 @@ func (r *TextRenderer) activate(w io.Writer, block *interactionBlock) error {
 			}
 		}
 	}
+	if !block.opened && r.lastClosedKey != "" && r.lastClosedKey != block.key {
+		if err := r.writeOperationSeparator(w, event); err != nil {
+			return err
+		}
+	}
 	if block.opened {
 		r.activeKey = block.key
 		return nil
 	}
-	header := "╭─"
-	if block.sequence == 0 {
-		if block.remoteSessionID == "" {
-			header += " · "
-		}
-	} else {
-		header += fmt.Sprintf(" #%d", block.sequence)
-	}
-	for _, part := range []string{block.remoteSessionID, block.tool} {
-		if part != "" {
-			header += " · " + part
-		}
-	}
-	if block.continuation {
-		header += " · continued"
-	}
-	header = truncateRenderedLine(header, r.width)
-	if _, err := fmt.Fprintln(w, paint(header, blockColor(block), r.colorMode != ColorModeNone)); err != nil {
-		return err
-	}
 	block.opened = true
 	r.activeKey = block.key
 	return nil
-}
-
-// formatRemoteSessionID keeps old persisted rs_ identifiers readable while
-// rendering newly-created UUID session identifiers in canonical form.
-func formatRemoteSessionID(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	if parsed, err := uuid.Parse(value); err == nil {
-		return parsed.String()
-	}
-	if strings.HasPrefix(value, "rs_") {
-		raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(value, "rs_"))
-		if err == nil && len(raw) == 16 {
-			var parsed uuid.UUID
-			copy(parsed[:], raw)
-			return parsed.String()
-		}
-	}
-	return value
 }
 
 func (r *TextRenderer) writeBodyLine(w io.Writer, block *interactionBlock, line string) error {
@@ -489,42 +462,31 @@ func (r *TextRenderer) writeBodyLine(w io.Writer, block *interactionBlock, line 
 	if block.ellipsis {
 		return nil
 	}
-	if block.pendingLine == "" {
-		block.pendingLine = line
-		return nil
-	}
-	if block.bodyLines >= maxInteractionBodyLines-1 {
-		block.pendingLine = ""
+	if block.bodyLines >= maxInteractionBodyLines {
 		return r.writeBodyEllipsis(w, block)
 	}
-	if err := r.flushBodyLine(w, block, block.pendingLine, true); err != nil {
-		return err
-	}
-	if block.ellipsis {
-		block.pendingLine = ""
-		return nil
-	}
-	block.pendingLine = line
-	return nil
+	return r.flushBodyLine(w, block, line)
 }
 
-func (r *TextRenderer) flushBodyLine(w io.Writer, block *interactionBlock, line string, reserveMarker bool) error {
-	bodyWidth := r.width - 2
+func (r *TextRenderer) flushBodyLine(w io.Writer, block *interactionBlock, line string) error {
+	indentWidth := leadingSpaceWidth(line)
+	continuationIndent := strings.Repeat(" ", indentWidth+2)
+	bodyWidth := r.width - displayWidth(continuationIndent)
 	if bodyWidth < 1 {
 		bodyWidth = 1
 	}
 	segments := wrapRenderedLine(line, bodyWidth)
 	for index, segment := range segments {
-		if reserveMarker && block.bodyLines >= maxInteractionBodyLines-1 {
-			return r.writeBodyEllipsis(w, block)
-		}
-		if !reserveMarker && block.bodyLines == maxInteractionBodyLines-1 && index < len(segments)-1 {
-			return r.writeBodyEllipsis(w, block)
-		}
 		if block.bodyLines >= maxInteractionBodyLines {
-			return nil
+			return r.writeBodyEllipsis(w, block)
 		}
-		if _, err := fmt.Fprintln(w, "│ "+segment); err != nil {
+		if block.bodyLines == maxInteractionBodyLines-1 && index < len(segments)-1 {
+			return r.writeBodyEllipsis(w, block)
+		}
+		if index > 0 {
+			segment = continuationIndent + segment
+		}
+		if _, err := fmt.Fprintln(w, segment); err != nil {
 			return err
 		}
 		block.bodyLines++
@@ -532,15 +494,32 @@ func (r *TextRenderer) flushBodyLine(w io.Writer, block *interactionBlock, line 
 	return nil
 }
 
+func leadingSpaceWidth(value string) int {
+	width := 0
+	for _, current := range value {
+		if current != ' ' && current != '\t' {
+			break
+		}
+		if current == '\t' {
+			width += 4
+		} else {
+			width++
+		}
+	}
+	return width
+}
+
 func (r *TextRenderer) writeBodyEllipsis(w io.Writer, block *interactionBlock) error {
 	if block.ellipsis {
 		return nil
 	}
-	marker := truncateRenderedLine("│ ...", r.width)
+	marker := truncateRenderedLine("  … output truncated; use -format json for the complete event", r.width)
 	if _, err := fmt.Fprintln(w, paint(marker, ansiYellow, r.colorMode != ColorModeNone)); err != nil {
 		return err
 	}
-	block.bodyLines++
+	if block.bodyLines < maxInteractionBodyLines {
+		block.bodyLines++
+	}
 	block.ellipsis = true
 	return nil
 }
@@ -549,31 +528,29 @@ func (r *TextRenderer) close(w io.Writer, block *interactionBlock) error {
 	if block == nil || block.closed {
 		return nil
 	}
-	if block.pendingLine != "" && !block.ellipsis {
-		if err := r.flushBodyLine(w, block, block.pendingLine, false); err != nil {
-			return err
-		}
-		block.pendingLine = ""
-	}
-	footer := "╰" + strings.Repeat("─", r.width-1)
-	if _, err := fmt.Fprintln(w, paint(footer, blockColor(block), r.colorMode != ColorModeNone)); err != nil {
-		return err
-	}
 	if _, err := fmt.Fprintln(w); err != nil {
 		return err
 	}
 	block.closed = true
+	r.lastClosedKey = block.key
 	if r.activeKey == block.key {
 		r.activeKey = ""
 	}
 	return nil
 }
 
-func blockColor(block *interactionBlock) string {
-	if block == nil {
-		return ansiGray
+func (r *TextRenderer) writeOperationSeparator(w io.Writer, event Event) error {
+	line := "  ── " + operationSeparatorLabel(event) + " " + strings.Repeat("─", 12)
+	color := eventActionColor(event, actionColor(event.toolOrType(), false))
+	return writeSeparatorLine(w, line, color, r.colorMode)
+}
+
+func writeSeparatorLine(w io.Writer, line, color string, mode ColorMode) error {
+	if mode != ColorModeNone {
+		line = paint(line, color, true)
 	}
-	return eventActionColor(Event{Tool: block.tool, Status: block.status}, actionColor(block.tool, block.failed))
+	_, err := fmt.Fprintln(w, line)
+	return err
 }
 
 func splitRenderedLines(value string) []string {
@@ -597,18 +574,106 @@ func eventFailed(event Event) bool {
 }
 
 func stripANSI(value string) string {
+	return sanitizeTerminalText(value)
+}
+
+// sanitizeTerminalText removes terminal control sequences from text that is
+// about to be shown to a human. Durable JSON events are never passed through
+// this function, so scripts still receive the exact structured payload.
+func sanitizeTerminalText(value string) string {
 	var builder strings.Builder
-	for index := 0; index < len(value); index++ {
-		if value[index] != '\033' {
-			builder.WriteByte(value[index])
+	for index := 0; index < len(value); {
+		if value[index] == '\033' {
+			index = skipTerminalSequence(value, index)
 			continue
 		}
-		for index+1 < len(value) {
-			index++
-			if value[index] == 'm' {
-				break
-			}
+		// Some log collectors render ESC as the printable two-byte marker "^[".
+		// Treat the following CSI sequence the same way as a real ESC sequence.
+		if value[index] == '^' && index+1 < len(value) && value[index+1] == '[' {
+			index = skipTerminalSequence(value, index+1)
+			continue
 		}
+		current := value[index]
+		if current == '\n' {
+			builder.WriteByte(current)
+			index++
+			continue
+		}
+		if current == '\t' {
+			builder.WriteString("    ")
+			index++
+			continue
+		}
+		if current < 0x20 || current == 0x7f {
+			index++
+			continue
+		}
+		builder.WriteByte(current)
+		index++
 	}
 	return builder.String()
+}
+
+func skipTerminalSequence(value string, start int) int {
+	if start >= len(value) {
+		return len(value)
+	}
+	index := start + 1
+	if index < len(value) && value[index] == '[' {
+		index++
+		for index < len(value) {
+			current := value[index]
+			index++
+			if current >= '@' && current <= '~' {
+				return index
+			}
+		}
+		return len(value)
+	}
+	if index < len(value) && value[index] == ']' {
+		index++
+		for index < len(value) {
+			if value[index] == '\a' {
+				return index + 1
+			}
+			if value[index] == '\033' && index+1 < len(value) && value[index+1] == '\\' {
+				return index + 2
+			}
+			index++
+		}
+		return len(value)
+	}
+	if index < len(value) {
+		return index + 1
+	}
+	return index
+}
+
+func isCompactObservationNoise(event Event) bool {
+	switch event.Type {
+	case TypeOperationStarted, TypeOperationStepStarted, TypeOperationStepCompleted:
+		return true
+	case TypeOperationCompleted:
+		return !isErrorStatus(event.Status)
+	case TypeObserverNotice:
+		return compactNoticeNoise(event)
+	default:
+		return false
+	}
+}
+
+func compactNoticeNoise(event Event) bool {
+	sourceType := ""
+	var payload struct {
+		SourceType string `json:"source_type"`
+	}
+	if json.Unmarshal(event.Output, &payload) == nil {
+		sourceType = strings.ToLower(strings.TrimSpace(payload.SourceType))
+	}
+	if sourceType == "" {
+		sourceType = strings.ToLower(strings.TrimSpace(strings.SplitN(event.Summary, ":", 2)[0]))
+	}
+	return strings.HasSuffix(sourceType, ".started") ||
+		strings.HasSuffix(sourceType, ".completed") ||
+		strings.Contains(sourceType, ".step.")
 }

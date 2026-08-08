@@ -426,6 +426,40 @@ var migrations = []string{
 		ON clean_edit_records(remote_session_id, created_at DESC, id);
 	CREATE INDEX IF NOT EXISTS idx_clean_edit_records_expiry
 		ON clean_edit_records(expires_at, state);`,
+	`ALTER TABLE observation_events ADD COLUMN call_id TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN phase TEXT NOT NULL DEFAULT '';
+	CREATE INDEX IF NOT EXISTS idx_observation_events_correlation
+		ON observation_events(workspace_name, call_id, sequence);`,
+	`ALTER TABLE observation_events ADD COLUMN goal TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN reasoning_summary TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN next_step TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN plan_id TEXT NOT NULL DEFAULT '';
+	ALTER TABLE observation_events ADD COLUMN task_id TEXT NOT NULL DEFAULT '';`,
+	`CREATE TABLE IF NOT EXISTS delete_requests (
+		id TEXT PRIMARY KEY,
+		remote_session_id TEXT NOT NULL,
+		principal_id TEXT NOT NULL,
+		workspace_name TEXT NOT NULL,
+		workspace_path TEXT NOT NULL,
+		purpose TEXT NOT NULL,
+		idempotency_key TEXT NOT NULL,
+		manifest_json TEXT NOT NULL,
+		manifest_sha256 TEXT NOT NULL,
+		status TEXT NOT NULL CHECK (status IN ('prepared','committing','committed','partial','failed','expired')),
+		approval_receipt_hash TEXT NOT NULL DEFAULT '',
+		result_json TEXT NOT NULL DEFAULT '{}',
+		created_at INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL,
+		committed_at INTEGER,
+		FOREIGN KEY (remote_session_id) REFERENCES remote_sessions(id) ON DELETE CASCADE
+	);
+	CREATE INDEX IF NOT EXISTS idx_delete_requests_idempotency
+		ON delete_requests(remote_session_id, principal_id, idempotency_key, created_at DESC);
+	CREATE UNIQUE INDEX IF NOT EXISTS uq_delete_requests_idempotency
+		ON delete_requests(remote_session_id, principal_id, idempotency_key);
+	CREATE INDEX IF NOT EXISTS idx_delete_requests_expiry
+		ON delete_requests(status, expires_at);`,
 }
 
 func applyMigrations(ctx context.Context, db *sql.DB) error {

@@ -12,8 +12,11 @@ const (
 	MaxIntentBytes = 8 << 10
 	MaxEventBytes  = 64 << 10
 	DefaultHistory = 100
-	MaxHistory     = 200
-	DefaultBuffer  = 128
+	// MaxObserverHistory bounds initial and reconnect replay for the human
+	// terminal observer independently from broader history APIs.
+	MaxObserverHistory = 100
+	MaxHistory         = 200
+	DefaultBuffer      = 128
 )
 
 const (
@@ -29,6 +32,16 @@ const (
 	TypeOperationCompleted     = "operation.completed"
 )
 
+const (
+	// Event phases are transport-neutral lifecycle labels. thought_summary is
+	// reserved for concise, model-authored progress—not hidden chain-of-thought.
+	PhaseThoughtSummary = "thought_summary"
+	PhaseActionStarted  = "action_started"
+	PhaseOutput         = "output"
+	PhaseResult         = "result"
+	PhaseError          = "error"
+)
+
 // Event is the durable, sanitized timeline item consumed by workspace observers.
 // Input and Output must already be normalized before they reach Store.Append.
 type Event struct {
@@ -37,15 +50,22 @@ type Event struct {
 	Workspace         string          `json:"workspace"`
 	RemoteSessionID   string          `json:"remote_session_id,omitempty"`
 	RequestID         string          `json:"request_id,omitempty"`
+	CallID            string          `json:"call_id,omitempty"`
 	OperationID       string          `json:"operation_id,omitempty"`
 	ParentOperationID string          `json:"parent_operation_id,omitempty"`
 	StepID            string          `json:"step_id,omitempty"`
 	Tool              string          `json:"tool,omitempty"`
 	Type              string          `json:"type"`
+	Phase             string          `json:"phase,omitempty"`
 	Status            string          `json:"status,omitempty"`
+	Goal              string          `json:"goal,omitempty"`
 	Purpose           string          `json:"purpose,omitempty"`
 	Intent            string          `json:"intent,omitempty"`
+	ReasoningSummary  string          `json:"reasoning_summary,omitempty"`
 	ProgressSummary   string          `json:"progress_summary,omitempty"`
+	NextStep          string          `json:"next_step,omitempty"`
+	PlanID            string          `json:"plan_id,omitempty"`
+	TaskID            string          `json:"task_id,omitempty"`
 	Input             json.RawMessage `json:"input,omitempty"`
 	Output            json.RawMessage `json:"output,omitempty"`
 	Summary           string          `json:"summary,omitempty"`
@@ -76,6 +96,56 @@ type EventFilter struct {
 func (e *Event) setEventID() {
 	if e != nil && e.Sequence > 0 && e.EventID == "" {
 		e.EventID = strconv.FormatInt(e.Sequence, 10)
+	}
+}
+
+// SetDefaults fills correlation and lifecycle fields for legacy producers.
+// It is called at the durable boundary so every JSONL/history consumer sees
+// the same normalized contract even when an internal caller only sets Type.
+func (e *Event) SetDefaults() {
+	if e == nil {
+		return
+	}
+	if e.CallID == "" {
+		e.CallID = e.RequestID
+	}
+	if e.Phase == "" {
+		e.Phase = PhaseForEvent(e.Type, e.Status)
+	}
+}
+
+// PhaseForEvent maps existing event types and statuses to the shared phase
+// vocabulary without requiring every internal producer to know the schema.
+func PhaseForEvent(eventType, status string) string {
+	switch eventType {
+	case TypeToolStarted, TypeOperationStarted, TypeOperationStepStarted:
+		return PhaseActionStarted
+	case TypeCommandOutput:
+		return PhaseOutput
+	case TypeToolCompleted, TypeOperationCompleted, TypeOperationStepCompleted, TypeFileChanged, TypeSessionLifecycle, TypeObserverNotice:
+		if isErrorStatus(status) {
+			return PhaseError
+		}
+		return PhaseResult
+	default:
+		if isErrorStatus(status) {
+			return PhaseError
+		}
+		switch status {
+		case "started", "queued", "running", "accepted", "in_progress":
+			return PhaseActionStarted
+		default:
+			return PhaseResult
+		}
+	}
+}
+
+func isErrorStatus(status string) bool {
+	switch status {
+	case "failed", "error", "cancelled", "canceled", "interrupted":
+		return true
+	default:
+		return false
 	}
 }
 

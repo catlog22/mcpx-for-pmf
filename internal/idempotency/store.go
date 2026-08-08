@@ -92,6 +92,23 @@ func NewStore(db *sql.DB) *Store {
 	return &Store{db: db, now: time.Now, flights: make(map[string]*flight)}
 }
 
+// Lookup returns the durable record without claiming execution. It is used by
+// confirmation-gated tools to replay an already completed request without
+// asking the user to confirm the same destructive action again.
+func (s *Store) Lookup(ctx context.Context, key Key) (Record, bool, error) {
+	if s == nil || s.db == nil || !key.valid() {
+		return Record{}, false, fmt.Errorf("idempotency store and key are required")
+	}
+	record, err := s.get(ctx, key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Record{}, false, nil
+	}
+	if err != nil {
+		return Record{}, false, err
+	}
+	return record, true, nil
+}
+
 // Claim returns an owner for a new or expired pending request, a replay for a
 // terminal request, or a wait/pending result for another active owner.
 func (s *Store) Claim(ctx context.Context, key Key, fingerprint string, ttl time.Duration) (Claim, error) {

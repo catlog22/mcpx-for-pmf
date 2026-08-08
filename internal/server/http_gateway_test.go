@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"mcpx/internal/arc"
 	"mcpx/internal/mcpresult"
 
 	"mcpx/internal/config"
@@ -63,10 +64,10 @@ func TestGatewayStreamableActionDiscovery(t *testing.T) {
 	cfg.Auth.Token = "static-secret"
 
 	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
-	protocol.AddTool(&mcp.Tool{Name: "remote_session_list", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	protocol.AddTool(&mcp.Tool{Name: "remote_session_list", InputSchema: map[string]any{"type": "object"}, OutputSchema: arc.OutputSchema()}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return mcpresult.NewText("ok"), nil
 	})
-	protocol.AddTool(&mcp.Tool{Name: "screenshot_capture", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	protocol.AddTool(&mcp.Tool{Name: "screenshot_capture", InputSchema: map[string]any{"type": "object"}, OutputSchema: arc.OutputSchema()}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return mcpresult.NewText("ok"), nil
 	})
 
@@ -89,8 +90,16 @@ func TestGatewayStreamableActionDiscovery(t *testing.T) {
 		t.Fatalf("tools/list result=%+v err=%v", listed, err)
 	}
 	for _, tool := range listed.Tools {
-		if tool.OutputSchema != nil {
-			t.Fatalf("tools/list must not ship bloated OutputSchema for ChatGPT discovery: %s", tool.Name)
+		if tool.OutputSchema == nil {
+			t.Fatalf("tools/list must expose OutputSchema: %s", tool.Name)
+		}
+		encoded, err := json.Marshal(tool.OutputSchema)
+		if err != nil {
+			t.Fatalf("marshal output schema %s: %v", tool.Name, err)
+		}
+		var schema map[string]any
+		if err := json.Unmarshal(encoded, &schema); err != nil || schema["$id"] != "mcpx.structured_content.v1.3" {
+			t.Fatalf("invalid output schema %s: %s", tool.Name, encoded)
 		}
 	}
 }

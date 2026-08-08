@@ -41,7 +41,7 @@ func TestInstrumentToolPublishesARCPresentationAndPreservesAttachments(t *testin
 	}
 	envelope := decodeARCEnvelope(t, wrapped)
 	mcpx, _ := envelope["mcpx"].(map[string]any)
-	if mcpx["version"] != "1.2" {
+	if mcpx["version"] != "1.3" {
 		t.Fatalf("ARC version = %v", mcpx["version"])
 	}
 	result, _ := mcpx["result"].(map[string]any)
