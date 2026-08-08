@@ -77,13 +77,17 @@ func (r *Runtime) executeOperationStep(ctx context.Context, input operation.Exec
 		return operation.ExecuteResult{Err: fmt.Errorf("tool %q is not registered", input.Tool)}
 	}
 	arguments := cloneArguments(input.Arguments)
-	arguments["session_id"] = input.RemoteSessionID
+	if isCleanPublicTool(input.Tool) {
+		arguments["remote_session_id"] = input.RemoteSessionID
+	} else {
+		arguments["session_id"] = input.RemoteSessionID
+	}
 	arguments["purpose"] = input.Purpose
 	arguments["execution_mode"] = "sync"
 	request := mcpresult.Request(arguments)
 	childCtx := r.operationChildContext(ctx, input)
 	result, callErr := handler(childCtx, request)
-	if callErr == nil && (input.Tool == "command_run" || input.Tool == "command_execute") {
+	if callErr == nil && (input.Tool == "execute" || input.Tool == "command_run" || input.Tool == "command_execute") {
 		result, callErr = r.waitForOperationTask(childCtx, input, result)
 	}
 	return operationResult(result, callErr)

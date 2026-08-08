@@ -161,38 +161,19 @@ func (s *RetentionService) deleteExpiredOperations(ctx context.Context, now int6
 }
 
 func (s *RetentionService) deleteObservationBatch(ctx context.Context, category string, cutoff time.Time, maxRows int) (int, error) {
-	predicate, err := observationPredicate(category, "e")
+	query, err := observationDeletionQuery(category)
 	if err != nil {
 		return 0, err
 	}
-	newestPredicate, err := observationPredicate(category, "newest")
-	if err != nil {
-		return 0, err
-	}
-	query := fmt.Sprintf(`SELECT e.sequence
-FROM observation_events e
-WHERE e.workspace_name = ? AND %s
-  AND (e.created_at < ? OR e.sequence NOT IN (
-      SELECT newest.sequence
-      FROM observation_events newest
-      WHERE newest.workspace_name = e.workspace_name AND %s
-      ORDER BY newest.created_at DESC, newest.sequence DESC
-      LIMIT ?
-  ))
-  AND NOT EXISTS (
-      SELECT 1 FROM remote_sessions active
-      WHERE active.id = e.remote_session_id
-        AND active.status IN ('active', 'idle', 'blocked')
-  )
-ORDER BY e.created_at ASC, e.sequence ASC
-LIMIT ?`, predicate, newestPredicate)
 	workspaces, err := s.observationWorkspaces(ctx)
 	if err != nil {
 		return 0, err
 	}
 	deleted := 0
 	for _, workspace := range workspaces {
-		rows, err := s.db.QueryContext(ctx, query, workspace, cutoff.UnixMilli(), maxRows, retentionBatchSize)
+		// Pass workspace twice so the newest window is independent of the outer
+		// row. A correlated subquery turns this bounded cleanup into O(n^2).
+		rows, err := s.db.QueryContext(ctx, query, workspace, cutoff.UnixMilli(), workspace, maxRows, retentionBatchSize)
 		if err != nil {
 			return deleted, err
 		}
@@ -230,6 +211,34 @@ LIMIT ?`, predicate, newestPredicate)
 	return deleted, nil
 }
 
+func observationDeletionQuery(category string) (string, error) {
+	predicate, err := observationPredicate(category, "e")
+	if err != nil {
+		return "", err
+	}
+	newestPredicate, err := observationPredicate(category, "newest")
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(`SELECT e.sequence
+FROM observation_events e
+WHERE e.workspace_name = ? AND %s
+  AND (e.created_at < ? OR e.sequence NOT IN (
+      SELECT newest.sequence
+      FROM observation_events newest
+      WHERE newest.workspace_name = ? AND %s
+      ORDER BY newest.created_at DESC, newest.sequence DESC
+      LIMIT ?
+  ))
+  AND NOT EXISTS (
+      SELECT 1 FROM remote_sessions active
+      WHERE active.id = e.remote_session_id
+        AND active.status IN ('active', 'idle', 'blocked')
+  )
+ORDER BY e.created_at ASC, e.sequence ASC
+LIMIT ?`, predicate, newestPredicate), nil
+}
+
 func observationPredicate(category, alias string) (string, error) {
 	switch category {
 	case "process":
@@ -262,7 +271,7 @@ func (s *RetentionService) observationWorkspaces(ctx context.Context) ([]string,
 
 func (s *RetentionService) deleteExpiredEphemeral(ctx context.Context, now int64) (int, error) {
 	total := 0
-	for _, table := range []string{"approvals", "secret_requests", "idempotency_records"} {
+	for _, table := range []string{"approvals", "secret_requests", "idempotency_records", "clean_idempotency_records", "clean_edit_records"} {
 		result, err := s.db.ExecContext(ctx, "DELETE FROM "+table+" WHERE rowid IN (SELECT rowid FROM "+table+" WHERE expires_at <= ? ORDER BY expires_at LIMIT ?)", now, retentionBatchSize)
 		if err != nil {
 			return total, fmt.Errorf("delete expired %s: %w", table, err)

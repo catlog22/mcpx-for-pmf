@@ -613,7 +613,7 @@ func insertEvidenceBatchTx(ctx context.Context, tx *sql.Tx, remoteSessionID, pla
 
 func supportedEvidenceKind(kind string) bool {
 	switch kind {
-	case "changeset", "execution_task", "task", "artifact", "source", "verification", "test", "validation":
+	case "changeset", "edit", "execute", "execution_task", "task", "artifact", "source", "verification", "test", "validation":
 		return true
 	default:
 		return false
@@ -651,7 +651,9 @@ func validateEvidenceRefs(ctx context.Context, tx *sql.Tx, remoteSessionID strin
 	}
 	for kind, ids := range byKind {
 		table := "changesets"
-		if kind == "execution_task" || kind == "task" {
+		if kind == "edit" {
+			table = "clean_edit_records"
+		} else if kind == "execute" || kind == "execution_task" || kind == "task" {
 			table = "terminal_tasks"
 		} else if kind == "artifact" {
 			table = "artifacts"
@@ -675,7 +677,7 @@ func queryReferenceIDs(ctx context.Context, tx *sql.Tx, table, remoteSessionID s
 	if len(ids) == 0 {
 		return result, nil
 	}
-	if table != "changesets" && table != "terminal_tasks" && table != "artifacts" {
+	if table != "changesets" && table != "clean_edit_records" && table != "terminal_tasks" && table != "artifacts" {
 		return nil, fmt.Errorf("%w: unsupported evidence table %s", ErrEvidence, table)
 	}
 	query := `SELECT id FROM ` + table + ` WHERE remote_session_id = ? AND id IN (` + placeholders(len(ids)) + `)`

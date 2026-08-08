@@ -26,6 +26,7 @@ import (
 	"mcpx/internal/envelope"
 	"mcpx/internal/environment"
 	"mcpx/internal/filesnapshot"
+	"mcpx/internal/idempotency"
 	"mcpx/internal/logging"
 	"mcpx/internal/oauth"
 	"mcpx/internal/observation"
@@ -89,9 +90,14 @@ type Runtime struct {
 	// durable Changeset/idempotency record remains the source of truth.
 	changeExecuteRequests map[string]changeExecuteRequest
 	changeExecuteMu       sync.Mutex
-	projectConfigMu       sync.RWMutex
-	projectConfigs        map[string]projectConfigCacheEntry
-	build                 BuildInfo
+	// idempotency is shared by clean-core mutating tools and persists replay
+	// records in the Runtime state database.
+	idempotency     *idempotency.Store
+	discoveryMu     sync.Mutex
+	discoveries     map[string]discoveryLease
+	projectConfigMu sync.RWMutex
+	projectConfigs  map[string]projectConfigCacheEntry
+	build           BuildInfo
 }
 
 const changeExecuteRequestTTL = 24 * time.Hour
@@ -233,6 +239,8 @@ func New(opts Options) (*Runtime, error) {
 		toolHandlers:          map[string]mcp.ToolHandler{},
 		toolMeta:              map[string]toolAnnotation{},
 		changeExecuteRequests: map[string]changeExecuteRequest{},
+		idempotency:           idempotency.NewStore(stateStore.DB()),
+		discoveries:           map[string]discoveryLease{},
 		projectConfigs:        map[string]projectConfigCacheEntry{},
 		build: BuildInfo{
 			Version: firstNonEmpty(opts.Version, buildversion.Current),
@@ -934,6 +942,8 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 
 	guidance := agentGuidance()
 	data := map[string]any{
+		"capability_version":    cleanCoreCapabilityVersion,
+		"capability_groups":     capabilityGroups(),
 		"schema_source":         "tools/list",
 		"include_tool_schemas":  includeToolSchemas,
 		"include_skill_details": includeSkillDetails,
@@ -945,18 +955,19 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 			"order": []string{"global", "project", "directory"}, "documents": r.agentInstructions(wsPath),
 			"list_action": nextAction("runtime_read", map[string]any{"view": "instructions"}),
 		},
-		"skills": map[string]any{"enabled": effective.Discovery.Skills.Enabled, "items": skills, "manage_tool": "extension_discover"},
+		"skills": map[string]any{"enabled": effective.Discovery.Skills.Enabled, "items": skills, "manage_tool": "discover"},
 		"upstream_mcp": map[string]any{
-			"enabled": effective.Discovery.MCP.Enabled, "servers": servers, "manage_tool": "extension_discover",
+			"enabled": effective.Discovery.MCP.Enabled, "servers": servers, "manage_tool": "discover",
 		},
 		"resources": []map[string]any{
-			{"kind": "changeset_diff", "uri_template": "mcpx://remote-sessions/{remote_session_id}/changesets/{changeset_id}/diff", "mime_type": "text/x-diff"},
 			{"kind": "task_logs", "uri_template": "mcpx://remote-sessions/{remote_session_id}/tasks/{task_id}/logs", "mime_type": "text/plain"},
 			{"kind": "artifact", "uri_template": "mcpx://remote-sessions/{remote_session_id}/artifacts/{artifact_id}"},
 		},
 		"recommended_workflows": map[string]any{
-			"bootstrap":     []string{"session"},
-			"source_change": []string{"source_read", "change", "change", "command_run"},
+			"bootstrap":      []string{"session"},
+			"source_change":  []string{"read", "edit", "execute", "observe"},
+			"plan_delivery":  []string{"plan", "edit", "execute", "artifact", "observe"},
+			"extension_call": []string{"discover", "skill_call", "mcp_call"},
 		},
 		"client_refresh": map[string]any{
 			"when":    "tool_schema_revision_changed",
@@ -985,6 +996,7 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 		data["remote_session"] = map[string]any{"id": session.ID, "role": session.Role, "status": session.Status}
 	}
 	data["revision"] = capabilityRevision(data)
+	data["evaluation_revision"] = "clean-core-p1-p4-v1"
 	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remoteID, Workspace: ws.Name, Tool: "capability_list", Status: "ok"})
 	return r.remoteResult(envReq, remoteID, ws.Name, data)
 }

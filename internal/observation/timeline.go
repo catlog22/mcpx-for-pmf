@@ -78,7 +78,7 @@ func NewTextRendererWithMode(mode ColorMode, terminalWidth int) *TextRenderer {
 	return &TextRenderer{
 		colorMode: mode,
 		width:     terminalWidth,
-		diffMode:  DiffModePreview,
+		diffMode:  DiffModeFull,
 		diffCache: newDiffDocumentCache(),
 		blocks:    make(map[string]*interactionBlock),
 	}
@@ -486,11 +486,6 @@ func (r *TextRenderer) writeBodyLine(w io.Writer, block *interactionBlock, line 
 	if strings.TrimSpace(stripANSI(line)) == "" {
 		return nil
 	}
-	bodyWidth := r.width - 2
-	if bodyWidth < 1 {
-		bodyWidth = 1
-	}
-	line = truncateRenderedLine(line, bodyWidth)
 	if block.ellipsis {
 		return nil
 	}
@@ -500,31 +495,53 @@ func (r *TextRenderer) writeBodyLine(w io.Writer, block *interactionBlock, line 
 	}
 	if block.bodyLines >= maxInteractionBodyLines-1 {
 		block.pendingLine = ""
-		marker := truncateRenderedLine("│ ...", r.width)
-		if _, err := fmt.Fprintln(w, paint(marker, ansiYellow, r.colorMode != ColorModeNone)); err != nil {
-			return err
-		}
-		block.bodyLines++
-		block.ellipsis = true
-		return nil
+		return r.writeBodyEllipsis(w, block)
 	}
-	if err := r.flushBodyLine(w, block, block.pendingLine); err != nil {
+	if err := r.flushBodyLine(w, block, block.pendingLine, true); err != nil {
 		return err
+	}
+	if block.ellipsis {
+		block.pendingLine = ""
+		return nil
 	}
 	block.pendingLine = line
 	return nil
 }
 
-func (r *TextRenderer) flushBodyLine(w io.Writer, block *interactionBlock, line string) error {
+func (r *TextRenderer) flushBodyLine(w io.Writer, block *interactionBlock, line string, reserveMarker bool) error {
 	bodyWidth := r.width - 2
 	if bodyWidth < 1 {
 		bodyWidth = 1
 	}
-	line = truncateRenderedLine(line, bodyWidth)
-	if _, err := fmt.Fprintln(w, "│ "+line); err != nil {
+	segments := wrapRenderedLine(line, bodyWidth)
+	for index, segment := range segments {
+		if reserveMarker && block.bodyLines >= maxInteractionBodyLines-1 {
+			return r.writeBodyEllipsis(w, block)
+		}
+		if !reserveMarker && block.bodyLines == maxInteractionBodyLines-1 && index < len(segments)-1 {
+			return r.writeBodyEllipsis(w, block)
+		}
+		if block.bodyLines >= maxInteractionBodyLines {
+			return nil
+		}
+		if _, err := fmt.Fprintln(w, "│ "+segment); err != nil {
+			return err
+		}
+		block.bodyLines++
+	}
+	return nil
+}
+
+func (r *TextRenderer) writeBodyEllipsis(w io.Writer, block *interactionBlock) error {
+	if block.ellipsis {
+		return nil
+	}
+	marker := truncateRenderedLine("│ ...", r.width)
+	if _, err := fmt.Fprintln(w, paint(marker, ansiYellow, r.colorMode != ColorModeNone)); err != nil {
 		return err
 	}
 	block.bodyLines++
+	block.ellipsis = true
 	return nil
 }
 
@@ -533,7 +550,7 @@ func (r *TextRenderer) close(w io.Writer, block *interactionBlock) error {
 		return nil
 	}
 	if block.pendingLine != "" && !block.ellipsis {
-		if err := r.flushBodyLine(w, block, block.pendingLine); err != nil {
+		if err := r.flushBodyLine(w, block, block.pendingLine, false); err != nil {
 			return err
 		}
 		block.pendingLine = ""

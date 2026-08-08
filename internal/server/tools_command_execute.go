@@ -44,7 +44,7 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolReque
 		}
 		discovered, ok := projecttask.Find(remote.WorkspacePath, taskName)
 		if !ok {
-			return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "task_not_found", fmt.Sprintf("project task %q not found", taskName))
+			return r.terminalErrorForContext(ctx, envReq, remote.ID, remote.WorkspaceName, "task_not_found", fmt.Sprintf("project task %q not found", taskName))
 		}
 		command = discovered.Command
 	}
@@ -68,6 +68,46 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolReque
 	case security.Confirm:
 		yield := commandYield(envReq.Payload)
 		confirmationToken := stringPayload(envReq.Payload, "confirmation_token")
+		if isCleanCoreRequest(ctx) {
+			userConfirmed := boolPayload(envReq.Payload, "user_confirmed")
+			pending, pendingOK := r.pendingCommandConfirmation(remote.ID, principal.ID, command, scope, commandDigest)
+			if !userConfirmed || !pendingOK {
+				if !pendingOK {
+					var confirmationErr error
+					pending, confirmationErr = r.approvals.PutPending(approval.Pending{
+						Tool: "command_execute", Summary: command, Command: command,
+						CommandYieldMs: int(yield / time.Millisecond), Purpose: purpose, Scope: scope,
+						CommandDigest: commandDigest, WorkDir: remote.WorkspacePath,
+						RequestID: envReq.RequestID, Workspace: remote.WorkspaceName,
+						RemoteSessionID: remote.ID, PrincipalID: principal.ID,
+					})
+					if confirmationErr != nil {
+						return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "confirmation_store_error", confirmationErr.Error())
+					}
+				}
+				confirmationData := map[string]any{
+					"command": command, "purpose": purpose, "scope": scope,
+					"command_digest": commandDigest, "pending_digest": commandDigest,
+					"confirmation_required": true, "user_confirmed_required": true,
+					"summary": "命令已进入服务端待确认状态；请向用户展示命令及用途，获得明确确认后将 user_confirmed=true 原样重试。",
+				}
+				response := envelope.Fail(envelope.StatusNeedConfirmation, envReq.RequestID, remote.WorkspaceName,
+					confirmationData, "USER_CONFIRMATION_REQUIRED", "命令执行等待用户语义确认")
+				response.RemoteSessionID = remote.ID
+				addRecoveryAction(&response, "execute", "用户确认后使用相同 command/task、purpose 和 remote_session_id 重试，并设置 user_confirmed=true", map[string]any{
+					"remote_session_id": remote.ID, "action": "run", "command": command,
+					"purpose": purpose, "scope": scope, "user_confirmed": true,
+				})
+				return r.resultJSON(response)
+			}
+			result, executeErr := r.executeCommandTask(ctx, envReq, principal, remote, command, yield, purpose, scope, commandDigest)
+			if executeErr == nil {
+				if _, consumed := r.approvals.Consume(pending.ID); !consumed {
+					return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "confirmation_state_error", "confirmed command approval could not be consumed")
+				}
+			}
+			return result, executeErr
+		}
 		if !r.hasPendingCommandConfirmation(remote.ID, principal.ID, command, purpose, scope, confirmationToken) {
 			pending, confirmationErr := r.approvals.PutPending(approval.Pending{
 				Tool: "command_execute", Summary: command, Command: command,
@@ -154,11 +194,15 @@ func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Reques
 			return r.resultJSON(response)
 		}
 		r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "command_execute", Command: command, Status: "ok", Detail: detail})
-		result := compactToolResult(data, commandOutputText(data, fmt.Sprintf("Command completed with exit code %v.", data["exit_code"])))
+		result := compactToolResult(data, commandOutputText(ctx, data, fmt.Sprintf("Command completed with exit code %v.", data["exit_code"])))
 		return result, nil
 	}
 	data["completed_in_call"] = false
-	data["next_action"] = nextAction("task_manage", map[string]any{
+	nextTool := "task_manage"
+	if isCleanCoreRequest(ctx) {
+		nextTool = "execute"
+	}
+	data["next_action"] = nextAction(nextTool, map[string]any{
 		"remote_session_id": remote.ID, "action": "attach", "task_id": task.ID,
 		"stdout_offset": data["stdout_next_offset"], "stderr_offset": data["stderr_next_offset"],
 		"yield_time_ms": int(yield / time.Millisecond),
@@ -179,7 +223,7 @@ func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Reques
 // commandOutputText renders the model-facing summary with any stdout/stderr
 // inline, so completed command output is readable directly in the conversation.
 // Truncated streams state the truncation and point to task_read/task for more.
-func commandOutputText(data map[string]any, summary string) string {
+func commandOutputText(ctx context.Context, data map[string]any, summary string) string {
 	var builder strings.Builder
 	builder.WriteString(summary)
 	for _, stream := range []string{"stdout", "stderr"} {
@@ -193,7 +237,12 @@ func commandOutputText(data map[string]any, summary string) string {
 		builder.WriteString(text)
 	}
 	if truncated, _ := data["output_truncated"].(bool); truncated {
-		builder.WriteString("\n\nOutput truncated; call task(operation=attach) or task_read(view=logs) to read more.")
+		builder.WriteString("\n\n")
+		if isCleanCoreRequest(ctx) {
+			builder.WriteString("Output truncated; call observe(view=logs) or execute(action=attach) to read more.")
+		} else {
+			builder.WriteString("Output truncated; call task(operation=attach) or task_read(view=logs) to read more.")
+		}
 	}
 	return builder.String()
 }
@@ -273,6 +322,16 @@ func (r *Runtime) hasPendingCommandConfirmation(remoteSessionID, principalID, co
 	return false
 }
 
+func (r *Runtime) pendingCommandConfirmation(remoteSessionID, principalID, command, scope, digest string) (approval.Pending, bool) {
+	for _, pending := range r.approvals.ListRemoteSession(remoteSessionID) {
+		if pending.Tool == "command_execute" && pending.PrincipalID == principalID &&
+			pending.Command == command && pending.Scope == scope && pending.CommandDigest == digest {
+			return pending, true
+		}
+	}
+	return approval.Pending{}, false
+}
+
 func (r *Runtime) consumePendingCommandConfirmation(remoteSessionID, principalID, command, purpose, scope, confirmationToken string) {
 	for _, pending := range r.approvals.ListRemoteSession(remoteSessionID) {
 		if pending.Tool == "command_execute" && pending.PrincipalID == principalID && pending.Command == command && pending.Scope == scope && pending.ConfirmationToken == confirmationToken {
@@ -302,7 +361,7 @@ func (r *Runtime) toolTaskManage(ctx context.Context, req *mcp.CallToolRequest) 
 	if action == "list" {
 		items, err := r.tasks.List(remote.ID, intPayload(envReq.Payload, "limit"))
 		if err != nil {
-			return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "task_list_error", err.Error())
+			return r.terminalErrorForContext(ctx, envReq, remote.ID, remote.WorkspaceName, "task_list_error", err.Error())
 		}
 		digest := taskListDigest(items)
 		knownDigest := strings.TrimSpace(stringPayload(envReq.Payload, "known_task_digest"))
@@ -318,7 +377,7 @@ func (r *Runtime) toolTaskManage(ctx context.Context, req *mcp.CallToolRequest) 
 	taskID, _ := envReq.Payload["task_id"].(string)
 	task, err := r.tasks.Get(remote.ID, taskID)
 	if err != nil {
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "not_found", err.Error())
+		return r.terminalErrorForContext(ctx, envReq, remote.ID, remote.WorkspaceName, "not_found", err.Error())
 	}
 	switch action {
 	case "status":
@@ -326,9 +385,13 @@ func (r *Runtime) toolTaskManage(ctx context.Context, req *mcp.CallToolRequest) 
 	case "logs":
 		data := r.taskResultData(task, intPayload(envReq.Payload, "stdout_offset"), intPayload(envReq.Payload, "stderr_offset"))
 		if int64(data["stdout_next_offset"].(int)) < task.LogStreamSize("stdout") || int64(data["stderr_next_offset"].(int)) < task.LogStreamSize("stderr") {
-			data["next_action"] = nextAction("task_manage", map[string]any{"remote_session_id": remote.ID, "action": "logs", "task_id": task.ID, "stdout_offset": data["stdout_next_offset"], "stderr_offset": data["stderr_next_offset"]})
+			nextTool := "task_manage"
+			if isCleanCoreRequest(ctx) {
+				nextTool = "observe"
+			}
+			data["next_action"] = nextAction(nextTool, map[string]any{"remote_session_id": remote.ID, "view": "logs", "task_id": task.ID, "stdout_offset": data["stdout_next_offset"], "stderr_offset": data["stderr_next_offset"]})
 		}
-		result := compactToolResult(data, commandOutputText(data, fmt.Sprintf("Task %s log chunk returned.", task.ID)))
+		result := compactToolResult(data, commandOutputText(ctx, data, fmt.Sprintf("Task %s log chunk returned.", task.ID)))
 		return result, nil
 	case "attach":
 		waitCtx, cancel := context.WithTimeout(ctx, commandYield(envReq.Payload))
@@ -338,9 +401,13 @@ func (r *Runtime) toolTaskManage(ctx context.Context, req *mcp.CallToolRequest) 
 		stdoutNext := data["stdout_next_offset"].(int)
 		stderrNext := data["stderr_next_offset"].(int)
 		if fmt.Sprint(task.StatusView()["status"]) == string(terminal.TaskRunning) || int64(stdoutNext) < task.LogStreamSize("stdout") || int64(stderrNext) < task.LogStreamSize("stderr") {
-			data["next_action"] = nextAction("task_manage", map[string]any{"remote_session_id": remote.ID, "action": "attach", "task_id": task.ID, "stdout_offset": stdoutNext, "stderr_offset": stderrNext, "yield_time_ms": int(commandYield(envReq.Payload) / time.Millisecond)})
+			nextTool := "task_manage"
+			if isCleanCoreRequest(ctx) {
+				nextTool = "execute"
+			}
+			data["next_action"] = nextAction(nextTool, map[string]any{"remote_session_id": remote.ID, "action": "attach", "task_id": task.ID, "stdout_offset": stdoutNext, "stderr_offset": stderrNext, "yield_time_ms": int(commandYield(envReq.Payload) / time.Millisecond)})
 		}
-		result := compactToolResult(data, commandOutputText(data, fmt.Sprintf("Task %s attached.", task.ID)))
+		result := compactToolResult(data, commandOutputText(ctx, data, fmt.Sprintf("Task %s attached.", task.ID)))
 		return result, nil
 	case "stop":
 		if err := task.Kill(); err != nil {

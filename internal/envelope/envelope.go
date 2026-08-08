@@ -165,9 +165,6 @@ func normalizePublicData(value any) any {
 	case map[string]any:
 		result := make(map[string]any, len(typed))
 		for key, item := range typed {
-			if key == "remote_session_id" {
-				key = "session_id"
-			}
 			result[key] = normalizePublicData(item)
 		}
 		return result

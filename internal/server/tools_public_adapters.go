@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -23,7 +24,15 @@ func publicDispatch(req *mcp.CallToolRequest, key, value string) *mcp.CallToolRe
 }
 
 func (r *Runtime) toolWorkspaceObserve(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return r.toolWorkspaceState(ctx, publicDispatch(req, "action", publicSelector(req, "view")))
+	view := publicSelector(req, "view")
+	switch view {
+	case "changes":
+		return r.toolObserveChanges(ctx, req)
+	case "history":
+		return r.toolWorkspaceHistoryRead(ctx, req)
+	default:
+		return r.toolWorkspaceState(ctx, publicDispatch(req, "action", view))
+	}
 }
 
 // toolWorkspaceRead consolidates list/observe/history behind view.
@@ -40,18 +49,23 @@ func (r *Runtime) toolWorkspaceRead(ctx context.Context, req *mcp.CallToolReques
 
 // toolSession consolidates open + lifecycle transitions behind action.
 func (r *Runtime) toolSession(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ctx = withCleanCoreRequest(ctx)
 	action := publicSelector(req, "action")
 	switch action {
 	case "open":
 		return r.toolSessionOpen(ctx, req)
-	case "update", "handoff", "attach", "close":
+	case "attach":
+		// Clean core handoff is direct session reuse. The caller supplies the
+		// existing remote_session_id; no one-time handoff token is involved.
+		return r.toolSessionOpen(ctx, req)
+	case "close":
 		return r.toolSessionTransition(ctx, publicDispatch(req, "operation", action))
 	default:
 		envReq, _, fail := r.remoteRequest(ctx, req)
 		if fail != nil {
 			return fail, nil
 		}
-		return r.terminalError(envReq, envReq.RemoteSessionID, envReq.Workspace, "bad_request", "action must be open, update, handoff, attach, or close")
+		return r.terminalError(envReq, envReq.RemoteSessionID, envReq.Workspace, "bad_request", "action must be open, close, or attach")
 	}
 }
 
@@ -388,4 +402,71 @@ func (r *Runtime) toolArtifactReadPublic(ctx context.Context, req *mcp.CallToolR
 		action = "read"
 	}
 	return r.toolArtifactManage(ctx, publicDispatch(req, "action", action))
+}
+
+func (r *Runtime) toolObserveChanges(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	envReq, _, session, fail := r.changeRequest(ctx, req, false)
+	if fail != nil {
+		return fail, nil
+	}
+	workspaceName := session.WorkspaceName
+	query := observation.HistoryQuery{
+		Workspace: workspaceName,
+		SessionID: session.ID,
+		Kinds:     []string{"file_change"},
+		Limit:     intPayload(envReq.Payload, "limit"),
+		Cursor:    stringPayload(envReq.Payload, "cursor"),
+	}
+	if r.observation == nil || r.observation.store == nil {
+		return r.terminalError(envReq, session.ID, workspaceName, "observe_changes_unavailable", "observation store is unavailable")
+	}
+	events, nextCursor, err := r.observation.store.Query(ctx, query)
+	if err != nil {
+		return r.terminalError(envReq, "", workspaceName, "observe_changes_error", err.Error())
+	}
+	changes := make([]map[string]any, 0, len(events))
+	for _, event := range events {
+		if event.Type != observation.TypeFileChanged || event.Tool != "edit" {
+			continue
+		}
+		payload := map[string]any{}
+		_ = json.Unmarshal(event.Output, &payload)
+		diffSummary, _ := payload["diff_summary"].(string)
+		diffPreview := boundedDiffPreview(diffSummary, cleanDiffTotalPreviewMaxBytes)
+		change := map[string]any{
+			"id":             event.EventID,
+			"event_id":       event.EventID,
+			"sequence":       event.Sequence,
+			"tool":           event.Tool,
+			"status":         event.Status,
+			"summary":        event.Summary,
+			"diff_summary":   diffPreview.Text,
+			"diff_bytes":     len(diffSummary),
+			"diff_truncated": diffPreview.Truncated,
+			"path":           event.Path,
+			"timestamp":      event.CreatedAt,
+		}
+		if editID, ok := payload["edit_id"].(string); ok && strings.TrimSpace(editID) != "" {
+			change["edit_id"] = editID
+		}
+		if total, ok := payload["total_changed_lines"]; ok {
+			change["total_changed_lines"] = total
+		}
+		if results, ok := payload["results"]; ok {
+			change["results"] = results
+			if items, ok := results.([]any); ok && len(items) == 1 {
+				if item, ok := items[0].(map[string]any); ok {
+					if operation, ok := item["operation"].(string); ok && operation != "" {
+						change["operation"] = operation
+					}
+				}
+			}
+		}
+		changes = append(changes, change)
+	}
+	return r.remoteResult(envReq, session.ID, workspaceName, map[string]any{
+		"changes":     changes,
+		"next_cursor": nextCursor,
+		"count":       len(changes),
+	})
 }

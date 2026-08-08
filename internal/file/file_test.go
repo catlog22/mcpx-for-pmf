@@ -1,11 +1,13 @@
 package file
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
 
 func TestResolveEscape(t *testing.T) {
@@ -110,7 +112,7 @@ func TestReadFullReportsCharsetBOMAndFinalNewline(t *testing.T) {
 		{name: "utf8 no final newline", content: []byte("one\r\ntwo"), charset: "utf-8", bom: "none", lineEnding: "CRLF", final: boolPointerForTest(false)},
 		{name: "cr final newline", content: []byte("one\rtwo\r"), charset: "utf-8", bom: "none", lineEnding: "CR", final: boolPointerForTest(true)},
 		{name: "mixed", content: []byte("one\r\ntwo\nthree\rfour"), charset: "utf-8", bom: "none", lineEnding: "mixed", final: boolPointerForTest(false)},
-		{name: "utf16le", content: []byte{0xff, 0xfe, 'o', 0, 'k', 0}, charset: "utf-16le", bom: "utf-16le", lineEnding: "none"},
+		{name: "utf16le", content: []byte{0xff, 0xfe, 'o', 0, 'k', 0}, charset: "utf-16le", bom: "utf-16le", lineEnding: "none", final: boolPointerForTest(false)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -137,6 +139,47 @@ func TestReadFullReportsCharsetBOMAndFinalNewline(t *testing.T) {
 }
 
 func boolPointerForTest(value bool) *bool { return &value }
+
+func TestReadDecodesUTF16WindowAndPreservesRawSHA(t *testing.T) {
+	root := t.TempDir()
+	text := "one\r\ntwo\n😀\n"
+	units := utf16.Encode([]rune(text))
+	content := []byte{0xff, 0xfe}
+	for _, unit := range units {
+		var encoded [2]byte
+		binary.LittleEndian.PutUint16(encoded[:], unit)
+		content = append(content, encoded[:]...)
+	}
+	if err := os.WriteFile(filepath.Join(root, "utf16.txt"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	window, err := Read(ReadOptions{WorkspaceRoot: root, Path: "utf16.txt", Offset: 1, Limit: 1, MaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if window.Content != "two\n" || window.TotalLines != 3 || window.Format.Charset != "utf-16le" || window.Format.LineEnding != "mixed" {
+		t.Fatalf("decoded window=%+v", window)
+	}
+	full, err := ReadFull(FullReadOptions{WorkspaceRoot: root, Path: "utf16.txt", MaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, format, decodeErr := DecodeText(full.Content); decodeErr != nil || got != text || format.Charset != "utf-16le" {
+		t.Fatalf("decoded full=%q format=%+v err=%v", got, format, decodeErr)
+	}
+	if window.SHA256 == "" || window.SHA256 != full.SHA256 {
+		t.Fatalf("raw SHA mismatch: window=%q full=%q", window.SHA256, full.SHA256)
+	}
+}
+
+func TestDecodeTextRejectsMalformedUTF16(t *testing.T) {
+	if _, _, err := DecodeText([]byte{0xff, 0xfe, 0x00}); err == nil {
+		t.Fatal("odd UTF-16 byte length should be rejected")
+	}
+	if _, _, err := DecodeText([]byte{0xff, 0xfe, 0x00, 0xd8}); err == nil {
+		t.Fatal("unpaired UTF-16 surrogate should be rejected")
+	}
+}
 
 func TestReadFullReturnsWholeTextAndMIME(t *testing.T) {
 	root := t.TempDir()

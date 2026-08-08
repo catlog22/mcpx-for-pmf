@@ -301,8 +301,8 @@ func writeEventAction(w io.Writer, event Event, verb, label, fallbackColor strin
 	}
 	colorCode := eventActionColor(event, fallbackColor)
 	marker := eventMarker(event)
-	// Keep model-supplied path/query labels intact (still single-line for the action row).
-	_, err := fmt.Fprintf(w, "%s %s %s\n", paint(marker, colorCode, color), paint(verb, colorCode, color), compactLine(label))
+	// Keep model-supplied path/query labels intact; the timeline wraps long rows.
+	_, err := fmt.Fprintf(w, "%s %s %s\n", paint(marker, colorCode, color), paint(verb, colorCode, color), label)
 	return err
 }
 

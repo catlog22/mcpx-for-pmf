@@ -7,7 +7,7 @@ MCPX 是运行在开发环境中的 **MCP Runtime（网关）**，Go module 为 
 | 路径 | 说明 |
 |------|------|
 | `cmd/mcpx-server/` | 可执行入口（`main`、子命令如 `oauth-register`） |
-| `internal/` | 业务包：`server`（HTTP Gateway / 工具注册）、`remotesession`、`workspace`、`auth`/`oauth`、`changeset`、`terminal`、`source`、`artifact`、`config`、`state` 等 |
+| `internal/observation/` | 观测系统：`timeline`、`render`、`diff`、`event`、`store`、`width` 等，用于实时观测、事件流、变更摘要、终端展示和模型友好交互（最近新增 observation_bridge.go） |
 | `docs/plans/`、`docs/specs/` | 实现计划与设计规格 |
 | `bin/` | 本地构建产物（已 gitignore） |
 | `~/.mcpx/` | 运行时数据（配置、SQLite、日志、任务），**不在本仓库** |

@@ -7,6 +7,10 @@ import (
 	"testing"
 )
 
+func joinWrappedObservationLines(text string) string {
+	return strings.ReplaceAll(text, "\n│ ", "")
+}
+
 func TestTextRendererGroupsInteractionIntoBoundedBlock(t *testing.T) {
 	renderer := NewTextRenderer(false)
 	var output bytes.Buffer
@@ -200,10 +204,55 @@ func TestTextRendererAllowsFiftyBodyLinesBeforeEllipsis(t *testing.T) {
 	}
 	text := output.String()
 	if strings.Contains(text, "│ ...") {
-		t.Fatalf("exactly twenty body lines should not truncate: %q", text)
+		t.Fatalf("exactly fifty body lines should not truncate: %q", text)
 	}
 	if strings.Count(text, "│ ") != maxInteractionBodyLines || !strings.HasSuffix(text, "\n\n") {
 		t.Fatalf("body/footer budget output=%q", text)
+	}
+}
+
+func TestTextRendererCapsWrappedBodyLines(t *testing.T) {
+	renderer := NewTextRendererWithWidth(false, 10)
+	var output bytes.Buffer
+	block := &interactionBlock{key: "wrapped", sequence: 1, tool: "source_read"}
+	if err := renderer.activate(&output, block); err != nil {
+		t.Fatal(err)
+	}
+	if err := renderer.writeBodyLine(&output, block, strings.Repeat("x", 500)); err != nil {
+		t.Fatal(err)
+	}
+	if err := renderer.close(&output, block); err != nil {
+		t.Fatal(err)
+	}
+	if block.bodyLines != maxInteractionBodyLines || !block.ellipsis {
+		t.Fatalf("wrapped body budget=%d ellipsis=%v, want %d and true", block.bodyLines, block.ellipsis, maxInteractionBodyLines)
+	}
+	if got := strings.Count(output.String(), "│ "); got != maxInteractionBodyLines {
+		t.Fatalf("rendered body lines=%d, want %d: %q", got, maxInteractionBodyLines, output.String())
+	}
+}
+
+func TestWrapRenderedLinePreservesANSIStyles(t *testing.T) {
+	value := ansiRed + "abcdefgh" + ansiReset
+	segments := wrapRenderedLine(value, 4)
+	if len(segments) != 2 {
+		t.Fatalf("segments=%d, want 2: %#v", len(segments), segments)
+	}
+	var plain strings.Builder
+	for index, segment := range segments {
+		if got := displayWidth(segment); got > 4 {
+			t.Fatalf("segment %d width=%d, want <= 4: %q", index, got, segment)
+		}
+		if !strings.HasSuffix(segment, ansiReset) {
+			t.Fatalf("segment %d does not reset ANSI style: %q", index, segment)
+		}
+		if index > 0 && !strings.HasPrefix(segment, ansiRed) {
+			t.Fatalf("continuation %d did not reopen ANSI style: %q", index, segment)
+		}
+		plain.WriteString(stripANSI(segment))
+	}
+	if got := plain.String(); got != "abcdefgh" {
+		t.Fatalf("wrapped text=%q, want %q", got, "abcdefgh")
 	}
 }
 
@@ -231,17 +280,18 @@ func TestTextRendererUsesIndependentFallbackKeysAndResetsAfterGap(t *testing.T) 
 	}
 }
 
-func TestTextRendererClipsBodyAndFillsFooterToConfiguredWidth(t *testing.T) {
+func TestTextRendererWrapsBodyAndFillsFooterToConfiguredWidth(t *testing.T) {
 	const width = 32
 	renderer := NewTextRendererWithWidth(false, width)
 	var output bytes.Buffer
+	const longSummary = "This is a deliberately long result line that must remain complete in the observation."
 	if err := renderer.RenderEvent(&output, Event{
 		Sequence:  8,
 		RequestID: "req_width",
 		Tool:      "context_query",
 		Type:      TypeToolCompleted,
 		Input:     []byte(`{"action":"search","query":"find a very long query"}`),
-		Output:    []byte(`{"status":"ok","result":{"content":[{"type":"text","text":"This is a deliberately long result line that must be clipped to the terminal width."}]}}`),
+		Output:    []byte(`{"status":"ok","result":{"content":[{"type":"text","text":"This is a deliberately long result line that must remain complete in the observation."}]}}`),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -266,8 +316,40 @@ func TestTextRendererClipsBodyAndFillsFooterToConfiguredWidth(t *testing.T) {
 	if !strings.HasPrefix(footer, "╰") || displayWidth(footer) != width {
 		t.Fatalf("footer width=%d content=%q", displayWidth(footer), footer)
 	}
-	if !strings.Contains(output.String(), "...") {
-		t.Fatalf("long body line was not truncated: %q", output.String())
+	if !strings.Contains(joinWrappedObservationLines(output.String()), longSummary) {
+		t.Fatalf("long body line was truncated: %q", output.String())
+	}
+}
+
+func TestTextRendererKeepsSourceReadPathAndProgressSummaryComplete(t *testing.T) {
+	const width = 40
+	path := "fanyi-cloud/fanyi-module-erp/fanyi-module-erp-api/src/main/java/com/fanyi/cloud/module/erp/api/dto/StoreInfoApi.java"
+	progress := "StoreInfoApi 没有按 merchantId 的现成查询；继续核对 StoreInfoRespDTO 是否包含 merchantId，并查商城实现。"
+	renderer := NewTextRendererWithWidth(false, width)
+	var output bytes.Buffer
+	if err := renderer.RenderEvent(&output, Event{
+		Sequence:        16707,
+		RequestID:       "req_source_read",
+		Tool:            "source_read",
+		Type:            TypeToolCompleted,
+		ProgressSummary: progress,
+		Input:           []byte(`{"view":"file","path":"fanyi-cloud/fanyi-module-erp/fanyi-module-erp-api/src/main/java/com/fanyi/cloud/module/erp/api/dto/StoreInfoApi.java"}`),
+		Output:          []byte(`{"status":"succeeded","result":{"content":[{"type":"text","text":"Read 1 source item(s); 42 bytes returned."}]}}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	joined := joinWrappedObservationLines(text)
+	if !strings.Contains(joined, path) {
+		t.Fatalf("source path was truncated: %q", text)
+	}
+	if !strings.Contains(joined, progress) {
+		t.Fatalf("progress summary was truncated: %q", text)
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
+		if got := displayWidth(line); got > width {
+			t.Fatalf("wrapped line width=%d, want <= %d: %q", got, width, line)
+		}
 	}
 }
 

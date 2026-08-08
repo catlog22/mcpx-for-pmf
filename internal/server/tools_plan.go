@@ -31,7 +31,7 @@ func planEvidenceSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"kind":         stringSchema("证据类型：changeset、execution_task、artifact、source 或 verification"),
+			"kind":         stringSchema("证据类型：read、edit、execute、artifact、source、verification 或 observe"),
 			"reference_id": stringSchema("服务端签发的证据引用"),
 			"metadata":     map[string]any{"type": "object", "additionalProperties": true},
 		},

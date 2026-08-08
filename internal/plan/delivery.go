@@ -38,6 +38,7 @@ func deliveryChecks(ctx context.Context, tx *sql.Tx, remoteSessionID string, ite
 
 	failedVerification := make([]string, 0)
 	changesetIDs := make([]string, 0)
+	editIDs := make([]string, 0)
 	executionTaskIDs := make([]string, 0)
 	artifactIDs := make([]string, 0)
 	for _, task := range item.Tasks {
@@ -48,7 +49,9 @@ func deliveryChecks(ctx context.Context, tx *sql.Tx, remoteSessionID string, ite
 			switch evidence.Kind {
 			case "changeset":
 				changesetIDs = append(changesetIDs, evidence.ReferenceID)
-			case "execution_task", "task":
+			case "edit":
+				editIDs = append(editIDs, evidence.ReferenceID)
+			case "execute", "execution_task", "task":
 				executionTaskIDs = append(executionTaskIDs, evidence.ReferenceID)
 			case "artifact":
 				artifactIDs = append(artifactIDs, evidence.ReferenceID)
@@ -105,6 +108,19 @@ func deliveryChecks(ctx context.Context, tx *sql.Tx, remoteSessionID string, ite
 	if len(executionBlockers) != 0 {
 		blockers = append(blockers, executionBlockers...)
 	}
+	editStatuses, err := queryCleanEditStatuses(ctx, tx, remoteSessionID, editIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	editBlockers := make([]string, 0)
+	for _, id := range uniqueStrings(editIDs) {
+		if status, ok := editStatuses[id]; !ok || status != "succeeded" {
+			editBlockers = append(editBlockers, "edit_not_succeeded:"+id)
+		}
+	}
+	if len(editBlockers) != 0 {
+		blockers = append(blockers, editBlockers...)
+	}
 
 	var pendingApprovals int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM approvals WHERE remote_session_id = ? AND status = 'pending' AND expires_at > ?`, remoteSessionID, now.UnixMilli()).Scan(&pendingApprovals); err != nil {
@@ -115,12 +131,40 @@ func deliveryChecks(ctx context.Context, tx *sql.Tx, remoteSessionID string, ite
 		checks[len(checks)-1].Details = map[string]any{"pending": pendingApprovals}
 		blockers = append(blockers, "pending_approvals")
 	}
-	if len(executionBlockers) != 0 {
-		checks = append(checks, DeliveryCheck{Code: "execution_evidence_valid", Passed: false, Message: "execution task or artifact evidence is incomplete", Details: map[string]any{"items": executionBlockers}})
+	if len(executionBlockers) != 0 || len(editBlockers) != 0 {
+		items := append(append([]string{}, executionBlockers...), editBlockers...)
+		checks = append(checks, DeliveryCheck{Code: "execution_evidence_valid", Passed: false, Message: "execution or edit evidence is incomplete", Details: map[string]any{"items": items}})
 	} else {
 		checks = append(checks, DeliveryCheck{Code: "execution_evidence_valid", Passed: true, Message: "execution and artifact evidence is available"})
 	}
 	return checks, uniqueStrings(blockers), nil
+}
+
+func queryCleanEditStatuses(ctx context.Context, tx *sql.Tx, remoteSessionID string, ids []string) (map[string]string, error) {
+	result := make(map[string]string)
+	ids = uniqueStrings(ids)
+	if len(ids) == 0 {
+		return result, nil
+	}
+	query := `SELECT id, state FROM clean_edit_records WHERE remote_session_id = ? AND id IN (` + placeholders(len(ids)) + `)`
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, remoteSessionID)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, status string
+		if err := rows.Scan(&id, &status); err != nil {
+			return nil, err
+		}
+		result[id] = status
+	}
+	return result, rows.Err()
 }
 
 func evidenceFailed(evidence Evidence) bool {

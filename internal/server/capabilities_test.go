@@ -51,7 +51,7 @@ func TestMachineToolCapabilitiesApplyRoleAndFeatureState(t *testing.T) {
 	for _, item := range items {
 		states[item["name"].(string)] = item["state"].(string)
 	}
-	if states["source_read"] != "available" || states["change"] != "forbidden" || states["command_run"] != "disabled" {
+	if states["read"] != "available" || states["edit"] != "forbidden" || states["execute"] != "disabled" {
 		t.Fatalf("unexpected capability states: %+v", states)
 	}
 }
@@ -110,15 +110,15 @@ func TestCapabilityListIncludesInstructionsSkillsAndRoleState(t *testing.T) {
 		t.Fatalf("skills: %+v", skills)
 	}
 	tools := data["tools"].([]any)
-	foundChangeApply := false
+	foundEdit := false
 	for _, raw := range tools {
 		item := raw.(map[string]any)
-		if item["name"] == "change" {
-			foundChangeApply = item["state"] == "available"
+		if item["name"] == "edit" {
+			foundEdit = item["state"] == "available"
 		}
 	}
-	if !foundChangeApply {
-		t.Fatal("owner capability did not expose change as available")
+	if !foundEdit {
+		t.Fatal("owner capability did not expose edit as available")
 	}
 
 	readRequest := mcpresult.Request(map[string]any{"intent": "read project instructions", "remote_session_id": remoteID, "id": "project"})

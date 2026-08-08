@@ -10,6 +10,15 @@ import (
 	"mcpx/internal/remotesession"
 )
 
+const cleanCoreCapabilityVersion = "clean-core-p4"
+
+func capabilityGroups() map[string][]string {
+	return map[string][]string{
+		"core":    {"session", "read", "edit", "observe", "execute", "plan", "artifact", "discover", "skill_call", "mcp_call"},
+		"support": {"operation_batch", "operation_manage", "runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide"},
+	}
+}
+
 type toolCapabilityDefinition struct {
 	Name                  string
 	Domain                string
@@ -22,27 +31,23 @@ type toolCapabilityDefinition struct {
 // description, schema, and annotations are authoritative in registerTools and
 // are fingerprinted from the resulting MCP registration.
 var toolCapabilityDefinitions = []toolCapabilityDefinition{
-	{Name: "workspace_read", Domain: "workspace"},
+	{Name: "observe", Domain: "observation", RequiresRemoteSession: true},
 	{Name: "operation_batch", Domain: "operation", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "operation_manage", Domain: "operation", RequiresRemoteSession: true},
 	{Name: "session", Domain: "session"},
-	{Name: "session_read", Domain: "session"},
-	{Name: "source_read", Domain: "source", RequiresRemoteSession: true},
-	{Name: "change", Domain: "change", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
-	{Name: "change_read", Domain: "change", RequiresRemoteSession: true},
-	{Name: "command_run", Domain: "command", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "terminal"},
-	{Name: "task_read", Domain: "task", RequiresRemoteSession: true, Feature: "terminal"},
-	{Name: "task", Domain: "task", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "terminal"},
+	{Name: "read", Domain: "source", RequiresRemoteSession: true},
+	{Name: "edit", Domain: "edit", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+	{Name: "execute", Domain: "command", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "terminal"},
 	{Name: "plan", Domain: "plan", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
-	{Name: "plan_read", Domain: "plan", RequiresRemoteSession: true},
+	{Name: "artifact", Domain: "artifact", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+	{Name: "discover", Domain: "extension", RequiresRemoteSession: true},
+	{Name: "skill_call", Domain: "extension", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "skills"},
+	{Name: "mcp_call", Domain: "extension", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "mcp"},
+	// Support tools intentionally remain outside the core workflow but share
+	// the same remote_session_id contract; their definitions are listed above.
 	{Name: "runtime_read", Domain: "runtime"},
 	{Name: "environment_read", Domain: "environment"},
 	{Name: "environment", Domain: "environment", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
-	{Name: "extension_discover", Domain: "extension"},
-	{Name: "skill_call", Domain: "extension", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "skills"},
-	{Name: "mcp_call", Domain: "extension", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "mcp"},
-	{Name: "artifact_read", Domain: "artifact", RequiresRemoteSession: true},
-	{Name: "artifact", Domain: "artifact", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "screenshot_capture", Domain: "screenshot", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "secret_provide", Domain: "secrets", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 }

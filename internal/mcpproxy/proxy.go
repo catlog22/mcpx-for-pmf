@@ -53,10 +53,10 @@ func (m *Manager) List() []map[string]any {
 			"source": "merged_config",
 			"invocation": map[string]any{
 				"tool":      "mcp_call",
-				"arguments": map[string]any{"server": name, "tool": "<upstream_tool>", "arguments": map[string]any{}},
+				"arguments": map[string]any{"server": name, "tool": "<upstream_tool>", "arguments": map[string]any{}, "discovery_required": true},
 			},
 			"tool_discovery": map[string]any{
-				"tool": "mcp_list", "arguments": map[string]any{"server": name, "include_tools": true},
+				"tool": "discover", "arguments": map[string]any{"kind": "mcp", "view": "describe", "server": name, "include_tools": true},
 			},
 		})
 	}

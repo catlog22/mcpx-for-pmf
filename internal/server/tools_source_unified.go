@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -16,6 +15,7 @@ import (
 	"mcpx/internal/envelope"
 	"mcpx/internal/file"
 	"mcpx/internal/instruction"
+	"mcpx/internal/remotesession"
 	"mcpx/internal/security"
 	"mcpx/internal/source"
 )
@@ -34,11 +34,20 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req *mcp.CallToolRequ
 	}
 	mode := sourceReadMode(envReq.Payload)
 	if mode != "window" && mode != "full" {
-		return r.sourceError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("unsupported file_read mode %q", mode))
+		return r.sourceError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("unsupported read mode %q", mode))
 	}
 	if raw, ok := envReq.Payload["items"].([]any); ok && len(raw) > 0 {
-		if mode == "full" {
-			return r.sourceError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("full mode requires a single path; batch items are only supported in window mode"))
+		mixedFull := mode == "full"
+		for _, value := range raw {
+			if item, ok := value.(map[string]any); ok {
+				itemMode, _ := item["mode"].(string)
+				if strings.EqualFold(strings.TrimSpace(itemMode), "full") {
+					mixedFull = true
+				}
+			}
+		}
+		if mixedFull {
+			return r.toolFileReadMixedBatch(ctx, envReq, session, raw, mode)
 		}
 		if len(raw) > 20 {
 			return r.sourceError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("items exceeds maximum of 20"))
@@ -86,7 +95,7 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req *mcp.CallToolRequ
 				}
 				details := map[string]any{}
 				if code == "NOT_FOUND" {
-					details["next_action"] = nextActionWithReason("context_query", "locate this path before retrying source_read", map[string]any{
+					details["next_action"] = nextActionWithReason("read", "locate this path before retrying read", map[string]any{
 						"remote_session_id": session.ID,
 						"action":            "list",
 					})
@@ -104,7 +113,7 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req *mcp.CallToolRequ
 			for _, item := range batch.ContinueRequests {
 				items = append(items, map[string]any{"path": item.Path, "offset": item.Offset, "limit": item.Limit})
 			}
-			data["next_action"] = nextAction("file_read", map[string]any{
+			data["next_action"] = nextAction("read", map[string]any{
 				"remote_session_id": session.ID, "items": items, "max_total_bytes": budget,
 			})
 		}
@@ -134,7 +143,7 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req *mcp.CallToolRequ
 		"offset": read.Offset, "limit": read.Limit, "total_lines": read.TotalLines, "truncated": read.Truncated,
 	}
 	if read.Truncated {
-		data["next_action"] = nextAction("file_read", map[string]any{"remote_session_id": session.ID, "path": path, "offset": read.Offset + read.Limit, "limit": read.Limit})
+		data["next_action"] = nextAction("read", map[string]any{"remote_session_id": session.ID, "path": path, "offset": read.Offset + read.Limit, "limit": read.Limit})
 	}
 	summary := fmt.Sprintf("Read %s (%d lines).", path, read.TotalLines)
 	return compactToolResult(data, sourceReadDisplay(data, summary)), nil
@@ -172,6 +181,107 @@ func sourceReadMode(payload map[string]any) string {
 	return mode
 }
 
+// toolFileReadMixedBatch is used only when an items[] request contains a full
+// read. The common window-only path above remains source.ReadBatch's bounded,
+// continuation-aware fast path.
+func (r *Runtime) toolFileReadMixedBatch(_ context.Context, envReq envelope.Request, session remotesession.Session, raw []any, defaultMode string) (*mcp.CallToolResult, error) {
+	if len(raw) > 20 {
+		return r.sourceError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("items exceeds maximum of 20"))
+	}
+	effective := r.effectiveConfig(session.WorkspacePath)
+	budget := intPayload(envReq.Payload, "max_total_bytes")
+	if budget <= 0 {
+		budget = config.MaxResultBytes(effective.Limits)
+	}
+	if budget <= 0 {
+		budget = 1 << 20
+	}
+	used := 0
+	truncated := false
+	results := make([]map[string]any, 0, len(raw))
+	for _, value := range raw {
+		item, ok := value.(map[string]any)
+		if !ok {
+			return r.sourceError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("items must contain objects"))
+		}
+		path, _ := item["path"].(string)
+		if strings.TrimSpace(path) == "" {
+			return r.sourceError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("item path is required"))
+		}
+		itemMode, _ := item["mode"].(string)
+		itemMode = strings.ToLower(strings.TrimSpace(itemMode))
+		if itemMode == "" {
+			itemMode = defaultMode
+		}
+		if itemMode != "full" && itemMode != "window" {
+			return r.sourceError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("unsupported item mode %q", itemMode))
+		}
+		if security.MatchFile(effective.Security.Files, path) != security.Allow {
+			results = append(results, map[string]any{
+				"path": path, "ok": false,
+				"error": map[string]any{"code": "FILE_DENIED", "message": "file denied by policy"},
+			})
+			continue
+		}
+		remaining := budget - used
+		if remaining <= 0 {
+			truncated = true
+			results = append(results, map[string]any{
+				"path": path, "ok": false,
+				"error": map[string]any{"code": "RESULT_BUDGET_EXCEEDED", "message": "batch result budget exhausted"},
+			})
+			continue
+		}
+		if itemMode == "full" {
+			maxBytes := effective.Security.Files.MaxReadBytes
+			if maxBytes <= 0 || maxBytes > int64(remaining) {
+				maxBytes = int64(remaining)
+			}
+			read, err := file.ReadFull(file.FullReadOptions{WorkspaceRoot: session.WorkspacePath, Path: path, MaxBytes: maxBytes})
+			if err != nil {
+				results = append(results, map[string]any{
+					"path": path, "ok": false,
+					"error": map[string]any{"code": "READ_FAILED", "message": err.Error()},
+				})
+				continue
+			}
+			data := fullFileReadData(read)
+			data["ok"] = true
+			results = append(results, data)
+			used += len(read.Content)
+			continue
+		}
+
+		maxBytes := effective.Security.Files.MaxReadBytes
+		if maxBytes <= 0 || maxBytes > int64(remaining) {
+			maxBytes = int64(remaining)
+		}
+		read, err := source.Read(session.WorkspacePath, path, intPayload(item, "offset"), intPayload(item, "limit"), maxBytes)
+		if err != nil {
+			results = append(results, map[string]any{
+				"path": path, "ok": false,
+				"error": map[string]any{"code": "READ_FAILED", "message": err.Error()},
+			})
+			continue
+		}
+		entry := map[string]any{
+			"path": read.Path, "mode": "window", "ok": true, "content": read.Content,
+			"sha256": read.SHA256, "line_ending": read.LineEnding, "format": formatMap(read.Format),
+			"offset": read.Offset, "limit": read.Limit, "total_lines": read.TotalLines, "truncated": read.Truncated,
+		}
+		if read.Truncated {
+			truncated = true
+			entry["next_offset"] = read.Offset + strings.Count(read.Content, "\n")
+		}
+		results = append(results, entry)
+		used += len(read.Content)
+	}
+	data := map[string]any{
+		"results": results, "total_bytes": used, "budget_bytes": budget, "truncated": truncated,
+	}
+	return compactToolResult(data, sourceReadDisplay(data, fmt.Sprintf("Read %d source item(s); %d bytes returned.", len(results), used))), nil
+}
+
 func fullFileReadData(read file.FullReadResult) map[string]any {
 	data := map[string]any{
 		"path":        read.Path,
@@ -187,7 +297,15 @@ func fullFileReadData(read file.FullReadResult) map[string]any {
 		return data
 	}
 	if fullReadIsText(read.MIMEType, read.Content) {
-		content := string(read.Content)
+		content, decodedFormat, decodeErr := file.DecodeText(read.Content)
+		if decodeErr != nil {
+			data["content"] = base64.StdEncoding.EncodeToString(read.Content)
+			data["encoding"] = "base64"
+			data["encoding_error"] = "UNSUPPORTED_ENCODING"
+			return data
+		}
+		data["line_ending"] = decodedFormat.LineEnding
+		data["format"] = formatMap(decodedFormat)
 		data["content"] = content
 		data["encoding"] = "utf-8"
 		data["total_lines"] = fullReadLineCount(content)
@@ -199,14 +317,16 @@ func fullFileReadData(read file.FullReadResult) map[string]any {
 }
 
 func fullReadIsText(mimeType string, content []byte) bool {
-	if !utf8.Valid(content) {
-		return false
-	}
-	return strings.HasPrefix(mimeType, "text/") ||
+	isTextMIME := strings.HasPrefix(mimeType, "text/") ||
 		strings.Contains(mimeType, "json") ||
 		strings.Contains(mimeType, "xml") ||
 		strings.Contains(mimeType, "yaml") ||
 		strings.Contains(mimeType, "javascript")
+	format := file.DetectFormat(content)
+	if format.Charset == "utf-16le" || format.Charset == "utf-16be" {
+		return true
+	}
+	return isTextMIME
 }
 
 func fullReadLineCount(content string) int {
@@ -235,8 +355,11 @@ func formatMap(format file.Format) map[string]any {
 }
 
 func fullFileReadDisplay(read file.FullReadResult, data map[string]any, summary string) string {
-	if read.MIMEType == "text/html" && utf8.Valid(read.Content) {
-		content := string(read.Content)
+	if read.MIMEType == "text/html" {
+		content, _, err := file.DecodeText(read.Content)
+		if err != nil {
+			return summary
+		}
 		fence := "```"
 		if strings.Contains(content, fence) {
 			fence = "````"
@@ -295,7 +418,7 @@ func sourceReadDisplay(data map[string]any, summary string) string {
 		}
 		builder.WriteString("```")
 		if truncated, _ := item["truncated"].(bool); truncated {
-			builder.WriteString("\n\n> 内容已截断；请继续调用 `source_read(view=file)` 读取后续内容。")
+			builder.WriteString("\n\n> 内容已截断；请继续调用 `read(view=file)` 读取后续内容。")
 		}
 		// Keep Revision in text so terminal agents that only read content can
 		// copy base_sha256. format/line_ending/charset live only in structured

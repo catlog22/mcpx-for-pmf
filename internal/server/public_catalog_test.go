@@ -7,21 +7,19 @@ import (
 	"encoding/json"
 	"reflect"
 	"sort"
-	"strings"
 	"testing"
 )
 
-func TestPublicCatalogIsExactlyTheV2Contract(t *testing.T) {
+func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	runtime := &Runtime{}
 	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
 	runtime.registerTools(protocol)
 
 	want := []string{
-		"workspace_read", "session", "session_read",
+		"session", "read", "edit", "observe",
 		"operation_batch", "operation_manage",
-		"source_read", "change", "change_read", "command_run", "task_read", "task",
-		"plan", "plan_read", "runtime_read", "environment_read", "environment",
-		"extension_discover", "skill_call", "mcp_call", "artifact_read", "artifact", "screenshot_capture", "secret_provide",
+		"execute", "plan", "artifact", "discover", "skill_call", "mcp_call",
+		"runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide",
 	}
 	got := make([]string, 0, len(runtime.listedToolMap()))
 	for name := range runtime.listedToolMap() {
@@ -42,8 +40,8 @@ func TestPublicCatalogIsExactlyTheV2Contract(t *testing.T) {
 			t.Fatalf("%s must reject unknown arguments: %s", name, mcpresult.ToolSchemaJSON(registered))
 		}
 		properties, _ := schema["properties"].(map[string]any)
-		if properties["remote_session_id"] != nil {
-			t.Fatalf("%s exposes internal remote_session_id", name)
+		if _, clean := map[string]bool{"session": true, "read": true, "edit": true, "observe": true}[name]; clean && properties["remote_session_id"] == nil {
+			t.Fatalf("%s must expose remote_session_id", name)
 		}
 		required, _ := schema["required"].([]any)
 		for _, raw := range required {
@@ -56,17 +54,21 @@ func TestPublicCatalogIsExactlyTheV2Contract(t *testing.T) {
 			}
 		}
 	}
-	changeApply := runtime.listedToolMap()["change"]
-	var changeSchema map[string]any
-	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(changeApply), &changeSchema); err != nil {
+	editTool := runtime.listedToolMap()["edit"]
+	var editSchema map[string]any
+	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(editTool), &editSchema); err != nil {
 		t.Fatal(err)
 	}
-	changeProperties, _ := changeSchema["properties"].(map[string]any)
-	digestProperty, _ := changeProperties["expected_digest"].(map[string]any)
-	description, _ := digestProperty["description"].(string)
-	for _, phrase := range []string{"原样复制", "diff 统计", "snapshot ID"} {
-		if !strings.Contains(description, phrase) {
-			t.Fatalf("change_apply expected_digest description missing %q: %s", phrase, description)
+	editProperties, _ := editSchema["properties"].(map[string]any)
+	if editProperties["remote_session_id"] == nil || editProperties["purpose"] == nil || editProperties["edits"] == nil {
+		t.Fatalf("edit schema missing clean-core fields: %s", mcpresult.ToolSchemaJSON(editTool))
+	}
+	editItems, _ := editProperties["edits"].(map[string]any)
+	itemSchema, _ := editItems["items"].(map[string]any)
+	itemProperties, _ := itemSchema["properties"].(map[string]any)
+	for _, field := range []string{"operation", "path", "base_sha256", "content", "new_path", "replacements"} {
+		if itemProperties[field] == nil {
+			t.Fatalf("edit item missing %q: %s", field, mcpresult.ToolSchemaJSON(editTool))
 		}
 	}
 	operationManage := runtime.listedToolMap()["operation_manage"]

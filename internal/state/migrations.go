@@ -394,6 +394,38 @@ var migrations = []string{
 		ON operations(state, expires_at, remote_session_id);`,
 	`ALTER TABLE observation_events ADD COLUMN step_id TEXT NOT NULL DEFAULT '';`,
 	`ALTER TABLE changesets ADD COLUMN discarded_at INTEGER;`,
+	`CREATE TABLE IF NOT EXISTS clean_idempotency_records (
+		remote_session_id TEXT NOT NULL,
+		principal_id TEXT NOT NULL,
+		operation TEXT NOT NULL,
+		idempotency_key TEXT NOT NULL,
+		fingerprint TEXT NOT NULL,
+		state TEXT NOT NULL CHECK (state IN ('pending','succeeded','failed','in_doubt')),
+		response_json TEXT NOT NULL DEFAULT '{}',
+		metadata_json TEXT NOT NULL DEFAULT '{}',
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL,
+		PRIMARY KEY (remote_session_id, principal_id, operation, idempotency_key)
+	);
+	CREATE INDEX IF NOT EXISTS idx_clean_idempotency_expiry
+		ON clean_idempotency_records(expires_at, state);
+	CREATE INDEX IF NOT EXISTS idx_clean_idempotency_session
+		ON clean_idempotency_records(remote_session_id, principal_id, operation, updated_at);`,
+	`CREATE TABLE IF NOT EXISTS clean_edit_records (
+		id TEXT PRIMARY KEY,
+		remote_session_id TEXT NOT NULL,
+		principal_id TEXT NOT NULL,
+		state TEXT NOT NULL CHECK (state IN ('pending','succeeded','in_doubt')),
+		result_json TEXT NOT NULL DEFAULT '{}',
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_clean_edit_records_session
+		ON clean_edit_records(remote_session_id, created_at DESC, id);
+	CREATE INDEX IF NOT EXISTS idx_clean_edit_records_expiry
+		ON clean_edit_records(expires_at, state);`,
 }
 
 func applyMigrations(ctx context.Context, db *sql.DB) error {

@@ -103,10 +103,9 @@ func (b *observationBridge) target(ctx context.Context, request envelope.Request
 	workspace := strings.TrimSpace(request.Workspace)
 	remoteSessionID := remoteSessionID(request)
 	if workspace == "" && b != nil && b.resolve != nil {
-		// Never inherit tools/call deadline into workspace resolution.
-		workspace, remoteSessionID = b.resolve(context.Background(), request)
+		// Preserve authentication values while detaching tools/call cancellation.
+		workspace, remoteSessionID = b.resolve(observationContext(ctx), request)
 	}
-	_ = ctx
 	return strings.TrimSpace(workspace), strings.TrimSpace(remoteSessionID)
 }
 

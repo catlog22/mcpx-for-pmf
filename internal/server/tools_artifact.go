@@ -76,9 +76,17 @@ func (r *Runtime) toolArtifactRead(ctx context.Context, req *mcp.CallToolRequest
 		data["format"] = read.Format
 	}
 	if !read.EOF {
-		data["next_action"] = nextAction("artifact_read", map[string]any{
+		nextTool := "artifact_read"
+		arguments := map[string]any{
 			"view": "content", "session_id": remote.ID, "artifact_id": artifactID, "offset": read.Next, "limit": intPayload(envReq.Payload, "limit"),
-		})
+		}
+		if isCleanCoreRequest(ctx) {
+			nextTool = "artifact"
+			arguments = map[string]any{
+				"action": "read", "remote_session_id": remote.ID, "artifact_id": artifactID, "offset": read.Next, "limit": intPayload(envReq.Payload, "limit"),
+			}
+		}
+		data["next_action"] = nextAction(nextTool, arguments)
 	}
 	return compactToolResult(data, fmt.Sprintf("Read artifact %s at byte offset %d.", artifactID, read.Offset)), nil
 }

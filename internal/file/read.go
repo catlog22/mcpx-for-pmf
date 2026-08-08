@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -117,6 +119,10 @@ func Read(opts ReadOptions) (ReadResult, error) {
 	if st.Size() > 0 {
 		prefixSize, _ = f.ReadAt(prefix, 0)
 	}
+	prefixFormat := detectFormat(prefix[:prefixSize])
+	if prefixFormat.Charset == "utf-16le" || prefixFormat.Charset == "utf-16be" {
+		return readUTF16Window(f, opts, st.Size())
+	}
 	if st.Size() > 0 {
 		var last [1]byte
 		if _, err := f.ReadAt(last[:], st.Size()-1); err == nil {
@@ -140,6 +146,9 @@ func Read(opts ReadOptions) (ReadResult, error) {
 			line := raw
 			if line[len(line)-1] == '\n' {
 				line = line[:len(line)-1]
+			}
+			if lineNumber == 0 && bytes.HasPrefix(prefix[:prefixSize], []byte{0xef, 0xbb, 0xbf}) {
+				line = bytes.TrimPrefix(line, []byte{0xef, 0xbb, 0xbf})
 			}
 			if !utf8.Valid(line) {
 				return ReadResult{}, fmt.Errorf("binary or non-utf8 content")
@@ -224,6 +233,9 @@ func ReadFull(opts FullReadOptions) (FullReadResult, error) {
 	}
 	digest := sha256.Sum256(content)
 	format := detectFormat(content)
+	if _, decodedFormat, decodeErr := DecodeText(content); decodeErr == nil {
+		format = decodedFormat
+	}
 	return FullReadResult{
 		Path: opts.Path, Content: content, Size: int64(len(content)),
 		MIMEType: detectMIME(opts.Path, content), LineEnding: format.LineEnding, Format: format,
@@ -249,6 +261,107 @@ func detectFormat(content []byte) Format {
 // Changeset preparation uses the same classifier as file.read so clients see
 // one consistent charset and line-ending contract across read and edit tools.
 func DetectFormat(content []byte) Format { return detectFormat(content) }
+
+// DecodeText decodes a supported source file into model-facing Unicode text
+// while preserving the original charset/BOM and decoded line-ending metadata.
+// The returned error means the bytes must stay binary/base64 to avoid lossy
+// edits. SHA values must still be calculated from the original bytes.
+func DecodeText(content []byte) (string, Format, error) {
+	format := detectFormat(content)
+	switch format.Charset {
+	case "utf-8":
+		start := 0
+		if format.BOM == "utf-8" {
+			start = 3
+		}
+		if start > len(content) || !utf8.Valid(content[start:]) {
+			return "", format, fmt.Errorf("invalid utf-8 content")
+		}
+		text := string(content[start:])
+		return text, applyDecodedFormat(format, text), nil
+	case "utf-16le", "utf-16be":
+		if len(content) < 2 || len(content[2:])%2 != 0 {
+			return "", format, fmt.Errorf("invalid utf-16 byte length")
+		}
+		var order binary.ByteOrder = binary.LittleEndian
+		if format.Charset == "utf-16be" {
+			order = binary.BigEndian
+		}
+		units := make([]uint16, len(content[2:])/2)
+		for index := range units {
+			units[index] = order.Uint16(content[2+index*2:])
+		}
+		for index, unit := range units {
+			switch {
+			case unit >= 0xd800 && unit <= 0xdbff:
+				if index+1 >= len(units) || units[index+1] < 0xdc00 || units[index+1] > 0xdfff {
+					return "", format, fmt.Errorf("invalid utf-16 surrogate pair")
+				}
+			case unit >= 0xdc00 && unit <= 0xdfff:
+				if index == 0 || units[index-1] < 0xd800 || units[index-1] > 0xdbff {
+					return "", format, fmt.Errorf("invalid utf-16 surrogate pair")
+				}
+			}
+		}
+		text := string(utf16.Decode(units))
+		return text, applyDecodedFormat(format, text), nil
+	default:
+		return "", format, fmt.Errorf("unsupported text charset %q", format.Charset)
+	}
+}
+
+func applyDecodedFormat(format Format, text string) Format {
+	logical := detectFormat([]byte(text))
+	format.LineEnding = logical.LineEnding
+	format.LineEndingCounts = logical.LineEndingCounts
+	format.FinalNewline = logical.FinalNewline
+	return format
+}
+
+func readUTF16Window(handle *os.File, opts ReadOptions, size int64) (ReadResult, error) {
+	maxRaw := opts.MaxBytes * 4
+	if maxRaw <= 0 {
+		maxRaw = 4 << 20
+	}
+	content, err := io.ReadAll(io.LimitReader(handle, maxRaw+1))
+	if err != nil {
+		return ReadResult{}, err
+	}
+	if int64(len(content)) > maxRaw || int64(len(content)) != size {
+		return ReadResult{}, fmt.Errorf("file too large")
+	}
+	text, format, err := DecodeText(content)
+	if err != nil {
+		return ReadResult{}, fmt.Errorf("unsupported utf-16 content: %w", err)
+	}
+	lines := strings.Split(strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n"), "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	start := opts.Offset
+	if start > len(lines) {
+		start = len(lines)
+	}
+	end := start + opts.Limit
+	if end > len(lines) {
+		end = len(lines)
+	}
+	chunk := strings.Join(lines[start:end], "\n")
+	if end < len(lines) || (end > start && format.FinalNewline != nil && *format.FinalNewline) {
+		chunk += "\n"
+	}
+	truncated := end < len(lines)
+	if int64(len(chunk)) > opts.MaxBytes {
+		chunk = truncateUTF8(chunk, int(opts.MaxBytes))
+		truncated = true
+	}
+	digest := sha256.Sum256(content)
+	return ReadResult{
+		Path: opts.Path, Content: chunk, TotalLines: len(lines), Offset: start, Limit: opts.Limit,
+		Truncated: truncated, LineEnding: format.LineEnding, Format: format,
+		SHA256: "sha256:" + hex.EncodeToString(digest[:]),
+	}, nil
+}
 
 func formatFromReadStats(prefix []byte, crlfCount, lfCount, crCount int, finalNewline bool) Format {
 	charset, bom := detectCharset(prefix)

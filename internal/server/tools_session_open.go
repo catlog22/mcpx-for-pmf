@@ -37,6 +37,7 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		includeProjectTasks = v
 	}
 	var session remotesession.Session
+	action := publicSelector(req, "action")
 	remoteID, _ := envReq.Payload["remote_session_id"].(string)
 	remoteID = strings.TrimSpace(remoteID)
 	if remoteID == "" {
@@ -46,6 +47,9 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 	workspaceName := strings.TrimSpace(envReq.Workspace)
 	if workspaceName == "" {
 		workspaceName, _ = envReq.Payload["workspace"].(string)
+	}
+	if action == "attach" && remoteID == "" {
+		return r.remoteError(envReq, "", workspaceName, errRemoteSessionRequired)
 	}
 
 	if remoteID != "" {
@@ -74,7 +78,6 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		project              map[string]any
 		gitHead              string
 		treeDigest           string
-		activeChangesets     any
 		pendingConfirmations any
 		taskList             any
 		artifacts            any
@@ -118,7 +121,6 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 	}()
 	go func() {
 		defer bootstrap.Done()
-		activeChangesets, _ = r.changesets.History(ctx, session.ID, 5)
 		pendingConfirmations = pendingConfirmationItems(r.approvals.ListRemoteSession(session.ID))
 		taskList, _ = r.tasks.List(session.ID, 20)
 		artifacts, _ = r.artifacts.List(ctx, session.ID, "", 20)
@@ -131,6 +133,10 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		instructionPayload = map[string]any{"documents": items, "inline": true}
 	} else {
 		instructionPayload = map[string]any{"documents": docs, "inline": false}
+	}
+	confirmationItems := pendingConfirmations
+	if pending, ok := pendingConfirmations.([]map[string]any); ok {
+		confirmationItems = cleanPendingConfirmationItems(pending)
 	}
 
 	toolManifest := r.registeredToolManifest()
@@ -178,17 +184,21 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		"git": map[string]any{
 			"head": gitHead, "tree_digest": treeDigest,
 		},
-		"active_changesets":     activeChangesets,
-		"pending_confirmations": pendingConfirmations,
+		"pending_confirmations": confirmationItems,
 		"tasks":                 taskList,
 		"artifacts":             artifacts,
 		"schema_source":         "tools/list",
+		"capability_version":    cleanCoreCapabilityVersion,
+		"capability_groups":     capabilityGroups(),
 		"client_refresh":        clientRefreshPayload(envReq.Payload, revisions),
 		"recommended_workflows": map[string]any{
-			"bootstrap":     []string{"session"},
-			"source_change": []string{"source_read", "change", "change", "command_run"},
+			"bootstrap":      []string{"session"},
+			"source_change":  []string{"read", "edit", "execute", "observe"},
+			"plan_delivery":  []string{"plan", "edit", "execute", "artifact", "observe"},
+			"extension_call": []string{"discover", "skill_call", "mcp_call"},
 		},
-		"opened_at": time.Now().UTC().Format(time.RFC3339),
+		"evaluation_revision": "clean-core-p1-p4-v1",
+		"opened_at":           time.Now().UTC().Format(time.RFC3339),
 	}
 	r.omitUnchangedSessionCapabilities(envReq.Payload, data, revisions)
 

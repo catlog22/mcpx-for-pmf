@@ -18,7 +18,7 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 	if _, exists := tools["approval_manage"]; exists {
 		t.Fatal("approval_manage must not be exposed; semantic confirmation uses the original tool")
 	}
-	for _, name := range []string{"workspace_read", "source_read", "change_read", "runtime_read", "environment_read"} {
+	for _, name := range []string{"observe", "read", "runtime_read", "environment_read"} {
 		annotation := tools[name].Annotations
 		if !annotation.ReadOnlyHint || annotation.DestructiveHint != nil && *annotation.DestructiveHint || !annotation.IdempotentHint {
 			t.Fatalf("%s annotation is unsafe or incomplete: %+v", name, annotation)
@@ -28,19 +28,19 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 	if sessionAnnotation.DestructiveHint != nil && *sessionAnnotation.DestructiveHint {
 		t.Fatalf("session should not be marked destructive: %+v", sessionAnnotation)
 	}
-	for _, name := range []string{"command_run"} {
+	for _, name := range []string{"execute"} {
 		annotation := tools[name].Annotations
 		if annotation.DestructiveHint != nil && *annotation.DestructiveHint {
 			t.Fatalf("%s should not be marked destructive: %+v", name, annotation)
 		}
 	}
 	var commandSchema map[string]any
-	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(tools["command_run"]), &commandSchema); err != nil {
+	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(tools["execute"]), &commandSchema); err != nil {
 		t.Fatal(err)
 	}
 	commandProperties := commandSchema["properties"].(map[string]any)
-	if commandProperties["session_id"] == nil || commandProperties["purpose"] == nil || commandProperties["scope"] == nil || commandProperties["user_confirmed"] != nil {
-		t.Fatalf("command_run schema must expose the public semantic fields: %+v", commandProperties)
+	if commandProperties["remote_session_id"] == nil || commandProperties["purpose"] == nil || commandProperties["scope"] == nil || commandProperties["user_confirmed"] == nil {
+		t.Fatalf("execute schema must expose the clean-core semantic fields: %+v", commandProperties)
 	}
 	var sessionSchema map[string]any
 	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(tools["session"]), &sessionSchema); err != nil {
@@ -49,11 +49,11 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 	if _, exists := sessionSchema["properties"].(map[string]any)["include_skills"]; exists {
 		t.Fatal("session must not expose request-level include_skills; use server discovery.skills config")
 	}
-	var sourceSchema map[string]any
-	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(tools["source_read"]), &sourceSchema); err != nil {
+	var readSchema map[string]any
+	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(tools["read"]), &readSchema); err != nil {
 		t.Fatal(err)
 	}
-	modeSchema, ok := sourceSchema["properties"].(map[string]any)["mode"].(map[string]any)
+	modeSchema, ok := readSchema["properties"].(map[string]any)["mode"].(map[string]any)
 	enumValues, _ := modeSchema["enum"].([]any)
 	fullMode := false
 	for _, value := range enumValues {
@@ -63,7 +63,7 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 		}
 	}
 	if !ok || !fullMode {
-		t.Fatalf("source_read must expose mode=full for complete client previews: %+v", modeSchema)
+		t.Fatalf("read must expose mode=full for complete client previews: %+v", modeSchema)
 	}
 
 	request := mcpresult.Request(map[string]any{"intent": "open the demo workspace", "workspace": "demo"})

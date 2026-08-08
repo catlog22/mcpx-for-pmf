@@ -5,8 +5,8 @@ Streamable HTTP 把本地 Workspace、源码、变更、命令、任务、环境
 安全地提供给 ChatGPT、Claude、Cursor、Grok 等 MCP 客户端。
 
 MCPX 的重点不是增加一个聊天界面，而是提供一套可审计、可恢复、对模型友好
-的开发工具协议：客户端可以跨连接恢复同一个 Remote Session，模型可以用文件
-版本、Changeset 摘要、Task ID 和能力版本避免重复读取和无效重试。
+的开发工具协议：客户端可以跨连接恢复同一个 Remote Session，模型可以用文件 SHA、
+Edit ID、Task ID、discovery revision 和能力版本避免重复读取和无效重试。
 
 ## 能力概览
 
@@ -15,7 +15,7 @@ MCPX 的重点不是增加一个聊天界面，而是提供一套可审计、可
 | Remote Session | 持久化 Workspace 会话、角色权限、事件、接力和跨客户端恢复 |
 | Workspace | 注册多个项目，并在创建会话时显式绑定项目根目录 |
 | Source | 文件窗口、批量读取、搜索、文件列表和有界上下文；返回 SHA-256 与编码/换行元数据 |
-| Changeset | 生成、审阅、应用、丢弃和回滚文件变更；检查版本、策略和语义确认 |
+| Edit | 精确 replacement、批量变更、原子写、SHA 校验和格式保留 |
 | Terminal | 执行命令或项目 Task；短命令内联返回，长命令持久化为 Task |
 | Operation | 并行或有依赖地执行多个公开工具，并统一等待、分页、取消和恢复 |
 | Project Task | 从项目配置中发现测试、构建和检查任务，并解析诊断信息 |
@@ -25,7 +25,7 @@ MCPX 的重点不是增加一个聊天界面，而是提供一套可审计、可
 | Artifact | 注册、列出和分页读取测试报告、构建产物、覆盖率和日志 |
 | Screenshot | 截取显示器或屏幕区域，并通过 MCP ImageContent 返回 |
 | Security | OAuth、Bearer、Remote Session ACL、命令/文件策略和语义确认 |
-| Observation | 通过本机 Socket 观察工具调用、Task、Changeset 和操作事件 |
+| Observation | 通过本机 Socket 观察工具调用、Task、Edit 和操作事件 |
 
 ## 设计边界
 
@@ -34,11 +34,11 @@ MCPX 同时处理两类 Session：
 | 标识 | 生命周期 | 用途 |
 | --- | --- | --- |
 | `Mcp-Session-Id` | Streamable HTTP 传输层临时标识 | 连接和协议状态，重连或换客户端后可能变化 |
-| `remote_session_id` | SQLite 持久化业务标识 | Workspace、角色、Changeset、Task、操作、快照和产物的主键 |
+| `remote_session_id` | SQLite 持久化业务标识 | Workspace、角色、Edit、Task、Plan、操作、快照和产物的主键 |
 
-客户端应始终原样保存并复用服务端返回的 `remote_session_id`、`changeset_id`、
-`expected_digest`、`task_id`、`operation_id` 和 `confirmation_token`，不能自行
-缩写、猜测或从历史日志重建这些标识。
+客户端应始终原样保存并复用服务端返回的 `remote_session_id`、`edit_id`、`task_id`、
+`plan_id`、`artifact_id`、`discovery_id` 和 `discovery_revision`，不能自行缩写、
+猜测或从历史日志重建这些标识。
 
 MCPX 只提供 Streamable HTTP 的 `/mcp` 端点，不提供旧版 HTTP+SSE 的 `/sse`
 或 `/message` 兼容端点。
@@ -92,7 +92,7 @@ http://127.0.0.1:9090/mcp
 | `logs/` | JSONL 审计和运行日志 |
 | `skills/` | 可选的本地 Skill 根目录 |
 | `workspaces.example.yaml` | Workspace 配置示例 |
-| `state/mcpx.db` | Remote Session、Changeset、Task、操作、快照和产物索引 |
+| `state/mcpx.db` | Remote Session、Edit、Task、Plan、操作、快照和产物索引 |
 | `tasks/` | 持久终端 Task 的日志文件 |
 
 查看版本和命令帮助：
@@ -163,7 +163,7 @@ limits:
   max_result_bytes: 262144
 ```
 
-默认值包括：监听 `127.0.0.1:9090`、文件读取上限 1 MiB、单次 Changeset
+默认值包括：监听 `127.0.0.1:9090`、文件读取上限 1 MiB、单次 Edit
 最多 20 个文件和 2000 行真实差异、工具内联结果上限 256 KiB、终端、Skill
 和上游 MCP 发现默认启用。
 
@@ -213,7 +213,7 @@ security:
 ### 状态保留
 
 `state.retention` 负责定期回收过期的观测、Task 日志、快照和临时记录。
-活跃会话、未完成 Changeset/Plan、未过期确认、有效幂等记录和仍被引用的快照
+活跃会话、未完成 Plan、未过期确认、有效幂等记录和仍被引用的快照
 会受到保护。保留策略只在全局 `config.yaml` 中生效。
 
 ## 接入 MCP 客户端
@@ -305,62 +305,47 @@ curl -sS -m 5 \
 ## 公开工具
 
 `tools/list` 是工具名称、描述、参数 Schema 和 Annotation 的唯一权威来源。
-当前公开工具共 31 个：
+当前公开工具共 17 个，分为 10 个 core tools 和 7 个 support tools：
 
 | 领域 | 工具 | 主要用途 |
 | --- | --- | --- |
-| Workspace | `workspace_list` | 列出已注册项目 |
-| Workspace | `workspace_observe` | 读取 `changes`、`snapshot`、`diff`、`watch`、`memory` |
-| Workspace | `workspace_history_read` | 按事件、请求、操作、Task、Changeset、时间和关键词查询历史 |
-| Operation | `operation_batch` | 并发或按依赖 DAG 执行多个公开工具 |
-| Operation | `operation_manage` | 查询、等待、读取结果、取消和恢复异步操作 |
-| Session | `session_open` | 创建或恢复 Remote Session |
-| Session | `session_read` | 读取会话列表、摘要和事件 |
-| Session | `session_transition` | 更新、接力、接入或关闭会话 |
-| Source | `source_read` | 文件、搜索、列表和上下文读取；`view` 为 `file/search/list/context` |
-| Change | `change_prepare` | 校验文件操作并生成 Changeset 草稿，可按请求直接应用 |
-| Change | `change_read` | 读取 Changeset diff 或历史 |
-| Change | `change_discard` | 丢弃未应用草稿 |
-| Change | `change_apply` | 应用已准备的 Changeset |
-| Change | `change_revert` | 回滚已应用的 Changeset |
-| Command | `command_run` | 执行命令或项目 Task |
-| Task | `task_read` | 读取 Task 列表、状态、日志、端口和诊断 |
-| Task | `task_control` | attach、stop 或向 Task 写入 stdin |
-| Progress | `progress_report` | 记录公开的阶段、结果、证据和下一步 |
-| Plan | `plan_create` | 创建持久化开发计划 |
-| Plan | `plan_read` | 读取计划和任务状态 |
-| Plan | `plan_transition` | 开始、完成、阻塞、重新规划或交付计划 |
-| Runtime | `runtime_read` | 读取能力、项目摘要和适用指令 |
-| Environment | `environment_read` | 读取当前环境或比较环境快照 |
-| Environment | `environment_snapshot_create` | 保存环境快照 |
-| Extension | `extension_discover` | 发现或描述 Skill 与上游 MCP |
-| Extension | `skill_call` | 调用已发现的 Skill |
-| Extension | `mcp_call` | 调用已发现的上游 MCP 工具 |
-| Artifact | `artifact_read` | 列出或读取 Remote Session 产物 |
-| Artifact | `artifact_register` | 注册 Workspace 文件为产物 |
-| Screen | `screenshot_capture` | 截取显示器或区域 |
-| Secret | `secret_provide` | 提供仅驻留内存的 Secret |
+| Core | `session` | open、attach、close Remote Session |
+| Core | `read` | 文件、搜索、列表、上下文和环境读取 |
+| Core | `edit` | 精确 replacement、批量编辑、原子写和格式保留 |
+| Core | `observe` | session、task、history、changes、logs、diff 观察 |
+| Core | `execute` | 命令或项目 Task 执行，以及 attach、stop、stdin |
+| Core | `plan` | create、read、advance、complete、block、replan、deliver |
+| Core | `artifact` | 产物登记、列表和分片读取 |
+| Core | `discover` | 显式发现 Skill 或上游 MCP，并签发 discovery lease |
+| Core | `skill_call` | 调用已由 `discover` 返回的 Skill |
+| Core | `mcp_call` | 调用已由 `discover` 返回的上游 MCP 工具 |
+| Support | `operation_batch` | 并发或按依赖 DAG 执行多个工具 |
+| Support | `operation_manage` | 查询、等待、读取结果、取消和恢复异步操作 |
+| Support | `runtime_read` | 读取能力、项目摘要和适用指令 |
+| Support | `environment_read` | 读取当前环境或比较环境快照 |
+| Support | `environment` | 保存环境快照 |
+| Support | `screenshot_capture` | 截取显示器或区域 |
+| Support | `secret_provide` | 提供仅驻留内存的 Secret |
 
-旧的 `file_read`、`context_query`、`change_execute`、`command_execute` 和
-`approval_manage` 不属于当前公开工具面。文件读取统一使用 `source_read`，
-文件修改使用 Changeset 工具，命令执行使用 `command_run`。
+所有有状态工具统一使用完整的 `remote_session_id`；`tools/list`、session
+bootstrap、capability manifest 和 recovery action 使用同一组名称与 Schema。
 
 ## 推荐交互流程
 
 ### 1. 建立会话和能力缓存
 
-1. Workspace 未知时调用 `workspace_list`。
-2. 调用 `session_open`，保存返回的完整 `remote_session_id`。
+1. Workspace 已知时直接调用 `session(action="open")`。
+2. 保存返回的完整 `remote_session_id`；新客户端用 `session(action="attach")` 接力。
 3. 调用 `runtime_read(view="capabilities")` 获取当前能力和工具 Schema。
 4. 缓存 `tool_schema_revision`、`capability_manifest_revision`、
    `guidance_revision`、`instruction_revision`、`skill_revision` 和 `mcp_revision`。
-5. 后续 `session_open` 或 `runtime_read` 传 `known_revisions`，已知版本未变化时
+5. 后续 `session(action="open")` 或 `runtime_read` 传 `known_revisions`，已知版本未变化时
    直接复用本地缓存。
 
 每次重要调用都应提供 `purpose`；`intent` 仍作为兼容别名接受。
 下一次工具调用可以提供 `progress_summary`，写入上一调用已验证的结果和下一步，
-不要写入隐藏思维链。没有下一次工具调用、需要等待用户或发生阻塞时，使用
-`progress_report`。
+不要写入隐藏思维链。没有下一次工具调用、需要等待用户或发生阻塞时，直接在响应中
+说明状态和下一步。
 
 ### 2. 读取源码
 
@@ -374,22 +359,23 @@ curl -sS -m 5 \
 }
 ```
 
-`source_read(view="file")` 返回：
+`read(view="file")` 返回：
 
-- `sha256`：后续 Changeset 的 `base_sha256`。
+- `sha256`：后续 edit 的 `base_sha256`，始终针对原始文件字节。
 - `format.charset`：字符集，例如 `utf-8`。
 - `format.bom`：BOM 状态。
 - `format.line_ending` 和 `line_ending_counts`：`LF`、`CRLF`、`CR` 或 `mixed`。
 - `format.final_newline`：文件是否以换行符结尾。
 - `truncated`、`offset`、`limit` 和 `next_action`：窗口读取状态。
 
-生成变更时必须保留这些格式元数据。完整预览使用单个 `path` 和
+生成变更时必须保留这些格式元数据。带 UTF-16 BOM 的文件会先以 Unicode 文本呈现，
+写回时恢复原字符集和 BOM。完整预览使用单个 `path` 和
 `mode="full"`；完整模式返回 `mime_type`、完整 SHA-256 和原始格式。源码扩展名
 优先按文本处理，例如 TypeScript 返回 `text/typescript`，不会因系统 MIME 表
 把 `.ts` 误判为 `video/mp2t`。图片使用 MCP `ImageContent`，二进制文件使用
 Base64 数据。
 
-已知多个文件时，使用同一次 `source_read(view="file", items=[...])` 批量读取，
+已知多个文件时，使用同一次 `read(view="file", items=[...])` 批量读取，
 并通过 `max_total_bytes` 控制总预算。搜索、列表和上下文读取分别使用
 `view="search"`、`view="list"` 和 `view="context"`，不要为了确认一个已知路径
 先重复列目录。
@@ -399,77 +385,87 @@ Base64 数据。
 默认修改路径如下：
 
 ```text
-source_read → change_prepare → change_read(diff) → change_apply
+read(view="file") → edit → observe(view="changes")
 ```
 
-其中：
-
-- `change_prepare` 默认只生成 draft，不直接改 Workspace。
-- 用户已经明确授权且希望减少往返时，可以传 `apply=true`；策略或语义确认
-  仍要求后续确认。
-- `change_read(view="diff")` 用于审阅文件变更，完整 Diff 也可通过 Resource 读取。
-- `change_apply` 必须原样携带 `changeset_id` 和 `expected_digest`。
-- `change_discard` 用于放弃旧草稿，避免反复读取历史清理状态。
-- `change_revert` 用于回滚已应用的 Changeset。
+`edit` 接收 `edits[]`，支持 create、update、delete、rename；update 优先使用
+精确唯一 `replacements`。同一请求带 `idempotency_key` 时，重试返回原终态，
+参数变化返回 `IDEMPOTENCY_CONFLICT`。默认只返回有界 diff 预览；需要完整内容时
+使用 `observe(view="diff", edit_id, offset, limit)` 分片读取。
 
 示例：
 
 ```json
 {
   "remote_session_id": "rs_...",
-  "summary": "更新首页标题",
   "purpose": "根据用户要求修改首页标题",
   "idempotency_key": "req-update-home-title-1",
-  "operations": [
+  "edits": [
     {
       "operation": "update",
       "path": "src/App.vue",
       "base_sha256": "sha256:...",
-      "patch": "@@ -8,1 +8,1 @@\n-  <h1>旧标题</h1>\n+  <h1>新标题</h1>"
+      "replacements": [
+        {"match": "<h1>旧标题</h1>", "replacement": "<h1>新标题</h1>"}
+      ]
     }
   ]
 }
 ```
 
-`update.patch` 必须是标准 Unified Diff，不是 `apply_patch` 的
-`*** Begin Patch` 格式。也可以使用 `replace_exact`、`insert_before`、
-`insert_after`、`delete_exact` 和 `replace_range` 做局部精确修改。
-
-带相同 `idempotency_key` 的重试会复用原 Changeset。即使客户端没有传幂等键，
-同一 Remote Session 中相同摘要和内容摘要的活动 draft 也会复用，避免一次变更
-准备出多个重复草稿。
-
-普通变更会保持原文件字符集、BOM、换行和末尾换行状态。若变更导致文件格式
-改变，服务端返回 `FORMAT_CHANGED`；只有明确要求格式化时才使用 `format=true`。
-版本冲突、Patch 上下文不匹配和策略错误都会返回结构化 `error.code`、
-`retryable`、`recovery` 或 `next_action`，客户端应按结构化字段恢复，不要盲目
-重复提交同一请求。
+普通变更保持原文件字符集、BOM、换行和末尾换行状态。版本冲突、匹配失败和策略
+错误都会返回结构化 `error.code`、`retryable`、`recovery` 或 `next_action`。
 
 ### 4. 执行命令和 Task
 
 ```json
 {
   "remote_session_id": "rs_...",
+  "action": "run",
   "command": "go test ./internal/server -count=1",
-  "purpose": "验证本次服务端变更"
+  "purpose": "验证本次服务端变更",
+  "scope": "workspace",
+  "yield_time_ms": 10000
 }
 ```
 
-`command_run` 默认等待短命令完成；超过等待窗口时返回 `task_id`。后续应直接
+`execute(action="run")` 默认等待短命令完成；超过等待窗口时返回 `task_id`。后续
 使用已知 ID：
 
 ```text
-task_read(view="status", task_id="task_...")
-task_read(view="logs", task_id="task_...", stdout_offset=0, stderr_offset=0)
-task_control(operation="attach", task_id="task_...", yield_time_ms=30000)
+observe(view="status", task_id="task_...")
+observe(view="logs", task_id="task_...", stdout_offset=0, stderr_offset=0)
+execute(action="attach", task_id="task_...", yield_time_ms=30000)
 ```
 
-不要为了确认已知 Task 反复调用 `task_read(view="list")`。只有 Task ID 丢失或
-服务端明确返回 `not_found` 时才重新列出 Task。首次 list 返回
-`task_list_digest`，后续带 `known_task_digest`；摘要未变化时服务端返回
-`not_modified=true` 和空任务数组。
+长命令的状态和日志使用 observe 的 offset/next offset 续读；输出被截断时响应会
+直接给出下一次调用模板。`stop` 和 `stdin` 通过 `execute(action="stop|stdin")`
+完成，并重新执行权限与 Workspace 校验。
 
-### 5. 批量和异步操作
+### 5. Plan、Artifact 与扩展
+
+`plan(action="create|read|advance|complete|block|replan|deliver")` 只引用服务端
+返回的 `plan_id`、`task_id` 和结构化 evidence。典型路径是：
+
+```text
+plan(create) → plan(advance) → edit/execute → artifact(register) → plan(complete) → plan(deliver)
+```
+
+产物使用 `artifact(action="register|list|read")`；大文件按 byte offset 分片，
+文本响应保持 UTF-8 边界。
+
+Skill/MCP 必须先显式发现：
+
+```text
+discover(kind="skill", view="describe", name="...") → skill_call(... discovery_id, discovery_revision)
+discover(kind="mcp", view="describe", server="...", include_tools=true) → mcp_call(... discovery_id, discovery_revision)
+```
+
+跳过 discover 会得到 `DISCOVERY_REQUIRED`，其中明确包含
+`required_call_count=1`、`discovery_required=true` 和下一次 discover 参数；这次
+额外调用是公开的交互成本，不由服务端隐式完成。revision 失效时重新 discover。
+
+### 6. 批量和异步操作
 
 需要并行读取或执行多个相互独立的工具时使用 `operation_batch`；有依赖时在
 `depends_on` 中声明步骤 ID。使用 `operation_manage`：
@@ -484,7 +480,7 @@ operation_manage(action="result", operation_id="op_...")
 `operation_ids`，且仅支持 `status` 和 `result`，不能把它再次嵌套进
 `operation_batch`。
 
-当异步操作内部执行 `command_run` 时，MCPX 会等待其终端 Task 进入最终状态后
+当异步操作内部执行 `execute` 时，MCPX 会等待其终端 Task 进入最终状态后
 再记录 `operation.completed`。`wait` 和 `result` 返回的顶层结果及步骤结果
 会展开 MCP 包装，客户端不需要再解析嵌套的 `content[].text`。
 
@@ -501,11 +497,10 @@ operation_manage(action="result", operation_id="op_...")
 | `interrupted` | 执行被中断，但可根据返回 ID 查询状态 |
 | `failed` | 业务、策略、版本或运行时失败，应按结构化错误恢复 |
 
-大结果不会在多个字段中重复镜像。Changeset Diff、Task 日志和 Artifact 可通过
-以下 Resource URI 读取：
+大结果不会在多个字段中重复镜像。Task 日志和 Artifact 可通过以下 Resource URI
+读取；Edit Diff 使用 `observe(view="diff")` 分页：
 
 ```text
-mcpx://remote-sessions/{remote_session_id}/changesets/{changeset_id}/diff
 mcpx://remote-sessions/{remote_session_id}/tasks/{task_id}/logs
 mcpx://remote-sessions/{remote_session_id}/artifacts/{artifact_id}
 ```
@@ -538,7 +533,7 @@ mcpx://remote-sessions/{remote_session_id}/artifacts/{artifact_id}
 
 ```bash
 ./bin/mcpx-server workspace -format json -history 200 my-app
-./bin/mcpx-server workspace -detail -diff full -tool change_apply my-app
+./bin/mcpx-server workspace -detail -diff full -tool edit my-app
 ```
 
 文本模式按一次工具调用聚合为一个交互块，使用 `Read`、`Edited`、`Ran`、
@@ -549,7 +544,7 @@ ANSI 16 色。设置 `NO_COLOR=1` 关闭颜色，`COLORTERM=truecolor` 或 `24bi
 
 机器处理日志时使用 `--format json`，不要解析文本中的颜色、缩进或装饰边框。
 事件中保留 `event_id`、`sequence`、`request_id`、`operation_id`、`task_id`、
-`changeset_id`、状态、耗时、路径、命令和截断标志等字段。
+`edit_id`、状态、耗时、路径、命令和截断标志等字段。
 
 ## 安全与数据边界
 
@@ -559,7 +554,8 @@ ANSI 16 色。设置 `NO_COLOR=1` 关闭颜色，`COLORTERM=truecolor` 或 `24bi
 - Remote Session 使用 `viewer`、`editor`、`approver` 和 `owner` 角色。
 - 命令和文件都经过策略匹配；命令可允许、要求确认或拒绝，文件变更还会检查
   SHA-256、路径和差异预算。
-- `confirmation_token` 只表达用户对同一业务参数的语义确认，不是认证凭据。
+- `user_confirmed` 只表达用户对同一业务参数的语义确认；服务端保存待确认摘要，
+  不要求模型复制确认 token。
 - `secret_provide` 的明文值只在进程内短期使用，不写入 SQLite、Workspace 或日志。
 - SQLite、Task 日志、OAuth 客户端注册和 Token 密钥位于 `~/.mcpx/`，运行时使用
   受限文件权限；不要把真实 Token、密码或 Secret 写入仓库和命令字符串。
@@ -574,7 +570,7 @@ ANSI 16 色。设置 `NO_COLOR=1` 关闭颜色，`COLORTERM=truecolor` 或 `24bi
 ```text
 cmd/mcpx-server       服务入口、workspace 观测和 oauth-register
 internal/server       HTTP Gateway、公开工具和 Resource 注册
-internal/changeset    Changeset 准备、应用、回滚和历史
+internal/edit         Edit 解析、原子写、格式保留和变更摘要
 internal/operation    异步 Operation、依赖调度和结果分页
 internal/terminal     Task 生命周期、日志、端口和诊断
 internal/source       搜索、列表、上下文和批量读取

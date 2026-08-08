@@ -1,0 +1,102 @@
+// Package edit implements a lightweight, high-throughput file edit engine for
+// the clean-core MCP surface. It does not use the changeset journal path.
+package edit
+
+import "errors"
+
+// MaxChangedLines is the hard cap on total unified-diff changed lines
+// (insertions + deletions) for one ApplyBatch call.
+const MaxChangedLines = 1000
+
+// Operation names for a single file edit.
+const (
+	OpCreate = "create"
+	OpUpdate = "update"
+	OpDelete = "delete"
+	OpRename = "rename"
+)
+
+var (
+	ErrStale          = errors.New("file revision is stale")
+	ErrMatchNotFound  = errors.New("replacement match not found")
+	ErrMatchAmbiguous = errors.New("replacement match is ambiguous")
+	ErrTooManyChanges = errors.New("too many changed lines")
+	ErrInvalidInput   = errors.New("invalid edit input")
+	ErrUnsupportedOp  = errors.New("unsupported operation")
+	ErrTargetExists   = errors.New("create target already exists")
+	ErrTargetMissing  = errors.New("target does not exist")
+)
+
+// Replacement is one exact string substitution. Match must occur exactly once.
+type Replacement struct {
+	Match       string `json:"match"`
+	Replacement string `json:"replacement"`
+}
+
+// FileEdit is one path-level operation inside a batch.
+type FileEdit struct {
+	Path         string        `json:"path"`
+	Operation    string        `json:"operation"`
+	BaseSHA256   string        `json:"base_sha256,omitempty"`
+	Content      string        `json:"content,omitempty"`
+	NewPath      string        `json:"new_path,omitempty"`
+	Replacements []Replacement `json:"replacements,omitempty"`
+}
+
+// BatchRequest is one edit tool call worth of work.
+type BatchRequest struct {
+	WorkspaceRoot string
+	Edits         []FileEdit
+}
+
+// FileResult is the outcome for one path.
+type FileResult struct {
+	Path           string `json:"path"`
+	NewPath        string `json:"new_path,omitempty"`
+	Operation      string `json:"operation"`
+	OriginalSHA256 string `json:"original_sha256,omitempty"`
+	NewSHA256      string `json:"new_sha256,omitempty"`
+	ChangedLines   int    `json:"changed_lines"`
+	Diff           string `json:"diff,omitempty"`
+	Deleted        bool   `json:"deleted,omitempty"`
+}
+
+// BatchResult is the aggregate outcome.
+type BatchResult struct {
+	Results           []FileResult `json:"results"`
+	TotalChangedLines int          `json:"total_changed_lines"`
+	DiffSummary       string       `json:"diff_summary"`
+}
+
+// ApplyError carries structured recovery hints for tool handlers.
+type ApplyError struct {
+	Code    string
+	Message string
+	Path    string
+	Index   int // replacement index within file, or -1
+	Current string
+	// ChangedLines is the exact cumulative +/- count when validation reaches
+	// the batch limit. It stays zero for failures that occur before diffing.
+	ChangedLines int
+	Err          error
+}
+
+func (e *ApplyError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Message != "" {
+		return e.Message
+	}
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return e.Code
+}
+
+func (e *ApplyError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}

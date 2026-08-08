@@ -69,6 +69,14 @@ func (r *Runtime) secretEnvFromPayload(remoteSessionID string, payload map[strin
 }
 
 func (r *Runtime) terminalError(envReq envelope.Request, remoteSessionID, workspace, code, message string) (*mcp.CallToolResult, error) {
+	return r.terminalErrorWithCleanMode(envReq, remoteSessionID, workspace, code, message, false)
+}
+
+func (r *Runtime) terminalErrorForContext(ctx context.Context, envReq envelope.Request, remoteSessionID, workspace, code, message string) (*mcp.CallToolResult, error) {
+	return r.terminalErrorWithCleanMode(envReq, remoteSessionID, workspace, code, message, isCleanCoreRequest(ctx))
+}
+
+func (r *Runtime) terminalErrorWithCleanMode(envReq envelope.Request, remoteSessionID, workspace, code, message string, clean bool) (*mcp.CallToolResult, error) {
 	status := envelope.StatusError
 	if code == "denied" || code == "disabled" || code == "forbidden" {
 		status = envelope.StatusDenied
@@ -78,10 +86,17 @@ func (r *Runtime) terminalError(envReq envelope.Request, remoteSessionID, worksp
 	switch code {
 	case "task_not_found", "task_list_error", "not_found":
 		if strings.Contains(strings.ToLower(code+" "+message), "task") {
-			addRecoveryAction(&response, "task_manage", "refresh the available Task identifiers before retrying", map[string]any{
-				"remote_session_id": remoteSessionID,
-				"action":            "list",
-			})
+			if clean {
+				addRecoveryAction(&response, "observe", "refresh the available Task identifiers before retrying", map[string]any{
+					"remote_session_id": remoteSessionID,
+					"view":              "status",
+				})
+			} else {
+				addRecoveryAction(&response, "task_manage", "refresh the available Task identifiers before retrying", map[string]any{
+					"remote_session_id": remoteSessionID,
+					"action":            "list",
+				})
+			}
 		}
 	}
 	return r.resultJSON(response)
@@ -248,6 +263,11 @@ func (r *Runtime) toolMCPCall(ctx context.Context, req *mcp.CallToolRequest) (*m
 	serverName, _ := envReq.Payload["server"].(string)
 	toolName, _ := envReq.Payload["tool"].(string)
 	args, _ := envReq.Payload["arguments"].(map[string]any)
+	if isCleanCoreRequest(ctx) {
+		if result, preflightErr := r.preflightCleanMCPCall(ctx, req); result != nil || preflightErr != nil {
+			return result, preflightErr
+		}
+	}
 	manager, err := r.mcpManagerForWorkspace(remote.WorkspacePath)
 	if err != nil {
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "mcp_config_error", err.Error())
@@ -262,6 +282,19 @@ func (r *Runtime) toolMCPCall(ctx context.Context, req *mcp.CallToolRequest) (*m
 	}
 	// serialize result
 	b, _ := json.Marshal(res)
+	maxResultBytes := config.MaxResultBytes(eff.Limits)
+	if maxResultBytes > 0 && len(b) > maxResultBytes {
+		response := envelope.Fail(envelope.StatusError, envReq.RequestID, remote.WorkspaceName, nil, "MCP_RESULT_TOO_LARGE", "upstream MCP result exceeds the configured response budget")
+		response.RemoteSessionID = remote.ID
+		if response.Error != nil {
+			response.Error.Details["result_bytes"] = len(b)
+			response.Error.Details["max_result_bytes"] = maxResultBytes
+			addRecoveryAction(&response, "mcp_call", "使用上游工具的分页或 limit 参数缩小结果后重试", map[string]any{
+				"remote_session_id": remote.ID, "server": serverName, "tool": toolName,
+			})
+		}
+		return r.resultJSON(response)
+	}
 	var data any
 	_ = json.Unmarshal(b, &data)
 	if upstream, ok := res.(*mcp.CallToolResult); ok && upstream.IsError {
@@ -320,10 +353,10 @@ func skillItems(skills []skill.Skill) []map[string]any {
 			"revision":         revision,
 			"priority":         (index + 1) * 10,
 			"required":         forced,
-			"trigger":          map[string]any{"kind": "explicit", "tool": "extension_discover"},
+			"trigger":          map[string]any{"kind": "explicit", "tool": "discover"},
 			"invocation": map[string]any{
-				"tool": "extension_discover", "requires_remote_session": true,
-				"arguments": map[string]any{"action": "call", "kind": "skill", "name": s.Manifest.Name, "arguments": map[string]any{}},
+				"tool": "skill_call", "requires_remote_session": true,
+				"arguments": map[string]any{"name": s.Manifest.Name, "arguments": map[string]any{}, "discovery_required": true},
 			},
 		})
 	}
@@ -359,6 +392,11 @@ func (r *Runtime) toolSkillExecute(ctx context.Context, req *mcp.CallToolRequest
 	if !ok {
 		return r.skillNotFound(envReq, remote.ID, remote.WorkspaceName, name)
 	}
+	if isCleanCoreRequest(ctx) {
+		if result, preflightErr := r.preflightCleanSkillCall(ctx, req); result != nil || preflightErr != nil {
+			return result, preflightErr
+		}
+	}
 	out, err := skill.Execute(ctx, sk, remote.WorkspacePath, args)
 	if err != nil {
 		response := envelope.Fail(envelope.StatusError, envReq.RequestID, remote.WorkspaceName, out, "skill_error", err.Error())
@@ -372,4 +410,113 @@ func (r *Runtime) toolSkillExecute(ctx context.Context, req *mcp.CallToolRequest
 	}
 	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: firstString(toolInvocationName(ctx), "skill_call"), Status: "ok", Detail: map[string]any{"name": name}})
 	return compactToolResult(out, fmt.Sprintf("Skill %s completed.", name)), nil
+}
+
+func mcpToolInLease(tools []*mcp.Tool, wanted string) bool {
+	_, ok := mcpToolForLease(tools, wanted)
+	return ok
+}
+
+func mcpToolForLease(tools []*mcp.Tool, wanted string) (*mcp.Tool, bool) {
+	for _, tool := range tools {
+		if tool != nil && tool.Name == wanted {
+			return tool, true
+		}
+	}
+	return nil, false
+}
+
+func discoverySchemaMap(raw any) map[string]any {
+	if raw == nil {
+		return nil
+	}
+	if schema, ok := raw.(map[string]any); ok {
+		return schema
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var schema map[string]any
+	if json.Unmarshal(encoded, &schema) != nil {
+		return nil
+	}
+	return schema
+}
+
+func validateDiscoveryArguments(schema map[string]any, args map[string]any) error {
+	if len(schema) == 0 {
+		return nil
+	}
+	if args == nil {
+		args = map[string]any{}
+	}
+	if schemaType, _ := schema["type"].(string); schemaType != "" && schemaType != "object" {
+		return fmt.Errorf("arguments schema must be an object, got %q", schemaType)
+	}
+	var required []string
+	switch rawRequired := schema["required"].(type) {
+	case []any:
+		for _, raw := range rawRequired {
+			if field, ok := raw.(string); ok {
+				required = append(required, field)
+			}
+		}
+	case []string:
+		required = rawRequired
+	}
+	for _, field := range required {
+		if field != "" {
+			if _, exists := args[field]; !exists {
+				return fmt.Errorf("missing required argument %q", field)
+			}
+		}
+	}
+	properties, _ := schema["properties"].(map[string]any)
+	additional, _ := schema["additionalProperties"].(bool)
+	if !additional && len(properties) > 0 {
+		for key := range args {
+			if _, exists := properties[key]; !exists {
+				return fmt.Errorf("unknown argument %q", key)
+			}
+		}
+	}
+	for key, value := range args {
+		property, _ := properties[key].(map[string]any)
+		if property == nil {
+			continue
+		}
+		if err := validateDiscoveryArgumentType(key, value, stringPayload(property, "type")); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateDiscoveryArgumentType(name string, value any, expected string) error {
+	valid := true
+	switch expected {
+	case "string":
+		_, valid = value.(string)
+	case "number", "integer":
+		switch value.(type) {
+		case int, int64, float64, float32, json.Number:
+		default:
+			valid = false
+		}
+	case "boolean":
+		_, valid = value.(bool)
+	case "array":
+		switch value.(type) {
+		case []any, []string:
+		default:
+			valid = false
+		}
+	case "object":
+		_, valid = value.(map[string]any)
+	}
+	if !valid {
+		return fmt.Errorf("argument %q must be %s", name, expected)
+	}
+	return nil
 }

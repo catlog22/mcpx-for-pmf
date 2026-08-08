@@ -24,6 +24,7 @@ const (
 type runtimeContextKey struct{}
 type toolInvocationNameKey struct{}
 type operationChildKey struct{}
+type cleanCoreRequestKey struct{}
 
 // RuntimeContext is gateway-owned lifecycle metadata. It is never decoded
 // from tool arguments and is not part of an MCP input schema.
@@ -150,6 +151,15 @@ func withToolInvocationName(ctx context.Context, name string) context.Context {
 func toolInvocationName(ctx context.Context) string {
 	value, _ := ctx.Value(toolInvocationNameKey{}).(string)
 	return strings.TrimSpace(value)
+}
+
+func withCleanCoreRequest(ctx context.Context) context.Context {
+	return context.WithValue(ctx, cleanCoreRequestKey{}, true)
+}
+
+func isCleanCoreRequest(ctx context.Context) bool {
+	value, _ := ctx.Value(cleanCoreRequestKey{}).(bool)
+	return value
 }
 
 func withOperationChild(ctx context.Context) context.Context {

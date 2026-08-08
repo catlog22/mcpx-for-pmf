@@ -76,6 +76,21 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 	properties["progress_summary"] = progressSummary
 	raw["type"] = "object"
 	raw["properties"] = properties
+	if branches, ok := raw["oneOf"].([]any); ok {
+		for _, rawBranch := range branches {
+			branch, ok := rawBranch.(map[string]any)
+			if !ok {
+				continue
+			}
+			branchProperties, _ := branch["properties"].(map[string]any)
+			if branchProperties == nil {
+				branchProperties = map[string]any{}
+			}
+			branchProperties["purpose"] = purpose
+			branchProperties["progress_summary"] = progressSummary
+			branch["properties"] = branchProperties
+		}
+	}
 	if encoded, marshalErr := json.Marshal(raw); marshalErr == nil {
 		tool.InputSchema = json.RawMessage(encoded)
 	}
@@ -121,6 +136,9 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 		}
 		callCtx = withRuntimeContext(callCtx, runtime)
 		callCtx = withToolInvocationName(callCtx, name)
+		if isCleanPublicTool(name) {
+			callCtx = withCleanCoreRequest(callCtx)
+		}
 		internalOperationStep := isOperationChild(callCtx)
 		observationRequest, observationParseErr := r.parseEnv(callCtx, req)
 		if !internalOperationStep && observationParseErr == nil && r.observation != nil {

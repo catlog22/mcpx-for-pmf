@@ -53,7 +53,7 @@ func submitOperationForTest(t *testing.T, rt *Runtime, session remotesession.Ses
 		WorkspaceName:   session.WorkspaceName,
 		RequestID:       "req_batch_test_" + stepID,
 		Purpose:         "批量查询测试",
-		Steps:           []operation.StepSpec{{ID: stepID, Tool: "source_read"}},
+		Steps:           []operation.StepSpec{{ID: stepID, Tool: "read"}},
 	}, func(context.Context, operation.ExecuteInput) operation.ExecuteResult {
 		return operation.ExecuteResult{Result: []byte(result)}
 	})
@@ -87,7 +87,7 @@ func TestAsyncToolReturnsOperationAndWaitsForResult(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	session := operationTestSession(t, rt, "demo")
 
-	accepted := callOperationTool(t, rt, "source_read", map[string]any{
+	accepted := callOperationTool(t, rt, "read", map[string]any{
 		"session_id": session.ID, "purpose": "异步读取工作区", "execution_mode": "async", "view": "list", "limit": 5,
 	})
 	if accepted["status"] != "accepted" {
@@ -200,8 +200,8 @@ func TestOperationBatchRunsAndRecordsChildSteps(t *testing.T) {
 		"session_id": session.ID,
 		"purpose":    "并行读取工作区目录",
 		"operations": []any{
-			map[string]any{"id": "list_a", "tool": "source_read", "arguments": map[string]any{"view": "list", "limit": 5}},
-			map[string]any{"id": "list_b", "tool": "source_read", "arguments": map[string]any{"view": "list", "limit": 5}},
+			map[string]any{"id": "list_a", "tool": "read", "arguments": map[string]any{"view": "list", "limit": 5}},
+			map[string]any{"id": "list_b", "tool": "read", "arguments": map[string]any{"view": "list", "limit": 5}},
 		},
 	})
 	if accepted["status"] != "accepted" {
@@ -466,7 +466,7 @@ func TestOperationManageWaitTimeoutDoesNotCancel(t *testing.T) {
 	session := operationTestSession(t, rt, "demo")
 	record, err := rt.operations.Submit(context.Background(), operation.SubmitSpec{
 		RemoteSessionID: session.ID, WorkspaceName: "demo", RequestID: "req_test", Purpose: "等待测试",
-		Steps: []operation.StepSpec{{ID: "wait", Tool: "source_read"}},
+		Steps: []operation.StepSpec{{ID: "wait", Tool: "read"}},
 	}, func(ctx context.Context, input operation.ExecuteInput) operation.ExecuteResult {
 		select {
 		case <-time.After(100 * time.Millisecond):

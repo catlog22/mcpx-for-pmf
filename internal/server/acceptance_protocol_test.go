@@ -214,11 +214,10 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		}
 	}
 	expectedTools := []string{
-		"workspace_read", "session", "session_read",
+		"session", "read", "edit", "observe",
 		"operation_batch", "operation_manage",
-		"source_read", "change", "change_read", "command_run", "task_read", "task",
-		"plan", "plan_read", "runtime_read", "environment_read", "environment",
-		"extension_discover", "skill_call", "mcp_call", "artifact_read", "artifact", "screenshot_capture", "secret_provide",
+		"execute", "plan", "artifact", "discover", "skill_call", "mcp_call",
+		"runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide",
 	}
 	if len(byName) != len(expectedTools) {
 		t.Fatalf("tools/list count=%d, want %d: %v", len(byName), len(expectedTools), byName)
@@ -252,45 +251,44 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 			}
 		}
 	}
-	prepareTool := byName["change"]
-	schemaJSON, err := json.Marshal(prepareTool.InputSchema)
+	editTool := byName["edit"]
+	schemaJSON, err := json.Marshal(editTool.InputSchema)
 	if err != nil {
 		t.Fatal(err)
 	}
 	schemaText := string(schemaJSON)
-	for _, needle := range []string{"base_sha256", "patch", "content", "operations"} {
+	for _, needle := range []string{"remote_session_id", "base_sha256", "content", "replacements", "edits"} {
 		if !strings.Contains(schemaText, needle) {
-			t.Fatalf("change schema missing %q: %s", needle, schemaText)
+			t.Fatalf("edit schema missing %q: %s", needle, schemaText)
 		}
 	}
-	// operations enum should advertise create/update/rename/delete (and exact ops).
-	if !strings.Contains(schemaText, "update") || !strings.Contains(schemaText, "create") {
-		t.Fatalf("change operations enum incomplete: %s", schemaText)
+	if !strings.Contains(schemaText, "update") || !strings.Contains(schemaText, "create") || !strings.Contains(schemaText, "rename") || !strings.Contains(schemaText, "delete") {
+		t.Fatalf("edit operation enum incomplete: %s", schemaText)
 	}
 	if strings.Contains(schemaText, "user_confirmed") {
-		t.Fatalf("change exposes removed compatibility field user_confirmed: %s", schemaText)
+		t.Fatalf("edit exposes removed compatibility field user_confirmed: %s", schemaText)
 	}
-	commandSchema, _ := json.Marshal(byName["command_run"].InputSchema)
-	for _, required := range []string{"session_id", "purpose"} {
+	commandSchema, _ := json.Marshal(byName["execute"].InputSchema)
+	for _, required := range []string{"remote_session_id", "purpose"} {
 		if !strings.Contains(string(commandSchema), `"`+required+`"`) {
-			t.Fatalf("command_run schema missing %q: %s", required, commandSchema)
+			t.Fatalf("execute schema missing %q: %s", required, commandSchema)
 		}
 	}
 	if !strings.Contains(string(commandSchema), "scope") {
-		t.Fatalf("command_run schema missing scope: %s", commandSchema)
+		t.Fatalf("execute schema missing scope: %s", commandSchema)
 	}
-	contextSchema, _ := json.Marshal(byName["source_read"].InputSchema)
+	contextSchema, _ := json.Marshal(byName["read"].InputSchema)
 	for _, removed := range []string{"pattern", "max_files"} {
 		if strings.Contains(string(contextSchema), removed) {
-			t.Fatalf("source_read exposes removed compatibility field %q: %s", removed, contextSchema)
+			t.Fatalf("read exposes removed compatibility field %q: %s", removed, contextSchema)
 		}
 	}
-	if !strings.Contains(string(contextSchema), `"purpose"`) {
-		t.Fatalf("source_read schema must expose purpose: %s", contextSchema)
+	if !strings.Contains(string(contextSchema), `"mode"`) || !strings.Contains(string(contextSchema), `"items"`) {
+		t.Fatalf("read schema must expose mode and items: %s", contextSchema)
 	}
-	extensionSchema, _ := json.Marshal(byName["extension_discover"].InputSchema)
+	extensionSchema, _ := json.Marshal(byName["discover"].InputSchema)
 	if !strings.Contains(string(extensionSchema), "view") || !strings.Contains(string(extensionSchema), "include_tools") || !strings.Contains(string(extensionSchema), "server") {
-		t.Fatalf("extension_discover schema incomplete: %s", extensionSchema)
+		t.Fatalf("discover schema incomplete: %s", extensionSchema)
 	}
 	planSchema, _ := json.Marshal(byName["plan"].InputSchema)
 	for _, forbidden := range []string{"presentation", "renderer", "show_source", "density"} {
@@ -307,13 +305,24 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 
 	rawCall := func(name string, args map[string]any) map[string]any {
 		t.Helper()
-		if _, exists := args["purpose"]; !exists {
-			withPurpose := make(map[string]any, len(args)+1)
-			for key, value := range args {
-				withPurpose[key] = value
+		if name == "edit" {
+			if _, exists := args["purpose"]; !exists {
+				withPurpose := make(map[string]any, len(args)+1)
+				for key, value := range args {
+					withPurpose[key] = value
+				}
+				args = withPurpose
+				args["purpose"] = "acceptance edit"
 			}
-			withPurpose["purpose"] = "acceptance operation"
-			args = withPurpose
+		} else if name != "session" && name != "read" && name != "observe" {
+			if _, exists := args["purpose"]; !exists {
+				withPurpose := make(map[string]any, len(args)+1)
+				for key, value := range args {
+					withPurpose[key] = value
+				}
+				withPurpose["purpose"] = "acceptance operation"
+				args = withPurpose
+			}
 		}
 		res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
 		if err != nil {
@@ -369,41 +378,39 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	}
 	normalizeCall := func(name string, input map[string]any) (string, map[string]any) {
 		args := copyArgs(input)
-		if _, exists := args["session_id"]; !exists {
-			if value, exists := args["remote_session_id"]; exists {
-				args["session_id"] = value
+		if value, exists := args["session_id"]; exists {
+			if _, hasRemote := args["remote_session_id"]; !hasRemote {
+				args["remote_session_id"] = value
 			}
+			delete(args, "session_id")
 		}
-		delete(args, "remote_session_id")
 		if _, exists := args["purpose"]; !exists {
 			if value, exists := args["intent"]; exists {
 				args["purpose"] = value
 			}
 		}
-		if _, exists := args["purpose"]; !exists {
-			args["purpose"] = "acceptance operation"
-		}
 		delete(args, "intent")
 		switch name {
 		case "file_read":
-			name, args["view"] = "source_read", "file"
+			name, args["view"] = "read", "file"
 		case "context_query":
 			action, _ := args["action"].(string)
 			view := map[string]string{"list": "list", "query": "context", "search": "search"}[action]
 			if view == "" {
 				view = "search"
 			}
-			name, args["view"] = "source_read", view
+			name, args["view"] = "read", view
 			delete(args, "action")
 		case "command_execute":
-			name = "command_run"
+			name = "execute"
+			args["action"] = "run"
 		case "task_manage":
 			action, _ := args["action"].(string)
 			if action == "attach" || action == "stop" || action == "stdin" {
-				name = "task"
+				name = "execute"
 				args["action"] = action
 			} else {
-				name, args["view"] = "task_read", action
+				name, args["view"] = "observe", action
 				delete(args, "action")
 			}
 		case "plan_manage":
@@ -413,8 +420,17 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 				name = "plan"
 				args["action"] = "create"
 			case "get":
-				name = "plan_read"
-				delete(args, "action")
+				name = "plan"
+				args["action"] = "read"
+			case "start_task":
+				name = "plan"
+				args["action"] = "advance"
+			case "complete_task":
+				name = "plan"
+				args["action"] = "complete"
+			case "block_task":
+				name = "plan"
+				args["action"] = "block"
 			default:
 				name = "plan"
 				args["action"] = action
@@ -423,52 +439,44 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 			name, args["view"] = "runtime_read", args["action"]
 			delete(args, "action")
 		case "change_execute":
-			if revertID, exists := args["revert_changeset_id"]; exists {
-				name = "change"
-				args["changeset_id"] = revertID
-				args["action"] = "revert"
-				delete(args, "revert_changeset_id")
-				delete(args, "apply")
-			} else if _, exists := args["changeset_id"]; exists {
-				name = "change"
-				args["action"] = "apply"
-				delete(args, "apply")
-				delete(args, "user_confirmed")
-			} else {
-				name = "change"
-				args["action"] = "prepare"
-				delete(args, "apply")
+			name = "edit"
+			if _, exists := args["purpose"]; !exists {
+				if summary, ok := args["summary"].(string); ok && strings.TrimSpace(summary) != "" {
+					args["purpose"] = summary
+				}
 			}
+			if operations, ok := args["operations"].([]any); ok {
+				edits := make([]any, 0, len(operations))
+				for _, raw := range operations {
+					operation, _ := raw.(map[string]any)
+					if operation == nil {
+						continue
+					}
+					mapped := copyArgs(operation)
+					if mapped["operation"] == "replace_exact" {
+						mapped["operation"] = "update"
+						mapped["replacements"] = []any{map[string]any{
+							"match": mapped["match"], "replacement": mapped["replacement"],
+						}}
+						delete(mapped, "match")
+						delete(mapped, "replacement")
+						delete(mapped, "occurrence")
+					}
+					edits = append(edits, mapped)
+				}
+				args["edits"] = edits
+			}
+			delete(args, "operations")
+			delete(args, "summary")
+			delete(args, "changeset_id")
+			delete(args, "expected_digest")
+			delete(args, "revert_changeset_id")
+			delete(args, "confirmation_token")
 		}
 		return name, args
 	}
 	call := func(name string, input map[string]any) map[string]any {
 		publicName, args := normalizeCall(name, input)
-		if name == "change_execute" {
-			if _, hasOperations := args["operations"]; hasOperations {
-				apply, _ := input["apply"].(bool)
-				prepared := rawCall("change", args)
-				if !apply || prepared["ok"] != true {
-					return prepared
-				}
-				preparedData, _ := prepared["data"].(map[string]any)
-				if preparedData["idempotent_replay"] == true {
-					return prepared
-				}
-				applyArgs := map[string]any{
-					"session_id": args["session_id"], "changeset_id": preparedData["changeset_id"],
-					"expected_digest": preparedData["digest"], "purpose": args["purpose"],
-				}
-				if value, exists := args["format"]; exists {
-					applyArgs["format"] = value
-				}
-				if value, exists := args["verify"]; exists {
-					applyArgs["verify"] = value
-				}
-				applyArgs["action"] = "apply"
-				return rawCall("change", applyArgs)
-			}
-		}
 		return rawCall(publicName, args)
 	}
 
@@ -491,7 +499,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	guidance, _ := openData["agent_guidance"].(map[string]any)
 	routing, _ := guidance["tool_routing"].(map[string]any)
 	responseContract, _ := guidance["response_contract"].(map[string]any)
-	if guidance["version"] != agentGuidanceVersion || !containsAnyString(routing["modify_files"], "change") || responseContract["required"] != true {
+	if guidance["version"] != agentGuidanceVersion || !containsAnyString(routing["modify_files"], "edit") || responseContract["required"] != true {
 		t.Fatalf("session_open guidance missing or incomplete: %+v", guidance)
 	}
 	remoteSession, _ := openData["remote_session"].(map[string]any)
@@ -499,8 +507,8 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	if remoteID == "" {
 		t.Fatalf("session_open missing remote_session.id: %+v", openData)
 	}
-	if openData["session_id"] != remoteID {
-		t.Fatalf("session_open missing top-level session_id: %+v", openData)
+	if openData["remote_session_id"] != remoteID {
+		t.Fatalf("session_open missing top-level remote_session_id: %+v", openData)
 	}
 	revs, _ := openData["revisions"].(map[string]any)
 	for _, key := range []string{
@@ -749,7 +757,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		t.Fatalf("long command Task could not be stopped: %+v", stopped)
 	}
 
-	// --- A10/A13 change_execute + diff summary ---
+	// --- A10/A13 clean edit + inline diff summary ---
 	sum := sha256.Sum256([]byte(files["demo.go"]))
 	base := fmt.Sprintf("sha256:%x", sum[:])
 	executed := call("change_execute", map[string]any{
@@ -765,73 +773,45 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 			"occurrence": "one",
 		}},
 	})
-	// change_execute returns structured DTO (possibly as data wrapper)
 	execData, _ := executed["data"].(map[string]any)
 	if execData == nil {
-		t.Fatalf("change_execute: %+v", executed)
+		t.Fatalf("edit: %+v", executed)
 	}
-	if execData["applied"] != true {
-		// may need confirmation in some policies — default file policy allows
-		if executed["status"] == "need_confirmation" {
-			t.Fatalf("ordinary src update should not need confirmation: %+v", executed)
-		}
-		t.Fatalf("change_execute not applied: %+v", execData)
+	if !statusOK(executed) {
+		t.Fatalf("edit was not applied: %+v", executed)
 	}
-	if execData["changeset_id"] == "" || execData["digest"] == "" {
-		t.Fatalf("missing changeset identity: %+v", execData)
+	if execData["total_changed_lines"] != float64(2) && execData["total_changed_lines"] != 2 {
+		t.Fatalf("unexpected changed line count: %+v", execData)
 	}
-	diffMeta, _ := execData["diff"].(map[string]any)
-	if diffMeta["mode"] != "inline" && diffMeta["mode"] != "resource" {
-		t.Fatalf("diff mode: %+v", diffMeta)
+	if diff, _ := execData["diff_summary"].(string); !strings.Contains(diff, "-const Value = 1") || !strings.Contains(diff, "+const Value = 2") {
+		t.Fatalf("inline diff summary missing concrete change: %+v", execData)
 	}
-	if diffMeta["resource_uri"] == "" {
-		t.Fatalf("missing diff resource URI: %+v", diffMeta)
-	}
-	if diffMeta["mode"] == "inline" {
-		inlineDiff, _ := diffMeta["unified_diff"].(string)
-		// content is human summary only; structured data carries the full diff.
-		if inlineDiff == "" || !strings.Contains(inlineDiff, "Value") {
-			t.Fatalf("inline unified_diff missing concrete change: %q", inlineDiff)
-		}
+	editResults, _ := execData["results"].([]any)
+	if len(editResults) != 1 {
+		t.Fatalf("edit results missing: %+v", execData)
 	}
 	content, err := os.ReadFile(filepath.Join(workspace, "demo.go"))
 	if err != nil || !strings.Contains(string(content), "Value = 2") {
 		t.Fatalf("file not updated: %q err=%v", content, err)
-	}
-	verifyResults, ok := execData["verify"].([]any)
-	if !ok || len(verifyResults) != 1 {
-		t.Fatalf("change_execute verification result missing: %+v", execData["verify"])
-	}
-	verifyResult, _ := verifyResults[0].(map[string]any)
-	if verifyResult["status"] != "exited" || verifyResult["exit_code"] != float64(0) {
-		t.Fatalf("change_execute verification failed: %+v", verifyResult)
 	}
 	replayed := call("change_execute", map[string]any{
 		"remote_session_id": remoteID, "idempotency_key": "change-idempotency-key", "summary": "ignored on replay", "apply": true,
 		"operations": []any{map[string]any{"operation": "replace_exact", "path": "demo.go", "base_sha256": base, "match": "const Value = 1", "replacement": "const Value = 2", "occurrence": "one"}},
 	})
 	replayData, _ := replayed["data"].(map[string]any)
-	if replayData["changeset_id"] != execData["changeset_id"] || replayData["idempotent_replay"] != true {
-		t.Fatalf("change_execute retry must replay its original Changeset: %+v", replayed)
+	if replayData["idempotent_replay"] != true || replayData["diff_summary"] != execData["diff_summary"] {
+		t.Fatalf("edit retry must replay its original result: %+v", replayed)
 	}
 	deleteSum := sha256.Sum256([]byte(files["delete_me.txt"]))
-	pendingDelete := call("change_execute", map[string]any{
+	deleted := call("change_execute", map[string]any{
 		"remote_session_id": remoteID, "summary": "remove controlled file", "apply": true,
 		"operations": []any{map[string]any{"operation": "delete", "path": "delete_me.txt", "base_sha256": fmt.Sprintf("sha256:%x", deleteSum[:])}},
 	})
-	if pendingDelete["status"] != "need_confirmation" {
-		t.Fatalf("delete must require semantic confirmation: %+v", pendingDelete)
-	}
-	pendingData, _ := pendingDelete["data"].(map[string]any)
-	approvedDelete := call("change_execute", map[string]any{
-		"remote_session_id": remoteID, "changeset_id": pendingData["changeset_id"],
-		"expected_digest": pendingData["digest"], "confirmation_token": pendingData["confirmation_token"],
-	})
-	if approvedDelete["status"] != "ok" {
-		t.Fatalf("semantic confirmation did not resume the original Changeset: %+v", approvedDelete)
+	if !statusOK(deleted) {
+		t.Fatalf("clean delete failed: %+v", deleted)
 	}
 	if _, err := os.Stat(filepath.Join(workspace, "delete_me.txt")); !os.IsNotExist(err) {
-		t.Fatalf("approved delete did not remove target: %v", err)
+		t.Fatalf("clean delete did not remove target: %v", err)
 	}
 
 	// --- A12 stale revision ---
@@ -875,17 +855,10 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		t.Fatalf("zero match should fail: %+v", nomatch)
 	}
 
-	// --- P2 MCP-only handoff: revert also uses the sole change_execute mutation entry. ---
-	reverted := call("change_execute", map[string]any{
-		"remote_session_id":   remoteID,
-		"revert_changeset_id": execData["changeset_id"],
-		"apply":               true,
-	})
-	if reverted["status"] != "ok" {
-		t.Fatalf("change_execute revert failed: %+v", reverted)
-	}
-	content, err = os.ReadFile(filepath.Join(workspace, "demo.go"))
-	if err != nil || !strings.Contains(string(content), "Value = 1") {
-		t.Fatalf("revert did not restore file: %q err=%v", content, err)
+	changes := call("observe", map[string]any{"remote_session_id": remoteID, "view": "changes", "limit": 10})
+	changesData, _ := changes["data"].(map[string]any)
+	changeItems, _ := changesData["changes"].([]any)
+	if !statusOK(changes) || len(changeItems) == 0 {
+		t.Fatalf("observe changes did not expose clean edit event: %+v", changes)
 	}
 }

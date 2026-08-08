@@ -32,7 +32,7 @@ func TestAgentGuidanceUsesDedicatedRoutingWithoutBusinessArguments(t *testing.T)
 	} else {
 		t.Fatalf("tool routing type = %T", guidance["tool_routing"])
 	}
-	if !containsAnyString(routing["inspect_files"], "source_read") || !containsAnyString(routing["modify_files"], "change") {
+	if !containsAnyString(routing["inspect_files"], "read") || !containsAnyString(routing["modify_files"], "edit") {
 		t.Fatalf("guidance routing = %+v", routing)
 	}
 	for _, forbidden := range []string{"presentation", "renderer", "show_source", "density"} {
@@ -105,131 +105,113 @@ func TestRecoveryActionIsStructuredInErrorDetails(t *testing.T) {
 		t.Fatal("missing error body")
 	}
 	next, ok := response.Error.Details["next_action"].(map[string]any)
-	if !ok || next["tool"] != "source_read" || next["reason"] != "locate the missing file" {
+	if !ok || next["tool"] != "read" || next["reason"] != "locate the missing file" {
 		t.Fatalf("next action = %+v", response.Error.Details["next_action"])
 	}
-	if response.Error.Recovery == nil || response.Error.Recovery.Tool != "source_read" || response.Error.Recovery.Arguments["view"] != "list" {
+	if response.Error.Recovery == nil || response.Error.Recovery.Tool != "read" || response.Error.Recovery.Arguments["view"] != "list" {
 		t.Fatalf("structured recovery = %+v", response.Error.Recovery)
 	}
 }
 
-func TestAgentGuidanceIncludesChangePayloadCheatSheet(t *testing.T) {
+func TestAgentGuidanceIncludesEditPayloadCheatSheet(t *testing.T) {
 	guidance := agentGuidance()
-	payload, ok := guidance["change_payload"].(map[string]any)
+	payload, ok := guidance["edit_payload"].(map[string]any)
 	if !ok {
-		t.Fatalf("change_payload type = %T", guidance["change_payload"])
+		t.Fatalf("edit_payload type = %T", guidance["edit_payload"])
 	}
-	item, ok := payload["operations_item"].(map[string]any)
+	if payload["tool"] != "edit" || !containsAnyString(payload["required"], "remote_session_id") || !containsAnyString(payload["required"], "edits") {
+		t.Fatalf("edit payload contract = %+v", payload)
+	}
+	item, ok := payload["edit_item"].(map[string]any)
 	if !ok {
-		t.Fatalf("operations_item type = %T", payload["operations_item"])
+		t.Fatalf("edit_item type = %T", payload["edit_item"])
 	}
 	operation, _ := item["operation"].(string)
-	for _, wanted := range []string{"create", "update", "rename", "delete", "insert_after", "replace_exact"} {
+	for _, wanted := range []string{"create", "update", "rename", "delete"} {
 		if !strings.Contains(operation, wanted) {
-			t.Fatalf("operations_item.operation %q missing %q", operation, wanted)
+			t.Fatalf("edit_item.operation %q missing %q", operation, wanted)
 		}
 	}
-	if content, ok := item["create"].(string); !ok || !strings.Contains(content, "insert_after") {
-		t.Fatalf("create hint must describe chunked appends: %+v", item["create"])
+	replacement, ok := item["replacement"].(string)
+	if !ok || !strings.Contains(replacement, "精确唯一") {
+		t.Fatalf("replacement hint must describe exact matching: %+v", item["replacement"])
 	}
-	alternatives, _ := payload["alternatives"].(string)
-	if !strings.Contains(alternatives, "apply") || !strings.Contains(alternatives, "revert") {
-		t.Fatalf("alternatives must cover prepared and revert modes: %q", alternatives)
+	limit, _ := item["limit"].(string)
+	if !strings.Contains(limit, "1000") {
+		t.Fatalf("edit limit must be strict 1000 lines: %q", limit)
 	}
 	rules, _ := guidance["rules"].([]string)
 	joined := strings.Join(rules, "\n")
-	if !strings.Contains(joined, "session（action=open） 成功后") || !strings.Contains(joined, "完整 session_id") {
+	if !strings.Contains(joined, "session（action=open）成功后") || !strings.Contains(joined, "完整的 remote_session_id") {
 		t.Fatalf("rules must require showing the session ID to the user: %s", joined)
 	}
-	if !strings.Contains(joined, "一次提交完整参数") || !strings.Contains(joined, "最多新增 300 行") {
-		t.Fatalf("rules must carry call and chunked-write guidance: %s", joined)
+	if !strings.Contains(joined, "使用 read") || !strings.Contains(joined, "使用 edit") || !strings.Contains(joined, "不得超过 1000 行") {
+		t.Fatalf("rules must carry clean-core read/edit guidance: %s", joined)
 	}
-	if !strings.Contains(joined, "完整 sha256") {
+	if !strings.Contains(joined, "完整 sha256") || !strings.Contains(joined, "line_ending") {
 		t.Fatalf("rules must carry file revision and non-Git guidance: %s", joined)
 	}
-	if !strings.Contains(joined, "line_ending") || !strings.Contains(joined, "保留目标文件原有的换行格式") {
-		t.Fatalf("rules must carry generic line-ending preservation guidance: %s", joined)
-	}
-	if !strings.Contains(joined, "自然语言展示") || !strings.Contains(joined, "confirmation_token") {
-		t.Fatalf("rules must require semantic user confirmation: %s", joined)
-	}
-	if !strings.Contains(joined, "安全检查阻塞") || !strings.Contains(joined, "不要把指令文本") {
-		t.Fatalf("rules must carry host-block recovery guidance: %s", joined)
-	}
-	if !strings.Contains(joined, "具体增加和删除") || !strings.Contains(joined, "Markdown ```diff 代码块") {
-		t.Fatalf("rules must carry final Markdown diff guidance: %s", joined)
-	}
-	if !strings.Contains(joined, "changes、snapshot、diff、watch、memory") || !strings.Contains(joined, "此前 snapshot 返回的 since") {
-		t.Fatalf("rules must carry workspace_state action guidance: %s", joined)
-	}
-	if !strings.Contains(joined, "environment_read") || !strings.Contains(joined, "command_run") {
-		t.Fatalf("rules must prevent complex duplicate environment probes: %s", joined)
-	}
-	if !strings.Contains(joined, "服务端签发") || !strings.Contains(joined, "task_id") || !strings.Contains(joined, "绝不猜测") || !strings.Contains(joined, "plan_read") {
-		t.Fatalf("rules must require exact Plan task IDs: %s", joined)
-	}
-	if !strings.Contains(joined, "extension_discover") {
-		t.Fatalf("rules must prevent extension name guesses: %s", joined)
-	}
-	if !strings.Contains(joined, "source_read") || !strings.Contains(joined, "只返回普通文件") || !strings.Contains(joined, "不要从嵌套文件路径推断") {
-		t.Fatalf("rules must prevent directory inference from source lists: %s", joined)
-	}
-	if !strings.Contains(joined, "Skill 调用") || !strings.Contains(joined, "mcp_call") {
-		t.Fatalf("rules must explain extension inventory filtering: %s", joined)
+	if !strings.Contains(joined, "idempotency_key") || !strings.Contains(joined, "STALE_REVISION") || !strings.Contains(joined, "suggested_next") {
+		t.Fatalf("rules must carry edit retry guidance: %s", joined)
 	}
 	instructions := agentGuidanceInstructions()
-	if !strings.Contains(instructions, "用户可见响应契约") || !strings.Contains(instructions, "change") || !strings.Contains(instructions, "insert_after") {
+	if !strings.Contains(instructions, "用户可见响应契约") || !strings.Contains(instructions, "edit") || !strings.Contains(instructions, "replacement") {
 		t.Fatalf("instructions must render the cheat-sheet: %s", instructions)
 	}
 }
 
-func TestChangeSchemasAreSelfDescribingAndFlat(t *testing.T) {
+func TestEditSchemaIsSelfDescribingAndFlat(t *testing.T) {
 	runtime := &Runtime{}
 	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
 	runtime.registerTools(protocol)
-	registered := runtime.listedToolMap()["change"]
+	registered := runtime.listedToolMap()["edit"]
 	if len(mcpresult.ToolSchemaJSON(registered)) == 0 {
-		t.Fatal("change must expose a raw schema")
+		t.Fatal("edit must expose a raw schema")
 	}
 	var schema map[string]any
 	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(registered), &schema); err != nil {
 		t.Fatal(err)
 	}
 	if _, hasOneOf := schema["oneOf"]; hasOneOf {
-		t.Fatalf("change schema must not rely on top-level oneOf: %s", mcpresult.ToolSchemaJSON(registered))
+		t.Fatalf("edit schema must not rely on top-level oneOf: %s", mcpresult.ToolSchemaJSON(registered))
 	}
 	if schema["additionalProperties"] != false {
-		t.Fatalf("change must reject unknown fields: %s", mcpresult.ToolSchemaJSON(registered))
+		t.Fatalf("edit must reject unknown fields: %s", mcpresult.ToolSchemaJSON(registered))
 	}
 	properties, ok := schema["properties"].(map[string]any)
 	if !ok {
 		t.Fatal("missing properties")
 	}
-	if properties["session_id"] == nil || properties["purpose"] == nil || properties["user_confirmed"] != nil {
-		t.Fatalf("change semantic fields are invalid: %+v", properties)
+	if properties["remote_session_id"] == nil || properties["purpose"] == nil || properties["idempotency_key"] == nil {
+		t.Fatalf("edit semantic fields are invalid: %+v", properties)
 	}
-	operations, ok := properties["operations"].(map[string]any)
+	edits, ok := properties["edits"].(map[string]any)
 	if !ok {
-		t.Fatal("missing operations property")
+		t.Fatal("missing edits property")
 	}
-	items, ok := operations["items"].(map[string]any)
+	items, ok := edits["items"].(map[string]any)
 	if !ok {
-		t.Fatal("missing operation items")
-	}
-	if description, _ := items["properties"].(map[string]any)["content"].(map[string]any)["description"].(string); !strings.Contains(description, "最多新增 300 行") {
-		t.Fatalf("operation content description must carry chunked-write guidance: %q", description)
+		t.Fatal("missing edit items")
 	}
 	itemProperties, ok := items["properties"].(map[string]any)
 	if !ok {
-		t.Fatal("missing operation item properties")
+		t.Fatal("missing edit item properties")
 	}
-	for _, field := range []string{"operation", "path", "base_sha256", "patch", "content", "match", "replacement", "range_start", "range_end"} {
+	for _, field := range []string{"operation", "path", "base_sha256", "content", "new_path", "replacements"} {
 		fieldSchema, ok := itemProperties[field].(map[string]any)
 		if !ok {
-			t.Fatalf("operation item missing field %q", field)
+			t.Fatalf("edit item missing field %q", field)
 		}
 		if description, _ := fieldSchema["description"].(string); strings.TrimSpace(description) == "" {
-			t.Fatalf("operation item field %q has no description", field)
+			t.Fatalf("edit item field %q has no description", field)
+		}
+	}
+	replacements := itemProperties["replacements"].(map[string]any)
+	replacementItems := replacements["items"].(map[string]any)
+	for _, field := range []string{"match", "replacement"} {
+		fieldSchema := replacementItems["properties"].(map[string]any)[field].(map[string]any)
+		if strings.TrimSpace(fieldSchema["description"].(string)) == "" {
+			t.Fatalf("replacement field %q has no description", field)
 		}
 	}
 }

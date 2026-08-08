@@ -23,13 +23,12 @@ type Config struct {
 		FinalResponse  []string `yaml:"final_response"`
 		EvidenceRule   string   `yaml:"evidence_rule"`
 	} `yaml:"response_contract"`
-	ChangePayload struct {
-		Tool           string         `yaml:"tool"`
-		Required       []string       `yaml:"required"`
-		Confirmation   string         `yaml:"confirmation"`
-		OperationsItem map[string]any `yaml:"operations_item"`
-		Alternatives   string         `yaml:"alternatives"`
-	} `yaml:"change_payload"`
+	EditPayload struct {
+		Tool     string         `yaml:"tool"`
+		Required []string       `yaml:"required"`
+		Retry    string         `yaml:"retry"`
+		EditItem map[string]any `yaml:"edit_item"`
+	} `yaml:"edit_payload"`
 	ToolRouting map[string][]string `yaml:"tool_routing"`
 }
 
@@ -43,8 +42,8 @@ func LoadAgent() (Config, error) {
 	if cfg.Version == "" || cfg.Summary == "" || len(cfg.Rules) == 0 {
 		return Config{}, fmt.Errorf("guidance agent.yaml missing version, summary, or rules")
 	}
-	if cfg.ChangePayload.Tool == "" || len(cfg.ToolRouting) == 0 {
-		return Config{}, fmt.Errorf("guidance agent.yaml missing change_payload.tool or tool_routing")
+	if cfg.EditPayload.Tool == "" || len(cfg.ToolRouting) == 0 {
+		return Config{}, fmt.Errorf("guidance agent.yaml missing edit_payload.tool or tool_routing")
 	}
 	return cfg, nil
 }

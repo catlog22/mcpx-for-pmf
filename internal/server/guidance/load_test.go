@@ -7,7 +7,7 @@ func TestLoadAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Version == "" || cfg.ChangePayload.Tool != "change" {
+	if cfg.Version == "" || cfg.EditPayload.Tool != "edit" {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 	if len(cfg.ToolRouting["modify_files"]) == 0 {

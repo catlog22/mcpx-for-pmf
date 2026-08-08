@@ -7,7 +7,7 @@ func TestDescriptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"change", "session", "source_read", "artifact"} {
+	for _, name := range []string{"edit", "session", "read", "artifact"} {
 		if m[name] == "" {
 			t.Fatalf("missing description for %s", name)
 		}

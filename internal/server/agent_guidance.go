@@ -9,7 +9,7 @@ import (
 	"mcpx/internal/server/guidance"
 )
 
-const agentGuidanceVersion = "1.18"
+const agentGuidanceVersion = "1.19"
 
 // agentGuidanceConfig mirrors guidance.Config for existing call sites.
 type agentGuidanceConfig = guidance.Config
@@ -49,12 +49,11 @@ func agentGuidance() map[string]any {
 			"final_response":   config.ResponseContract.FinalResponse,
 			"evidence_rule":    config.ResponseContract.EvidenceRule,
 		},
-		"change_payload": map[string]any{
-			"tool":            config.ChangePayload.Tool,
-			"required":        config.ChangePayload.Required,
-			"confirmation":    config.ChangePayload.Confirmation,
-			"operations_item": config.ChangePayload.OperationsItem,
-			"alternatives":    config.ChangePayload.Alternatives,
+		"edit_payload": map[string]any{
+			"tool":      config.EditPayload.Tool,
+			"required":  config.EditPayload.Required,
+			"retry":     config.EditPayload.Retry,
+			"edit_item": config.EditPayload.EditItem,
 		},
 		"tool_routing": config.ToolRouting,
 	}
@@ -67,7 +66,7 @@ func agentGuidanceInstructions() string {
 	rules := config.Rules
 	lines := []string{
 		"MCPX Agent 指引（高优先级）：",
-		"每个意图都使用对应的 MCPX 工具；不要用 command_run 替代文件或 Git 检查。",
+		"每个意图都使用对应的 MCPX 工具；不要用 execute 替代文件或 Git 读取。",
 	}
 	for _, rule := range rules {
 		lines = append(lines, "- "+rule)
@@ -82,16 +81,16 @@ func agentGuidanceInstructions() string {
 		lines = append(lines, "  - "+item)
 	}
 	lines = append(lines, "- 证据规则："+config.ResponseContract.EvidenceRule)
-	lines = append(lines, "", "change 参数速查（工具 schema 不可用时使用）：")
-	lines = append(lines, "- 必填："+strings.Join(config.ChangePayload.Required, "、"))
-	lines = append(lines, "- confirmation_token："+config.ChangePayload.Confirmation)
-	lines = append(lines, "- operations 项："+fmt.Sprint(config.ChangePayload.OperationsItem["operation"]))
-	for _, key := range []string{"create", "update", "rename", "delete", "insert_after", "replace", "replace_range", "base_sha256"} {
-		if value, ok := config.ChangePayload.OperationsItem[key].(string); ok {
+	lines = append(lines, "", "edit 参数速查（工具 schema 不可用时使用）：")
+	lines = append(lines, "- 必填："+strings.Join(config.EditPayload.Required, "、"))
+	lines = append(lines, "- 重试："+config.EditPayload.Retry)
+	lines = append(lines, "- edit 项："+fmt.Sprint(config.EditPayload.EditItem["operation"]))
+	for _, key := range []string{"create", "update", "rename", "delete", "replacement", "limit"} {
+		if value, ok := config.EditPayload.EditItem[key].(string); ok {
 			lines = append(lines, "  - "+key+"："+value)
 		}
 	}
-	lines = append(lines, "- 其他模式："+config.ChangePayload.Alternatives)
+	lines = append(lines, "- 其他模式：超出单批次上限时拆分为多个 edit 调用")
 	return strings.Join(lines, "\n")
 }
 
@@ -129,9 +128,12 @@ func normalizePublicAction(tool string, arguments map[string]any) (string, map[s
 		result["view"] = view
 	}
 	switch tool {
-	case "file_read", "context_query":
+	case "workspace_read":
+		tool = "read"
+		setView("list")
+	case "source_read", "file_read", "context_query":
 		legacyTool := tool
-		tool = "source_read"
+		tool = "read"
 		if legacyTool == "file_read" || action == "" {
 			setView("file")
 		} else if action == "list" {
@@ -142,37 +144,35 @@ func normalizePublicAction(tool string, arguments map[string]any) (string, map[s
 			setView("search")
 		}
 	case "change_manage":
-		if action == "prepare" || action == "discard" {
-			tool = "change"
-			result["action"] = action
+		tool = "observe"
+		if action == "history" {
+			setView("history")
 		} else {
-			tool = "change_read"
-			setView(action)
+			setView("changes")
 		}
 	case "change_execute":
-		if _, ok := result["revert_changeset_id"]; ok {
-			tool = "change"
-			if value, ok := result["revert_changeset_id"]; ok {
-				result["changeset_id"] = value
-			}
-			delete(result, "revert_changeset_id")
-			result["action"] = "revert"
-		} else if _, ok := result["changeset_id"]; ok {
-			tool = "change"
-			result["action"] = "apply"
+		tool = "edit"
+		delete(result, "action")
+	case "change", "change_read":
+		legacyTool := tool
+		tool = "observe"
+		if action == "history" || legacyTool == "change_read" {
+			setView("history")
 		} else {
-			tool = "change"
-			result["action"] = "prepare"
+			setView("changes")
 		}
 	case "command_execute":
-		tool = "command_run"
+		tool = "execute"
+		if action == "" {
+			result["action"] = "run"
+		}
 	case "task_manage":
 		if action == "attach" || action == "stop" || action == "stdin" {
-			tool = "task"
+			tool = "execute"
 			result["action"] = action
 			delete(result, "operation")
 		} else {
-			tool = "task_read"
+			tool = "observe"
 			setView(action)
 		}
 	case "plan_manage":
@@ -181,8 +181,8 @@ func normalizePublicAction(tool string, arguments map[string]any) (string, map[s
 			tool = "plan"
 			result["action"] = "create"
 		case "get":
-			tool = "plan_read"
-			delete(result, "action")
+			tool = "plan"
+			result["action"] = "read"
 		default:
 			tool = "plan"
 			result["action"] = action
@@ -209,7 +209,7 @@ func normalizePublicAction(tool string, arguments map[string]any) (string, map[s
 			}
 		}
 	case "workspace_state":
-		tool = "workspace_read"
+		tool = "observe"
 		setView(action)
 	case "extension_manage":
 		kind, _ := result["kind"].(string)
@@ -222,30 +222,37 @@ func normalizePublicAction(tool string, arguments map[string]any) (string, map[s
 			delete(result, "action")
 			delete(result, "kind")
 		} else {
-			tool = "extension_discover"
-			delete(result, "kind")
+			tool = "discover"
 			setView(action)
 		}
 	case "artifact_manage":
-		if action == "register" {
-			tool = "artifact"
-			delete(result, "action")
-		} else {
-			tool = "artifact_read"
-			if action == "read" {
-				setView("content")
-			} else {
-				setView("list")
-			}
-		}
+		tool = "artifact"
+		result["action"] = action
 	case "secrets_provide":
 		tool = "secret_provide"
 	}
-	if sessionID, ok := result["remote_session_id"]; ok {
+	if isCleanPublicTool(tool) {
+		if sessionID, ok := result["session_id"]; ok {
+			if _, exists := result["remote_session_id"]; !exists {
+				result["remote_session_id"] = sessionID
+			}
+			delete(result, "session_id")
+		}
+	} else if sessionID, ok := result["remote_session_id"]; ok {
 		result["session_id"] = sessionID
 		delete(result, "remote_session_id")
 	}
 	return tool, result
+}
+
+func isCleanPublicTool(tool string) bool {
+	switch tool {
+	case "session", "read", "edit", "observe", "execute", "plan", "artifact", "discover", "skill_call", "mcp_call",
+		"operation_batch", "operation_manage", "runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide":
+		return true
+	default:
+		return false
+	}
 }
 
 func addRecoveryActions(response *envelope.Response, actions ...map[string]any) {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,6 +71,33 @@ func insertRetentionEvent(t *testing.T, db *sql.DB, workspace, remoteID, eventTy
 		t.Fatal(err)
 	}
 	return sequence
+}
+
+func TestObservationRetentionNewestWindowIsNotCorrelated(t *testing.T) {
+	db, _, now := newRetentionTestService(t, "")
+	query, err := observationDeletionQuery("process")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+query,
+		"demo", now.UnixMilli(), "demo", 10000, retentionBatchSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(strings.ToUpper(detail), "CORRELATED LIST SUBQUERY") {
+			t.Fatalf("retention query repeats newest window for every event: %s", detail)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestRetentionProtectsActiveSessionsAndReferencedSnapshots(t *testing.T) {

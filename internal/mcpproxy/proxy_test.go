@@ -49,7 +49,7 @@ func TestListReturnsStableMachineReadableDescriptorsWithoutSecrets(t *testing.T)
 		t.Fatalf("descriptor exposed environment: %+v", items[1])
 	}
 	discovery, ok := items[0]["tool_discovery"].(map[string]any)
-	if !ok || discovery["tool"] != "mcp_list" {
+	if !ok || discovery["tool"] != "discover" {
 		t.Fatalf("missing discovery invocation: %+v", items[0])
 	}
 }

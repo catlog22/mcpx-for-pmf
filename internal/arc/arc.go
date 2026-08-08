@@ -224,17 +224,14 @@ func extractResult(raw *mcp.CallToolResult) (map[string]any, string) {
 	return map[string]any{"text": text}, text
 }
 
-// normalizePublicData keeps internal handler names out of the ARC payload.
-// Public tools use session_id; remote_session_id remains an implementation
-// name for private handlers and persisted records.
+// normalizePublicData preserves the clean-core business identifier names in
+// the model-facing ARC payload. In particular, remote_session_id is the
+// stable cross-client session key and must not be rewritten to session_id.
 func normalizePublicData(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
 		result := make(map[string]any, len(typed))
 		for key, item := range typed {
-			if key == "remote_session_id" {
-				key = "session_id"
-			}
 			result[key] = normalizePublicData(item)
 		}
 		return result

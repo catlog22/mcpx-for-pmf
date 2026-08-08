@@ -163,6 +163,44 @@ func TestFileReadFullReturnsHTMLAndDirectImageContent(t *testing.T) {
 	}
 }
 
+func TestFileReadDecodesUTF16ForModelAndWindow(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	created := callEnvelope(t, rt.toolSessionOpen, context.Background(), map[string]any{"workspace": "demo"})
+	remoteSessionID, _ := created["remote_session_id"].(string)
+	registered, ok := rt.reg.Get("demo")
+	if !ok {
+		t.Fatal("demo workspace was not registered")
+	}
+	content := []byte{0xff, 0xfe, 'o', 0, 'n', 0, 'e', 0, '\n', 0, 't', 0, 'w', 0, 'o', 0, '\n', 0}
+	if err := os.WriteFile(registered.Path+"/utf16.txt", content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fullResult, err := rt.toolFileReadUnified(context.Background(), mcpresult.Request(map[string]any{
+		"remote_session_id": remoteSessionID, "path": "utf16.txt", "mode": "full",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := structuredBusinessData(fullResult)
+	if full["content"] != "one\ntwo\n" || full["encoding"] != "utf-8" {
+		t.Fatalf("UTF-16 full result=%+v", full)
+	}
+	format, _ := full["format"].(map[string]any)
+	if format["charset"] != "utf-16le" || format["bom"] != "utf-16le" {
+		t.Fatalf("UTF-16 format=%+v", format)
+	}
+	windowResult, err := rt.toolFileReadUnified(context.Background(), mcpresult.Request(map[string]any{
+		"remote_session_id": remoteSessionID, "path": "utf16.txt", "mode": "window", "offset": 1, "limit": 1,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	window := structuredBusinessData(windowResult)
+	if window["content"] != "two\n" || window["sha256"] != full["sha256"] {
+		t.Fatalf("UTF-16 window result=%+v full=%+v", window, full)
+	}
+}
+
 func TestSourceReadWindowAndBatchExposeSameFormat(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	created := callEnvelope(t, rt.toolSessionOpen, context.Background(), map[string]any{"workspace": "demo"})

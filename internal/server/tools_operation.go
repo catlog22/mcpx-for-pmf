@@ -47,6 +47,9 @@ func (r *Runtime) toolOperationBatch(ctx context.Context, req *mcp.CallToolReque
 		if stepID == "" || toolName == "" || arguments == nil {
 			return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", fmt.Sprintf("operations[%d] requires id, tool and arguments", index))
 		}
+		if isCleanCoreRequest(ctx) && !isCleanPublicTool(toolName) {
+			return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", fmt.Sprintf("tool %q is not available in the clean-core operation catalog", toolName))
+		}
 		if toolName == "operation_batch" || toolName == "operation_manage" || toolName == "secret_provide" {
 			message := fmt.Sprintf("tool %q cannot be nested in operation_batch", toolName)
 			if toolName == "operation_manage" {
@@ -246,7 +249,11 @@ func (r *Runtime) validateOperationToolArguments(toolName string, arguments map[
 		return fmt.Errorf("invalid schema for tool %q", toolName)
 	}
 	merged := cloneArguments(arguments)
-	merged["session_id"] = sessionID
+	if isCleanPublicTool(toolName) {
+		merged["remote_session_id"] = sessionID
+	} else {
+		merged["session_id"] = sessionID
+	}
 	merged["purpose"] = purpose
 	return validateOperationSchemaValue(merged, schema, "arguments")
 }

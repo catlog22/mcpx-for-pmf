@@ -39,6 +39,87 @@ func truncateRenderedLine(value string, maxWidth int) string {
 	return prefix + "..."
 }
 
+// wrapRenderedLine keeps the complete rendered value while fitting each
+// segment within the terminal cell budget. ANSI styles active at a wrap point
+// are reopened on the continuation line so colored output remains valid.
+func wrapRenderedLine(value string, maxWidth int) []string {
+	if value == "" {
+		return []string{""}
+	}
+	if maxWidth <= 0 || displayWidth(value) <= maxWidth {
+		return []string{value}
+	}
+
+	segments := make([]string, 0, 2)
+	var current strings.Builder
+	activeANSI := make([]string, 0, 2)
+	width := 0
+	flush := func() {
+		if current.Len() == 0 {
+			return
+		}
+		segments = append(segments, current.String())
+		current.Reset()
+		for _, sequence := range activeANSI {
+			current.WriteString(sequence)
+		}
+		width = 0
+	}
+
+	for index := 0; index < len(value); {
+		if value[index] == '\033' {
+			sequence, next := readANSISequence(value, index)
+			if next == index {
+				sequence = string(value[index])
+				next++
+			}
+			current.WriteString(sequence)
+			if strings.HasSuffix(sequence, "0m") {
+				activeANSI = activeANSI[:0]
+			} else if strings.HasSuffix(sequence, "m") {
+				activeANSI = append(activeANSI, sequence)
+			}
+			index = next
+			continue
+		}
+
+		runeValue, size := utf8.DecodeRuneInString(value[index:])
+		if size == 0 {
+			break
+		}
+		runeWidth := runeDisplayWidth(runeValue)
+		if width > 0 && width+runeWidth > maxWidth {
+			if len(activeANSI) > 0 {
+				current.WriteString(ansiReset)
+			}
+			flush()
+		}
+		current.WriteRune(runeValue)
+		width += runeWidth
+		index += size
+	}
+	flush()
+	if len(segments) == 0 {
+		return []string{value}
+	}
+	return segments
+}
+
+func readANSISequence(value string, start int) (string, int) {
+	index := start + 1
+	if index < len(value) && value[index] == '[' {
+		index++
+	}
+	for index < len(value) {
+		current := value[index]
+		index++
+		if current >= '@' && current <= '~' {
+			return value[start:index], index
+		}
+	}
+	return value[start:], len(value)
+}
+
 func takeRenderedWidth(value string, maxWidth int) string {
 	if maxWidth <= 0 {
 		return ""

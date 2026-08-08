@@ -197,12 +197,12 @@ func TestChangeHistoryExposesDraftRecoveryActions(t *testing.T) {
 	}
 	drafts := summary["active_drafts"].([]any)
 	actions := drafts[0].(map[string]any)["next_actions"].([]any)
-	if actions[0].(map[string]any)["tool"] != "change" || actions[1].(map[string]any)["tool"] != "change" {
+	if actions[0].(map[string]any)["tool"] != "observe" || actions[1].(map[string]any)["tool"] != "observe" {
 		t.Fatalf("draft actions = %+v", actions)
 	}
 	a0, _ := actions[0].(map[string]any)["arguments"].(map[string]any)
 	a1, _ := actions[1].(map[string]any)["arguments"].(map[string]any)
-	if a0["action"] != "apply" || a1["action"] != "discard" {
+	if a0["view"] != "changes" || a1["view"] != "changes" || a0["changeset_id"] != changesetID || a1["changeset_id"] != changesetID {
 		t.Fatalf("draft action args = apply:%+v discard:%+v", a0, a1)
 	}
 	historyDigest, _ := historyData["history_digest"].(string)
@@ -521,11 +521,11 @@ func TestChangeSummaryIncludesExactExpectedDigestRecovery(t *testing.T) {
 		t.Fatalf("digest fields must be identical: %+v", dto)
 	}
 	nextAction, _ := dto["next_action"].(map[string]any)
-	if nextAction["tool"] != "change" {
-		t.Fatalf("missing change apply recovery: %+v", dto)
+	if nextAction["tool"] != "observe" {
+		t.Fatalf("missing observe recovery: %+v", dto)
 	}
 	arguments, _ := nextAction["arguments"].(map[string]any)
-	if arguments["changeset_id"] != item.ID || arguments["expected_digest"] != item.Digest || arguments["action"] != "apply" {
+	if arguments["changeset_id"] != item.ID || arguments["expected_digest"] != item.Digest || arguments["view"] != "changes" {
 		t.Fatalf("recovery arguments must copy the exact digest: %+v", nextAction)
 	}
 }
@@ -591,7 +591,7 @@ func TestChangeApplyDigestConflictIncludesExactRecovery(t *testing.T) {
 	}
 	recovery, _ := errorBody["recovery"].(map[string]any)
 	arguments, _ := recovery["arguments"].(map[string]any)
-	if recovery["tool"] != "change" || arguments["changeset_id"] != changesetID || arguments["expected_digest"] != digest {
+	if recovery["tool"] != "observe" || arguments["changeset_id"] != changesetID || arguments["expected_digest"] != digest || arguments["view"] != "changes" {
 		t.Fatalf("digest recovery action=%+v", recovery)
 	}
 	if _, err := os.Stat(filepath.Join(registered.Path, "digest-recovery.txt")); !os.IsNotExist(err) {
@@ -705,11 +705,11 @@ func TestChangeExecuteMissingRevisionHasRecovery(t *testing.T) {
 	}
 	details, _ := errorBody["details"].(map[string]any)
 	nextAction, _ := details["next_action"].(map[string]any)
-	if nextAction["tool"] != "source_read" {
-		t.Fatalf("REVISION_REQUIRED must carry a source_read recovery action: %+v", details)
+	if nextAction["tool"] != "read" {
+		t.Fatalf("REVISION_REQUIRED must carry a read recovery action: %+v", details)
 	}
 	arguments, _ := nextAction["arguments"].(map[string]any)
-	if arguments["session_id"] != created.Session.ID {
+	if arguments["remote_session_id"] != created.Session.ID {
 		t.Fatalf("recovery action must preserve the session: %+v", arguments)
 	}
 }
@@ -752,7 +752,7 @@ func TestUpdateMissingRevisionSuggestsTargetFileRead(t *testing.T) {
 	details, _ := errorBody["details"].(map[string]any)
 	nextAction, _ := details["next_action"].(map[string]any)
 	arguments, _ := nextAction["arguments"].(map[string]any)
-	if nextAction["tool"] != "source_read" || arguments["path"] != "update-me.txt" {
+	if nextAction["tool"] != "read" || arguments["path"] != "update-me.txt" {
 		t.Fatalf("update recovery must target the missing revision file: %+v", details)
 	}
 }
@@ -796,8 +796,8 @@ func TestChangePrepareDuplicatePathHasRecovery(t *testing.T) {
 	}
 	details, _ := errorBody["details"].(map[string]any)
 	action, _ := details["next_action"].(map[string]any)
-	if action["tool"] != "change" {
-		t.Fatalf("duplicate path must suggest change: %+v", details)
+	if action["tool"] != "observe" {
+		t.Fatalf("duplicate path must suggest observe: %+v", details)
 	}
 }
 
@@ -1034,8 +1034,8 @@ func TestChangePrepareWrongBaseIsStaleNotPatchContext(t *testing.T) {
 	}
 	nextAction, _ := details["next_action"].(map[string]any)
 	args, _ := nextAction["arguments"].(map[string]any)
-	if nextAction["tool"] != "source_read" || args["mode"] != "full" || args["path"] != "stale.txt" {
-		t.Fatalf("next_action must be source_read full path: %+v", details["next_action"])
+	if nextAction["tool"] != "read" || args["mode"] != "full" || args["path"] != "stale.txt" {
+		t.Fatalf("next_action must be read full path: %+v", details["next_action"])
 	}
 }
 

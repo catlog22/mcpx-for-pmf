@@ -112,7 +112,7 @@ func TestRegisteredToolsExcludeCompatibilityInterfaces(t *testing.T) {
 			t.Fatalf("removed compatibility tool %q is still registered", removed)
 		}
 	}
-	for _, required := range []string{"workspace_read", "session", "source_read", "change", "change_read"} {
+	for _, required := range []string{"session", "read", "edit", "observe"} {
 		if _, exists := tools[required]; !exists {
 			t.Fatalf("required tool %q is missing", required)
 		}
