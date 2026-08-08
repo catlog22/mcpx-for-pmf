@@ -27,6 +27,62 @@ Edit ID、Task ID、discovery revision 和能力版本避免重复读取和无�
 | Security | OAuth、Bearer、Remote Session ACL、命令/文件策略和语义确认 |
 | Observation | 通过本机 Socket 观察工具调用、Task、Edit 和操作事件 |
 
+## 架构
+
+```mermaid
+flowchart LR
+    Client[ChatGPT / Claude / Cursor / Grok] -->|Streamable HTTP /mcp| Runtime[MCPX Runtime]
+    Runtime --> Session[Remote Session / ACL]
+    Runtime --> Tools[Core & Support Tools]
+    Runtime --> Orchestration[Operation / Plan]
+    Runtime --> Extension[Skill / Upstream MCP]
+    Runtime --> Observe[Observation / Audit]
+
+    Session --> Workspace[(Registered Workspace)]
+    Tools --> Workspace
+    Orchestration --> Tools
+    Extension --> Skills[Local Skills]
+    Extension --> Upstream[Upstream MCP Servers]
+
+    Runtime --> State[(SQLite State)]
+    Observe --> State
+    Tools --> RuntimeData[Task Logs / Artifacts / Snapshots]
+```
+
+MCPX 把客户端连接、持久化 Remote Session、Workspace 能力、执行编排和扩展发现放在同一个
+Runtime 边界内；所有有状态操作都绑定 `remote_session_id`，并通过 SQLite、Task 日志、Artifact
+与 Observation 保留可恢复和可审计的执行状态。
+
+## 公开工具
+
+`tools/list` 是工具名称、描述、参数 Schema 和 Annotation 的唯一权威来源。
+当前公开工具共 19 个，分为 12 个 core tools 和 7 个 support tools：
+
+| 领域 | 工具 | 主要用途 |
+| --- | --- | --- |
+| Core | `session` | open、attach、close Remote Session |
+| Core | `read` | 文件、搜索、列表、上下文和环境读取 |
+| Core | `edit` | 精确 replacement、批量编辑、原子写和格式保留；不提供删除 |
+| Core | `move_out_prepare` | 只读冻结明确文件/目录/symlink 的安全移出 manifest 与确认凭证 |
+| Core | `submit_move_out` | 提交用户已确认的冻结 manifest，将目标移入系统回收站（Windows Recycle Bin / macOS Trash / Linux Trash） |
+| Core | `observe` | session、task、history、changes、logs、diff 观察 |
+| Core | `execute` | 命令或项目 Task 执行，以及 attach、stop、stdin |
+| Core | `plan` | create、read、advance、complete、block、replan、deliver |
+| Core | `artifact` | 产物登记、列表和分片读取 |
+| Core | `discover` | 显式发现 Skill 或上游 MCP，并签发 discovery lease |
+| Core | `skill_call` | 调用已由 `discover` 返回的 Skill |
+| Core | `mcp_call` | 调用已由 `discover` 返回的上游 MCP 工具 |
+| Support | `operation_batch` | 并发或按依赖 DAG 执行多个工具 |
+| Support | `operation_manage` | 查询、等待、读取结果、取消和恢复异步操作 |
+| Support | `runtime_read` | 读取能力、项目摘要和适用指令 |
+| Support | `environment_read` | 读取当前环境或比较环境快照 |
+| Support | `environment` | 保存环境快照 |
+| Support | `screenshot_capture` | 截取显示器或区域 |
+| Support | `secret_provide` | 提供仅驻留内存的 Secret |
+
+所有有状态工具统一使用完整的 `remote_session_id`；`tools/list`、session
+bootstrap、capability manifest 和 recovery action 使用同一组名称与 Schema。
+
 ## 设计边界
 
 MCPX 同时处理两类 Session：
@@ -60,11 +116,15 @@ cd mcpx
 go build -o bin/mcpx-server ./cmd/mcpx-server
 ```
 
-发布构建可以关闭 CGO：
+本地静态构建可以关闭 CGO：
 
 ```bash
 CGO_ENABLED=0 go build -o bin/mcpx-server ./cmd/mcpx-server
 ```
+
+普通 VCS 构建会从 Go build info 回填当前 Git revision（工作树有未提交变更时带 `-dirty`）；
+正式发布仍以 GoReleaser 的 linker flags 为权威来源，同时注入版本、commit 和真实 build time。
+CI 会构建带 provenance 的二进制并通过 `mcpx-server -version` 校验 commit/date 未丢失。
 
 ### 启动服务
 
@@ -310,34 +370,6 @@ curl -sS -m 5 \
 
 响应中出现 `mcpx` Server 信息表示协议握手成功。
 
-## 公开工具
-
-`tools/list` 是工具名称、描述、参数 Schema 和 Annotation 的唯一权威来源。
-当前公开工具共 17 个，分为 10 个 core tools 和 7 个 support tools：
-
-| 领域 | 工具 | 主要用途 |
-| --- | --- | --- |
-| Core | `session` | open、attach、close Remote Session |
-| Core | `read` | 文件、搜索、列表、上下文和环境读取 |
-| Core | `edit` | 精确 replacement、批量编辑、原子写和格式保留 |
-| Core | `observe` | session、task、history、changes、logs、diff 观察 |
-| Core | `execute` | 命令或项目 Task 执行，以及 attach、stop、stdin |
-| Core | `plan` | create、read、advance、complete、block、replan、deliver |
-| Core | `artifact` | 产物登记、列表和分片读取 |
-| Core | `discover` | 显式发现 Skill 或上游 MCP，并签发 discovery lease |
-| Core | `skill_call` | 调用已由 `discover` 返回的 Skill |
-| Core | `mcp_call` | 调用已由 `discover` 返回的上游 MCP 工具 |
-| Support | `operation_batch` | 并发或按依赖 DAG 执行多个工具 |
-| Support | `operation_manage` | 查询、等待、读取结果、取消和恢复异步操作 |
-| Support | `runtime_read` | 读取能力、项目摘要和适用指令 |
-| Support | `environment_read` | 读取当前环境或比较环境快照 |
-| Support | `environment` | 保存环境快照 |
-| Support | `screenshot_capture` | 截取显示器或区域 |
-| Support | `secret_provide` | 提供仅驻留内存的 Secret |
-
-所有有状态工具统一使用完整的 `remote_session_id`；`tools/list`、session
-bootstrap、capability manifest 和 recovery action 使用同一组名称与 Schema。
-
 ## 推荐交互流程
 
 ### 1. 建立会话和能力缓存
@@ -413,7 +445,7 @@ read(view="file") → edit → observe(view="changes")
 ```
 
 `edit` 接收 `edits[]`，支持 create、update、rename；用户提出删除、移除或清理时必须使用专用的
-`move_out_prepare → submit_move_out` 流程，目标会安全移至隔离区而非永久删除，update 优先使用
+`move_out_prepare → submit_move_out` 流程，目标会安全移至操作系统回收站而非永久删除，update 优先使用
 精确唯一 `replacements`。同一请求带 `idempotency_key` 时，重试返回原终态，
 参数变化返回 `IDEMPOTENCY_CONFLICT`。默认只返回有界 diff 预览；需要完整内容时
 使用 `observe(view="diff", edit_id, offset, limit)` 分片读取。
@@ -430,24 +462,26 @@ read(view="file") → edit → observe(view="changes")
    目录根路径，不扫描、哈希或返回目录子项；file 冻结 SHA，symlink 冻结链接文本摘要。响应只返回
    最多 20 个显式目标预览、总目标数和 manifest SHA，因此数万文件目录不会撑大模型上下文。
    `purpose` 必须先表达最终语义：仅检查就写“仅 prepare/仅预览”并停止；用户请求删除、移除或清理时
-   则从 prepare 开始明确写“安全移至隔离区”，不能在 submit 时临时改写语义。
-2. 服务端返回 `confirmation_uuid`、`move_request_id`、`manifest_sha256` 和原始
-   `idempotency_key` 供展示和审计；`submit_move_out_arguments` 只包含
-   `remote_session_id` 与 `confirmation_uuid` 两个提交参数。
+   则从 prepare 开始明确写“安全移至系统回收站”，不能在 submit 时临时改写语义。
+2. 服务端返回 `confirmation_uuid`、`move_request_id`、`manifest_sha256`、原始
+   `idempotency_key` 与 `expires_at` 供展示和审计；默认确认有效期为 30 分钟。
+   `submit_move_out_arguments` 只包含 `remote_session_id` 与 `confirmation_uuid` 两个提交参数。
 3. 网页端模型向用户展示冻结清单并询问；用户确认后，模型将
    `submit_move_out_arguments` 原样提交给 `submit_move_out`。
 4. `submit_move_out` 按 UUID 从服务端取回并重新校验 Workspace 范围、manifest、文件 SHA、过期时间和
-   purpose；客户端无法覆盖这些冻结值。明确的 `directory` 是移出根，服务端以受 Workspace 同级 Root 约束的原子 rename 移至
-   Workspace 父目录下的 `.mcpx-quarantine/<move_request_id>/`；返回的 `quarantine_path` 相对此父目录。
-   `symlink`（包括目录确认后被替换的 symlink）只移动链接入口，
-   绝不跟随目标。提交写入持久化审计，并返回可恢复的隔离路径。
+   purpose；客户端无法覆盖这些冻结值。明确的 `directory` 是整体移出根，不扫描其后代；`symlink`
+   （包括目录确认后被替换的 symlink）只移动链接入口，绝不跟随目标。通过校验后目标进入当前操作系统的
+   回收站：Windows 使用 Recycle Bin，macOS 使用 Finder Trash（必要时回退到用户 `~/.Trash`），Linux
+   优先使用 `gio trash`，其次 `trash-put`，均不可用时按 FreeDesktop Trash 规范写入
+   `$XDG_DATA_HOME/Trash/{files,info}`（未设置时使用 `~/.local/share/Trash`）。返回字段仍使用
+   `quarantine_path` / `quarantine_location` 表示实际回收站位置或 URI；提交同时写入持久化审计。
 
 安全移出能力支持明确指定的非空目录树和 symlink；目录内的 symlink、特殊文件不会阻断移动，也不会在
 prepare 时被逐项核验或回传，但
 absolute path、`..` 越界和中间 symlink 仍拒绝。`submit_move_out`
-在 MCP `tools/list` 中声明 `readOnlyHint=false`、`destructiveHint=false`、
-`idempotentHint=true` 和 `openWorldHint=false`，并发布仅限注册 Workspace、仅文件系统、
-无 shell、revision guarded、同级隔离区原子移动、可恢复和持久化审计等机器可读约束。
+在 MCP `tools/list` 中声明 `readOnlyHint=false`、`destructiveHint=true`、
+`idempotentHint=true` 和 `openWorldHint=false`。提交前仍执行注册 Workspace、显式目标、revision guard、
+目录不递归展开、symlink 不跟随、用户确认与持久化审计等安全约束；最终文件系统动作由平台回收站机制完成。
 
 示例：
 
@@ -543,8 +577,9 @@ operation_manage(action="result", operation_id="op_...")
 `operation_batch`。
 
 当异步操作内部执行 `execute` 时，MCPX 会等待其终端 Task 进入最终状态后
-再记录 `operation.completed`。`wait` 和 `result` 返回的顶层结果及步骤结果
-会展开 MCP 包装，客户端不需要再解析嵌套的 `content[].text`。
+再记录 `operation.completed`。`wait` 直接在 `steps[].result` 返回已展开的机器结果，
+不会再额外复制一份顶层 aggregate/raw MCP envelope；需要聚合结果或分页字节时显式调用
+`operation_manage(action="result")`。客户端不需要解析嵌套的 `content[].text`。
 
 ### 6. 统一响应
 
@@ -555,7 +590,8 @@ operation_manage(action="result", operation_id="op_...")
 `structuredContent` 公共结构（`status`、`type`、`context`、`data`、`error`、`hints`、`actions`），
 并对有硬上限的工具通过 `x-mcpx-limits` 发布与 `runtime_read(view="capabilities").limits` 同源的限制。
 `runtime_read(view="capabilities")` 的 `runtime` 同时给出 `version`、`build_commit`、`build_time`、
-`tool_schema_revision` 和 capability 版本信息；旧的顶层 revision alias 不再返回。
+`tool_schema_revision` 和 capability 版本信息；旧的顶层 revision alias 不再返回。正式 release/CI
+构建由 linker flags 注入真实 `build_commit` 与 `build_time`；普通 VCS 构建至少回填 revision/dirty 状态。
 
 | 状态 | 含义 |
 | --- | --- |

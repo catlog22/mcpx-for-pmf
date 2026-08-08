@@ -24,5 +24,12 @@ jobs:
         run: go vet ./...
       - name: Race test
         run: go test -race ./... -count=1
-      - name: Build
-        run: CGO_ENABLED=0 go build -o bin/mcpx-server ./cmd/mcpx-server
+      - name: Build with provenance
+        shell: bash
+        run: |
+          BUILD_COMMIT="$(git rev-parse HEAD)"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          CGO_ENABLED=0 go build -ldflags "-X main.commit=${BUILD_COMMIT} -X main.date=${BUILD_DATE}" -o bin/mcpx-server ./cmd/mcpx-server
+          VERSION_OUTPUT="$(./bin/mcpx-server -version)"
+          [[ "${VERSION_OUTPUT}" == *"commit=${BUILD_COMMIT}"* ]]
+          [[ "${VERSION_OUTPUT}" != *"date=unknown"* ]]

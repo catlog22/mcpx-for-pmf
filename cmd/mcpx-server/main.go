@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/debug"
+	"strings"
 
 	"mcpx/internal/logging"
 	"mcpx/internal/server"
@@ -17,7 +19,54 @@ var (
 	date    = "unknown"
 )
 
+type buildProvenance struct {
+	Version string
+	Commit  string
+	Date    string
+}
+
+func resolveBuildProvenance(versionValue, commitValue, dateValue string, settings []debug.BuildSetting) buildProvenance {
+	resolved := buildProvenance{Version: versionValue, Commit: commitValue, Date: dateValue}
+	if strings.TrimSpace(resolved.Version) == "" {
+		resolved.Version = buildversion.Current
+	}
+	if strings.TrimSpace(resolved.Commit) != "" && resolved.Commit != "none" {
+		return resolved
+	}
+	var revision string
+	modified := false
+	for _, setting := range settings {
+		switch setting.Key {
+		case "vcs.revision":
+			revision = strings.TrimSpace(setting.Value)
+		case "vcs.modified":
+			modified = setting.Value == "true"
+		}
+	}
+	if revision != "" {
+		resolved.Commit = revision
+		if modified {
+			resolved.Commit += "-dirty"
+		}
+	} else if strings.TrimSpace(resolved.Commit) == "" {
+		resolved.Commit = "none"
+	}
+	if strings.TrimSpace(resolved.Date) == "" {
+		resolved.Date = "unknown"
+	}
+	return resolved
+}
+
+func currentBuildProvenance() buildProvenance {
+	var settings []debug.BuildSetting
+	if info, ok := debug.ReadBuildInfo(); ok {
+		settings = info.Settings
+	}
+	return resolveBuildProvenance(version, commit, date, settings)
+}
+
 func main() {
+	build := currentBuildProvenance()
 	// Subcommands (before flag.Parse so they own their flags).
 	if len(os.Args) >= 2 {
 		switch os.Args[1] {
@@ -41,18 +90,18 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("mcpx-server %s (commit=%s date=%s)\n", version, commit, date)
+		fmt.Printf("mcpx-server %s (commit=%s date=%s)\n", build.Version, build.Commit, build.Date)
 		os.Exit(0)
 	}
 
 	logging.Init(logging.Options{Level: *logLevel, Format: *logFormat})
-	logging.Info("mcpx-server", "version", version, "commit", commit)
+	logging.Info("mcpx-server", "version", build.Version, "commit", build.Commit)
 
 	rt, err := server.New(server.Options{
 		AddrOverride: *addr,
-		Version:      version,
-		Commit:       commit,
-		Date:         date,
+		Version:      build.Version,
+		Commit:       build.Commit,
+		Date:         build.Date,
 	})
 	if err != nil {
 		logging.Error("startup failed", "err", err)

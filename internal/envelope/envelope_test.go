@@ -67,6 +67,21 @@ func TestCommandFailuresUseExecutionTaxonomy(t *testing.T) {
 	}
 }
 
+func TestOperationFailureExtractsExitCodeFromStepResults(t *testing.T) {
+	response := Fail(StatusError, "req1", "demo", map[string]any{
+		"steps": []map[string]any{{
+			"id": "run", "state": "failed",
+			"result": map[string]any{"data": map[string]any{"exit_code": 127}},
+		}},
+	}, "OPERATION_FAILED", "operation failed")
+	if response.Error == nil || response.Error.Category != "execution" || response.Error.Retryable {
+		t.Fatalf("unexpected operation classification: %+v", response.Error)
+	}
+	if response.Error.Details["exit_code"] != 127 {
+		t.Fatalf("exit code missing from nested step result: %+v", response.Error.Details)
+	}
+}
+
 func TestMarshalUsesSingleStatusAndCompactMeta(t *testing.T) {
 	response := OK("req_1", "demo", map[string]any{"session_id": "rs_1", "value": "ready"})
 	response.RemoteSessionID = "rs_1"

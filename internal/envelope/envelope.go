@@ -352,6 +352,12 @@ func exitCodeFromData(value any, depth int) (int, bool) {
 				return code, true
 			}
 		}
+	case []map[string]any:
+		for _, child := range typed {
+			if code, ok := exitCodeFromData(child, depth+1); ok {
+				return code, true
+			}
+		}
 	}
 	return 0, false
 }

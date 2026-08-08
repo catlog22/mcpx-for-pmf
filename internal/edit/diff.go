@@ -48,38 +48,106 @@ func renderDiffWithFinalNewline(path string, oldLines, newLines []string, ops []
 	return diff, changed
 }
 
-func renderDiff(path string, oldLines, newLines []string, ops []diffOp) (string, int) {
-	var b strings.Builder
-	changed := 0
-	fmt.Fprintf(&b, "--- a/%s\n+++ b/%s\n", path, path)
-	oldStart, newStart := 1, 1
-	if len(oldLines) == 0 {
-		oldStart = 0
-	}
-	if len(newLines) == 0 {
-		newStart = 0
-	}
-	fmt.Fprintf(&b, "@@ -%d,%d +%d,%d @@\n", oldStart, len(oldLines), newStart, len(newLines))
+const unifiedDiffContextLines = 3
 
+type diffHunk struct {
+	start int
+	end   int
+}
+
+func renderDiff(path string, oldLines, newLines []string, ops []diffOp) (string, int) {
+	changed := 0
 	for _, op := range ops {
-		switch op.kind {
-		case ' ':
-			b.WriteByte(' ')
-			b.WriteString(op.line)
-			b.WriteByte('\n')
-		case '-':
-			b.WriteByte('-')
-			b.WriteString(op.line)
-			b.WriteByte('\n')
-			changed++
-		case '+':
-			b.WriteByte('+')
-			b.WriteString(op.line)
-			b.WriteByte('\n')
+		if op.kind == '+' || op.kind == '-' {
 			changed++
 		}
 	}
+	if changed == 0 {
+		return "", 0
+	}
+
+	hunks := contextualDiffHunks(ops, unifiedDiffContextLines)
+	oldBefore := make([]int, len(ops))
+	newBefore := make([]int, len(ops))
+	oldLine, newLine := 1, 1
+	for index, op := range ops {
+		oldBefore[index] = oldLine
+		newBefore[index] = newLine
+		switch op.kind {
+		case ' ':
+			oldLine++
+			newLine++
+		case '-':
+			oldLine++
+		case '+':
+			newLine++
+		}
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "--- a/%s\n+++ b/%s\n", path, path)
+	for _, hunk := range hunks {
+		oldStart, newStart := oldBefore[hunk.start], newBefore[hunk.start]
+		oldCount, newCount := 0, 0
+		for _, op := range ops[hunk.start : hunk.end+1] {
+			switch op.kind {
+			case ' ':
+				oldCount++
+				newCount++
+			case '-':
+				oldCount++
+			case '+':
+				newCount++
+			}
+		}
+		if oldCount == 0 {
+			oldStart--
+			if oldStart < 0 {
+				oldStart = 0
+			}
+		}
+		if newCount == 0 {
+			newStart--
+			if newStart < 0 {
+				newStart = 0
+			}
+		}
+		fmt.Fprintf(&b, "@@ -%d,%d +%d,%d @@\n", oldStart, oldCount, newStart, newCount)
+		for _, op := range ops[hunk.start : hunk.end+1] {
+			b.WriteByte(op.kind)
+			b.WriteString(op.line)
+			b.WriteByte('\n')
+		}
+	}
 	return b.String(), changed
+}
+
+func contextualDiffHunks(ops []diffOp, contextLines int) []diffHunk {
+	if contextLines < 0 {
+		contextLines = 0
+	}
+	hunks := make([]diffHunk, 0)
+	for index, op := range ops {
+		if op.kind != '+' && op.kind != '-' {
+			continue
+		}
+		start := index - contextLines
+		if start < 0 {
+			start = 0
+		}
+		end := index + contextLines
+		if end >= len(ops) {
+			end = len(ops) - 1
+		}
+		if len(hunks) > 0 && start <= hunks[len(hunks)-1].end+1 {
+			if end > hunks[len(hunks)-1].end {
+				hunks[len(hunks)-1].end = end
+			}
+			continue
+		}
+		hunks = append(hunks, diffHunk{start: start, end: end})
+	}
+	return hunks
 }
 
 // CountChangedLines counts strict unified-diff change lines in an existing diff.

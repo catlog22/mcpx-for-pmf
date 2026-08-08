@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -194,6 +195,45 @@ func TestCleanCoreObserveChangesReturnsInlineDiff(t *testing.T) {
 	changes := asMapSlice(response["data"].(map[string]any)["changes"])
 	if len(changes) != 1 || !strings.Contains(changes[0]["diff_summary"].(string), "+new") {
 		t.Fatalf("observe changes=%+v", changes)
+	}
+}
+
+func TestCleanCoreEditUsesContextualDiffForSmallChangeInLargeFile(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	workspace, _ := rt.reg.Get("demo")
+	lines := make([]string, 724)
+	for index := range lines {
+		lines[index] = fmt.Sprintf("line-%03d", index+1)
+	}
+	old := strings.Join(lines, "\n") + "\n"
+	path := filepath.Join(workspace.Path, "large-small-change.txt")
+	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
+	remoteID := opened["remote_session_id"].(string)
+	response := callEnvelope(t, rt.toolEdit, context.Background(), map[string]any{
+		"remote_session_id": remoteID,
+		"purpose":           "preview one line in a large file",
+		"apply":             false,
+		"edits": []map[string]any{{
+			"path": "large-small-change.txt", "operation": "update", "base_sha256": digestForTest([]byte(old)),
+			"replacements": []map[string]any{{"match": "line-400", "replacement": "line-400 changed"}},
+		}},
+	})
+	if !statusOK(response) {
+		t.Fatalf("dry-run edit failed: %+v", response)
+	}
+	data := response["data"].(map[string]any)
+	preview, _ := data["diff_summary"].(string)
+	if data["diff_truncated"] == true || len(preview) > 1024 {
+		t.Fatalf("small edit should have a compact contextual diff: bytes=%d data=%+v", len(preview), data)
+	}
+	if diffBytes, _ := data["diff_bytes"].(float64); diffBytes > 1024 {
+		t.Fatalf("stored diff should be contextual for a small edit: %v", data["diff_bytes"])
+	}
+	if !strings.Contains(preview, "-line-400") || !strings.Contains(preview, "+line-400 changed") || strings.Contains(preview, "line-001") || strings.Contains(preview, "line-724") {
+		t.Fatalf("contextual diff content is incorrect: %s", preview)
 	}
 }
 

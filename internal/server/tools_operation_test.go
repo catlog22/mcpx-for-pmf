@@ -133,9 +133,17 @@ func TestAsyncCommandOperationWaitsForTerminalTask(t *testing.T) {
 		t.Fatalf("completed response=%+v", completed)
 	}
 	completedData, _ := completed["data"].(map[string]any)
-	completedResult, _ := completedData["result"].(map[string]any)
+	if completedData["result"] != nil {
+		t.Fatalf("wait must not duplicate step results in a top-level aggregate: %+v", completedData["result"])
+	}
+	completedSteps, _ := completedData["steps"].([]any)
+	if len(completedSteps) != 1 {
+		t.Fatalf("wait steps=%+v", completedData["steps"])
+	}
+	completedStep, _ := completedSteps[0].(map[string]any)
+	completedResult, _ := completedStep["result"].(map[string]any)
 	if completedResult["status"] != "succeeded" {
-		t.Fatalf("wait result must expose the machine-readable operation result: %+v", completed)
+		t.Fatalf("wait step must expose the machine-readable operation result: %+v", completed)
 	}
 	record, err := rt.operations.Get(context.Background(), operationID)
 	if err != nil {
@@ -255,6 +263,9 @@ func TestOperationBatchPublishesBoundedStatisticsForMaxSteps(t *testing.T) {
 		t.Fatalf("batch completion=%+v", completed)
 	}
 	data := completed["data"].(map[string]any)
+	if data["result"] != nil {
+		t.Fatalf("wait must not duplicate the aggregate result alongside steps: %+v", data["result"])
+	}
 	stats, ok := data["stats"].(map[string]any)
 	if !ok {
 		t.Fatalf("batch stats missing: %+v", data)

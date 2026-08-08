@@ -3,6 +3,7 @@ package edit
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -276,6 +277,34 @@ func TestCountChangedLines(t *testing.T) {
 	diff := "--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n line\n-old\n+new\n"
 	if n := CountChangedLines(diff); n != 2 {
 		t.Fatalf("count=%d want 2", n)
+	}
+}
+
+func TestUnifiedDiffUsesBoundedContextualHunks(t *testing.T) {
+	oldLines := make([]string, 200)
+	newLines := make([]string, 200)
+	for index := range oldLines {
+		oldLines[index] = fmt.Sprintf("line-%03d", index+1)
+		newLines[index] = oldLines[index]
+	}
+	newLines[99] = "line-100 changed"
+	newLines[189] = "line-190 changed"
+
+	diff, changed := UnifiedDiff("large.txt", strings.Join(oldLines, "\n")+"\n", strings.Join(newLines, "\n")+"\n")
+	if changed != 4 || CountChangedLines(diff) != 4 {
+		t.Fatalf("changed=%d count=%d diff=%s", changed, CountChangedLines(diff), diff)
+	}
+	if strings.Count(diff, "@@ ") != 2 {
+		t.Fatalf("distant edits must render as two contextual hunks: %s", diff)
+	}
+	if strings.Contains(diff, "line-001") || strings.Contains(diff, "line-200") {
+		t.Fatalf("unrelated distant context leaked into diff: %s", diff)
+	}
+	if !strings.Contains(diff, " line-097") || !strings.Contains(diff, " line-103") || !strings.Contains(diff, "-line-100") || !strings.Contains(diff, "+line-100 changed") {
+		t.Fatalf("first hunk context/change missing: %s", diff)
+	}
+	if len(diff) > 1024 {
+		t.Fatalf("small edits in a large file produced an oversized diff: %d bytes", len(diff))
 	}
 }
 

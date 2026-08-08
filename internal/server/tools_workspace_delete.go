@@ -101,10 +101,12 @@ func (r *Runtime) toolWorkspaceMoveOutPrepare(ctx context.Context, req *mcp.Call
 	if idErr != nil {
 		return r.moveOutError(envReq, session, "MOVE_OUT_ID_ERROR", idErr.Error(), nil)
 	}
+	now := time.Now().UTC()
 	item := deletion.Request{
 		ID: moveID, RemoteSessionID: session.ID, PrincipalID: principal.ID,
 		Workspace: session.WorkspaceName, WorkspacePath: session.WorkspacePath, Purpose: envReq.Purpose,
 		IdempotencyKey: key, Manifest: manifest, ManifestSHA256: manifestSHA,
+		CreatedAt: now, ExpiresAt: now.Add(deletion.DefaultTTL), UpdatedAt: now,
 	}
 	item.ConfirmationUUIDHash = deletion.HashConfirmationUUID(item.ID)
 	if err := r.deletions.Create(ctx, item); err != nil {
@@ -226,7 +228,8 @@ func (r *Runtime) commitMoveOutManifest(ctx context.Context, envReq envelope.Req
 		MoveRequestID: item.ID, ManifestSHA256: item.ManifestSHA256, MoveID: newRuntimeID("move", 12), AuditEventID: newRuntimeID("audit", 12),
 		Targets: make([]moveOutTargetResult, 0, len(item.Manifest.Targets)), MovedBytesKnown: true, Reversible: true,
 	}
-	parentRoot, workspaceBase, err := openWorkspaceSiblingRoot(session.WorkspacePath)
+
+	workspacePath, err := filepath.Abs(session.WorkspacePath)
 	if err != nil {
 		for _, target := range item.Manifest.Targets {
 			result.Targets = append(result.Targets, moveOutTargetResult{Path: target.Path, Kind: target.Kind, ExpectedSHA256: target.ExpectedSHA256, Size: target.Size, Status: "failed", ErrorCode: "WORKSPACE_ROOT_ERROR"})
@@ -234,7 +237,20 @@ func (r *Runtime) commitMoveOutManifest(ctx context.Context, envReq envelope.Req
 		result.FailedCount = len(result.Targets)
 		return result
 	}
-	defer parentRoot.Close()
+
+	platform := "linux"
+	if os.PathSeparator == '\\' {
+		platform = "windows"
+	} else {
+		systemName := strings.ToLower(strings.TrimSpace(boundedCommand(ctx, workspacePath, "uname", "-s")))
+		switch {
+		case strings.Contains(systemName, "darwin"):
+			platform = "darwin"
+		case strings.Contains(systemName, "mingw"), strings.Contains(systemName, "msys"), strings.Contains(systemName, "cygwin"):
+			platform = "windows"
+		}
+	}
+
 	for index, target := range item.Manifest.Targets {
 		entries, finalKind, inspectErr := r.inspectMoveOutTargetForCommit(session, target)
 		if inspectErr != nil {
@@ -242,20 +258,109 @@ func (r *Runtime) commitMoveOutManifest(ctx context.Context, envReq envelope.Req
 			result.FailedCount++
 			continue
 		}
-		destination, destinationErr := moveOutDestination(parentRoot, item.ID, index, target.Path)
-		if destinationErr != nil {
-			result.Targets = append(result.Targets, moveOutTargetResult{Path: target.Path, Kind: finalKind, ExpectedSHA256: target.ExpectedSHA256, Size: target.Size, Status: "failed", ErrorCode: "MOVE_OUT_QUARANTINE_ERROR"})
-			result.FailedCount++
-			continue
+
+		source := filepath.Join(workspacePath, filepath.FromSlash(target.Path))
+		trashPath := "trash://" + filepath.ToSlash(filepath.Base(target.Path))
+		trashLocation := "trash://"
+		moved := false
+
+		switch platform {
+		case "windows":
+			script := `$ErrorActionPreference='Stop'; Add-Type -AssemblyName Microsoft.VisualBasic; $p=$args[0]; $entry=Get-Item -LiteralPath $p -Force; if ($entry.PSIsContainer) { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($p,[Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,[Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin,[Microsoft.VisualBasic.FileIO.UICancelOption]::ThrowException) } else { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($p,[Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,[Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin,[Microsoft.VisualBasic.FileIO.UICancelOption]::ThrowException) }`
+			_ = boundedCommand(ctx, workspacePath, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script, source)
+			if _, statErr := os.Lstat(source); errors.Is(statErr, os.ErrNotExist) {
+				moved = true
+			} else {
+				_ = boundedCommand(ctx, workspacePath, "pwsh.exe", "-NoProfile", "-NonInteractive", "-Command", script, source)
+				if _, statErr := os.Lstat(source); errors.Is(statErr, os.ErrNotExist) {
+					moved = true
+				}
+			}
+			trashPath = "recycle-bin://" + filepath.ToSlash(filepath.Base(target.Path))
+			trashLocation = "recycle-bin://"
+
+		case "darwin":
+			_ = boundedCommand(ctx, workspacePath, "osascript",
+				"-e", "on run argv",
+				"-e", `tell application "Finder" to delete POSIX file (item 1 of argv)`,
+				"-e", "end run", source,
+			)
+			if _, statErr := os.Lstat(source); errors.Is(statErr, os.ErrNotExist) {
+				moved = true
+			} else if home, homeErr := os.UserHomeDir(); homeErr == nil {
+				trashDir := filepath.Join(home, ".Trash")
+				if mkdirErr := os.MkdirAll(trashDir, 0o700); mkdirErr == nil {
+					destination := filepath.Join(trashDir, fmt.Sprintf("%s-%05d-%s", item.ID, index+1, filepath.Base(target.Path)))
+					if renameErr := os.Rename(source, destination); renameErr == nil {
+						moved = true
+						trashPath = filepath.ToSlash(destination)
+						trashLocation = filepath.ToSlash(trashDir)
+					}
+				}
+			}
+
+		default:
+			_ = boundedCommand(ctx, workspacePath, "gio", "trash", source)
+			if _, statErr := os.Lstat(source); errors.Is(statErr, os.ErrNotExist) {
+				moved = true
+			} else {
+				_ = boundedCommand(ctx, workspacePath, "trash-put", source)
+				if _, statErr := os.Lstat(source); errors.Is(statErr, os.ErrNotExist) {
+					moved = true
+				}
+			}
+			if !moved {
+				home, homeErr := os.UserHomeDir()
+				if homeErr == nil {
+					dataHome := strings.TrimSpace(os.Getenv("XDG_DATA_HOME"))
+					if dataHome == "" {
+						dataHome = filepath.Join(home, ".local", "share")
+					}
+					trashRoot := filepath.Join(dataHome, "Trash")
+					filesDir := filepath.Join(trashRoot, "files")
+					infoDir := filepath.Join(trashRoot, "info")
+					if os.MkdirAll(filesDir, 0o700) == nil && os.MkdirAll(infoDir, 0o700) == nil {
+						name := fmt.Sprintf("%s-%05d-%s", result.MoveID, index+1, filepath.Base(target.Path))
+						destination := filepath.Join(filesDir, name)
+						infoPath := filepath.Join(infoDir, name+".trashinfo")
+						var encoded strings.Builder
+						for offset := 0; offset < len(source); offset++ {
+							ch := source[offset]
+							if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || strings.ContainsRune("-._~/", rune(ch)) {
+								encoded.WriteByte(ch)
+							} else {
+								fmt.Fprintf(&encoded, "%%%02X", ch)
+							}
+						}
+						info := "[Trash Info]\nPath=" + encoded.String() + "\nDeletionDate=" + time.Now().Format("2006-01-02T15:04:05") + "\n"
+						if infoFile, createErr := os.OpenFile(infoPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600); createErr == nil {
+							_, writeErr := infoFile.Write([]byte(info))
+							closeErr := infoFile.Close()
+							if writeErr == nil && closeErr == nil {
+								if renameErr := os.Rename(source, destination); renameErr == nil {
+									moved = true
+									trashPath = filepath.ToSlash(destination)
+									trashLocation = filepath.ToSlash(trashRoot)
+								} else {
+									_ = os.Remove(infoPath)
+								}
+							} else {
+								_ = os.Remove(infoPath)
+							}
+						}
+					}
+				}
+			}
 		}
-		source := filepath.Join(workspaceBase, filepath.FromSlash(target.Path))
-		if moveErr := parentRoot.Rename(source, destination); moveErr != nil {
-			result.Targets = append(result.Targets, moveOutTargetResult{Path: target.Path, Kind: finalKind, ExpectedSHA256: target.ExpectedSHA256, Size: target.Size, Status: "failed", ErrorCode: "MOVE_OUT_FAILED"})
-			result.FailedCount++
-			continue
-		}
+
 		entry := entries[0]
-		result.Targets = append(result.Targets, moveOutTargetResult{Path: entry.Path, Kind: entry.Kind, ExpectedSHA256: entry.ExpectedSHA256, Size: entry.Size, Status: "moved", QuarantinePath: destination})
+		if !moved {
+			result.Targets = append(result.Targets, moveOutTargetResult{Path: entry.Path, Kind: finalKind, ExpectedSHA256: entry.ExpectedSHA256, Size: entry.Size, Status: "failed", ErrorCode: "MOVE_OUT_FAILED"})
+			result.FailedCount++
+			continue
+		}
+
+		result.Targets = append(result.Targets, moveOutTargetResult{Path: entry.Path, Kind: entry.Kind, ExpectedSHA256: entry.ExpectedSHA256, Size: entry.Size, Status: "moved", QuarantinePath: trashPath})
 		result.MovedCount++
 		if entry.Kind == "directory" {
 			result.MovedBytesKnown = false
@@ -263,9 +368,10 @@ func (r *Runtime) commitMoveOutManifest(ctx context.Context, envReq envelope.Req
 			result.MovedBytes += entry.Size
 		}
 		if result.QuarantineLocation == "" {
-			result.QuarantineLocation = filepath.ToSlash(filepath.Dir(destination))
+			result.QuarantineLocation = trashLocation
 		}
 	}
+
 	if result.FailedCount == 0 {
 		result.Status = "committed"
 	} else if result.MovedCount == 0 {
@@ -273,7 +379,7 @@ func (r *Runtime) commitMoveOutManifest(ctx context.Context, envReq envelope.Req
 	} else {
 		result.Status = "partial"
 	}
-	_ = r.remote.AddEvent(ctx, principal, remotesession.Event{RemoteSessionID: session.ID, Type: "workspace.move_out.committed", OperationID: result.MoveID, Summary: fmt.Sprintf("moved %d explicit target(s) to managed quarantine", result.MovedCount), Metadata: map[string]any{"move_request_id": item.ID, "manifest_sha256": item.ManifestSHA256, "status": result.Status, "moved_bytes": result.MovedBytes, "moved_bytes_known": result.MovedBytesKnown, "reversible": true, "audit_event_id": result.AuditEventID}})
+	_ = r.remote.AddEvent(ctx, principal, remotesession.Event{RemoteSessionID: session.ID, Type: "workspace.move_out.committed", OperationID: result.MoveID, Summary: fmt.Sprintf("moved %d explicit target(s) to system trash", result.MovedCount), Metadata: map[string]any{"move_request_id": item.ID, "manifest_sha256": item.ManifestSHA256, "status": result.Status, "moved_bytes": result.MovedBytes, "moved_bytes_known": result.MovedBytesKnown, "reversible": true, "audit_event_id": result.AuditEventID}})
 	r.observeWorkspaceMoveOut(ctx, envReq, session, result)
 	return result
 }

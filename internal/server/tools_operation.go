@@ -403,10 +403,11 @@ func operationView(record operation.Record, includeResults bool) map[string]any 
 			"timeout_ms":   30000,
 		})
 	}
-	if includeResults {
-		data["result"] = operationResultValue(record.Result)
-		data["error"] = decodeJSONValue(record.Error)
-	}
+	// A completed wait already exposes each machine-readable result under
+	// steps[].result. Do not also copy record.Result here: for multi-step
+	// operations it is an aggregate of the raw stored MCP envelopes and would
+	// duplicate the same payload at the top level. Callers that need the
+	// aggregate or paged bytes use operation_manage(action=result).
 	return data
 }
 
