@@ -17,7 +17,7 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	runtime.registerTools(protocol)
 
 	want := []string{
-		"session", "read", "edit", "remove_prepare", "submit_remove", "observe",
+		"session", "read", "edit", "move_out_prepare", "submit_move_out", "observe",
 		"operation_batch", "operation_manage",
 		"execute", "plan", "artifact", "discover", "skill_call", "mcp_call",
 		"runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide",
@@ -75,7 +75,7 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	if safety["scope"] != "registered_workspace_root" || safety["approval"] == "host_user_approval_required" {
 		t.Fatalf("edit safety metadata is incomplete: %+v", safety)
 	}
-	if !strings.Contains(editTool.Description, "不提供文件删除") || !strings.Contains(editTool.Description, "remove_prepare") {
+	if !strings.Contains(editTool.Description, "不提供文件删除") || !strings.Contains(editTool.Description, "move_out_prepare") {
 		t.Fatalf("edit description must explain the removal boundary: %s", editTool.Description)
 	}
 	var editSchema map[string]any
@@ -94,12 +94,12 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 			t.Fatalf("edit item missing %q: %s", field, mcpresult.ToolSchemaJSON(editTool))
 		}
 	}
-	removeTool := runtime.listedToolMap()["submit_remove"]
-	if removeTool.Annotations == nil || removeTool.Annotations.ReadOnlyHint || removeTool.Annotations.DestructiveHint == nil || !*removeTool.Annotations.DestructiveHint || !removeTool.Annotations.IdempotentHint || removeTool.Annotations.OpenWorldHint == nil || *removeTool.Annotations.OpenWorldHint {
-		t.Fatalf("submit_remove annotations=%+v", removeTool.Annotations)
+	moveOutTool := runtime.listedToolMap()["submit_move_out"]
+	if moveOutTool.Annotations == nil || moveOutTool.Annotations.ReadOnlyHint || moveOutTool.Annotations.DestructiveHint == nil || *moveOutTool.Annotations.DestructiveHint || !moveOutTool.Annotations.IdempotentHint || moveOutTool.Annotations.OpenWorldHint == nil || *moveOutTool.Annotations.OpenWorldHint {
+		t.Fatalf("submit_move_out annotations=%+v", moveOutTool.Annotations)
 	}
-	if safety := toolSafetyMetadata(map[string]any{"_meta": removeTool.Meta}); safety["approval"] != "web_model_user_confirmation_required" || safety["filesystem_only"] != true || safety["registered_workspace"] != true || safety["confirmation_credential"] != "server_generated_confirmation_uuid" {
-		t.Fatalf("submit_remove safety metadata=%+v", safety)
+	if safety := toolSafetyMetadata(map[string]any{"_meta": moveOutTool.Meta}); safety["approval"] != "web_model_user_confirmation_required" || safety["filesystem_only"] != true || safety["registered_workspace"] != true || safety["confirmation_credential"] != "server_generated_confirmation_uuid" || safety["no_symlink_following"] != true || safety["symlink_entry_move"] != true || safety["reversible"] != true {
+		t.Fatalf("submit_move_out safety metadata=%+v", safety)
 	}
 	observeTool := runtime.listedToolMap()["observe"]
 	var observeSchema map[string]any

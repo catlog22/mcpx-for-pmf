@@ -214,7 +214,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		}
 	}
 	expectedTools := []string{
-		"session", "read", "edit", "remove_prepare", "submit_remove", "observe",
+		"session", "read", "edit", "move_out_prepare", "submit_move_out", "observe",
 		"operation_batch", "operation_manage",
 		"execute", "plan", "artifact", "discover", "skill_call", "mcp_call",
 		"runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide",
@@ -264,15 +264,29 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	if !strings.Contains(schemaText, "update") || !strings.Contains(schemaText, "create") || !strings.Contains(schemaText, "rename") || strings.Contains(schemaText, "user_confirmed") || strings.Contains(schemaText, "\"delete\"") {
 		t.Fatalf("edit operation enum incomplete: %s", schemaText)
 	}
-	removeSchema, _ := json.Marshal(byName["remove_prepare"].InputSchema)
-	for _, needle := range []string{"targets", "kind", "expected_sha256"} {
+	removeSchema, _ := json.Marshal(byName["move_out_prepare"].InputSchema)
+	for _, needle := range []string{"targets", "kind", "expected_sha256", "symlink"} {
 		if !strings.Contains(string(removeSchema), needle) {
-			t.Fatalf("remove_prepare schema missing %q: %s", needle, removeSchema)
+			t.Fatalf("move_out_prepare schema missing %q: %s", needle, removeSchema)
 		}
 	}
-	commitSchema, _ := json.Marshal(byName["submit_remove"].InputSchema)
-	if !strings.Contains(string(commitSchema), "manifest_sha256") || !strings.Contains(string(commitSchema), "confirmation_uuid") {
-		t.Fatalf("submit_remove schema missing frozen confirmation fields: %s", commitSchema)
+	commitSchema, _ := json.Marshal(byName["submit_move_out"].InputSchema)
+	var commitSchemaMap map[string]any
+	if err := json.Unmarshal(commitSchema, &commitSchemaMap); err != nil {
+		t.Fatal(err)
+	}
+	commitProperties, _ := commitSchemaMap["properties"].(map[string]any)
+	if commitProperties["remote_session_id"] == nil || commitProperties["confirmation_uuid"] == nil {
+		t.Fatalf("submit_move_out schema missing the two submission parameters: %s", commitSchema)
+	}
+	for _, legacy := range []string{"workspace", "move_request_id", "manifest_sha256", "idempotency_key"} {
+		if commitProperties[legacy] != nil {
+			t.Fatalf("submit_move_out must bind %q server-side: %s", legacy, commitSchema)
+		}
+	}
+	requiredCommit, _ := commitSchemaMap["required"].([]any)
+	if len(requiredCommit) != 2 || requiredCommit[0] != "remote_session_id" || requiredCommit[1] != "confirmation_uuid" {
+		t.Fatalf("submit_move_out required fields=%+v", requiredCommit)
 	}
 	commandSchema, _ := json.Marshal(byName["execute"].InputSchema)
 	for _, required := range []string{"remote_session_id", "purpose"} {
@@ -289,8 +303,8 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 			t.Fatalf("read exposes removed compatibility field %q: %s", removed, contextSchema)
 		}
 	}
-	if !strings.Contains(string(contextSchema), `"mode"`) || !strings.Contains(string(contextSchema), `"items"`) {
-		t.Fatalf("read schema must expose mode and items: %s", contextSchema)
+	if !strings.Contains(string(contextSchema), `"mode"`) || !strings.Contains(string(contextSchema), `"items"`) || !strings.Contains(string(contextSchema), `"entries_cursor"`) || !strings.Contains(string(contextSchema), `"entries_limit"`) {
+		t.Fatalf("read schema must expose file and direct-entry pagination fields: %s", contextSchema)
 	}
 	extensionSchema, _ := json.Marshal(byName["discover"].InputSchema)
 	if !strings.Contains(string(extensionSchema), "view") || !strings.Contains(string(extensionSchema), "include_tools") || !strings.Contains(string(extensionSchema), "server") {

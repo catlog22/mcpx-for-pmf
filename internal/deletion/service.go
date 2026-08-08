@@ -1,4 +1,4 @@
-// Package deletion persists frozen, workspace-scoped delete requests.
+// Package deletion persists frozen, workspace-scoped move-out requests.
 // Filesystem validation and mutation stay in the server package; this package
 // only owns the durable request state and manifest identity.
 package deletion
@@ -17,7 +17,7 @@ import (
 
 const DefaultTTL = 30 * time.Minute
 
-// NewUUID creates the server-issued credential returned by remove_prepare.
+// NewUUID creates the server-issued credential returned by move_out_prepare.
 // It is deliberately generated here rather than accepted from tool input.
 func NewUUID() (string, error) {
 	var raw [16]byte
@@ -34,25 +34,28 @@ func NewUUID() (string, error) {
 }
 
 var (
-	ErrNotFound  = errors.New("delete request not found")
-	ErrConflict  = errors.New("delete request conflict")
-	ErrInProcess = errors.New("delete request is already committing")
+	ErrNotFound  = errors.New("move-out request not found")
+	ErrConflict  = errors.New("move-out request conflict")
+	ErrInProcess = errors.New("move-out request is already committing")
 )
 
 type Target struct {
 	Path           string `json:"path"`
 	Kind           string `json:"kind"`
 	ExpectedSHA256 string `json:"expected_sha256"`
+	LinkTarget     string `json:"link_target,omitempty"`
+	LinkSHA256     string `json:"link_sha256,omitempty"`
 	Size           int64  `json:"size"`
 }
 
 type Manifest struct {
-	Workspace      string   `json:"workspace"`
-	Targets        []Target `json:"targets"`
-	Entries        []Target `json:"entries"`
-	FileCount      int      `json:"file_count"`
-	DirectoryCount int      `json:"directory_count"`
-	TotalBytes     int64    `json:"total_bytes"`
+	Workspace       string   `json:"workspace"`
+	Targets         []Target `json:"targets"`
+	FileCount       int      `json:"file_count"`
+	DirectoryCount  int      `json:"directory_count"`
+	SymlinkCount    int      `json:"symlink_count"`
+	TotalBytes      int64    `json:"total_bytes"`
+	TotalBytesKnown bool     `json:"total_bytes_known"`
 }
 
 func (m Manifest) Bytes() ([]byte, error) { return json.Marshal(m) }
@@ -67,8 +70,8 @@ func (m Manifest) SHA256() (string, error) {
 }
 
 // HashConfirmationUUID stores only the digest of the server-generated
-// confirmation credential. The UUID itself is returned by remove_prepare and
-// must be presented by submit_remove after the web client has asked the user.
+// confirmation credential. The UUID itself is returned by move_out_prepare and
+// must be presented by submit_move_out after the web client has asked the user.
 func HashConfirmationUUID(uuid string) string {
 	sum := sha256.Sum256([]byte(uuid))
 	return "sha256:" + hex.EncodeToString(sum[:])
@@ -103,7 +106,7 @@ func (s *Store) Create(ctx context.Context, item Request) error {
 	}
 	manifest, err := item.Manifest.Bytes()
 	if err != nil {
-		return fmt.Errorf("encode delete manifest: %w", err)
+		return fmt.Errorf("encode move-out manifest: %w", err)
 	}
 	now := item.CreatedAt.UTC()
 	if now.IsZero() {
@@ -123,7 +126,7 @@ func (s *Store) Create(ctx context.Context, item Request) error {
 		firstStatus(item.Status, "prepared"), item.ConfirmationUUIDHash, jsonBytes(item.ResultJSON),
 		now.UnixMilli(), expires.UnixMilli(), now.UnixMilli())
 	if err != nil {
-		return fmt.Errorf("persist delete request: %w", err)
+		return fmt.Errorf("persist move-out request: %w", err)
 	}
 	return nil
 }
@@ -150,7 +153,7 @@ func (s *Store) Get(ctx context.Context, id string) (Request, error) {
 		return Request{}, err
 	}
 	if err := json.Unmarshal([]byte(manifestJSON), &item.Manifest); err != nil {
-		return Request{}, fmt.Errorf("decode delete manifest: %w", err)
+		return Request{}, fmt.Errorf("decode move-out manifest: %w", err)
 	}
 	item.ResultJSON = []byte(resultJSON)
 	item.CreatedAt = time.UnixMilli(created).UTC()

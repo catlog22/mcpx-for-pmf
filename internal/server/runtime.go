@@ -794,7 +794,7 @@ func envelopeHumanSummary(resp envelope.Response) string {
 	// so previews that truncate content still leave a usable retry key.
 	if label, credential := confirmationCredentialFromData(resp.Data); credential != "" {
 		if label == "confirmation_uuid" {
-			return "confirmation_uuid: `" + credential + "` · ask the web user, then call submit_remove"
+			return "confirmation_uuid: `" + credential + "` · ask the web user, then call submit_move_out"
 		}
 		return "confirmation_token: `" + credential + "`"
 	}

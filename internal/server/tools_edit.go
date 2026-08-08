@@ -53,8 +53,8 @@ func (r *Runtime) toolEdit(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	for index, item := range edits {
 		if item.Operation == edit.OpDelete {
 			return r.editToolError(envReq, session, &edit.ApplyError{
-				Code:    "DELETE_USE_REMOVE",
-				Message: "file removal requires remove_prepare followed by submit_remove",
+				Code:    "MOVE_OUT_REQUIRED",
+				Message: "file removal requires move_out_prepare followed by submit_move_out",
 				Path:    item.Path,
 				Index:   index,
 				Err:     edit.ErrUnsupportedOp,
@@ -268,9 +268,9 @@ func editRecovery(code string, ae *edit.ApplyError) any {
 			"message":           fmt.Sprintf("split the edit into smaller batches; max total changed lines is %d", edit.MaxChangedLines),
 		}
 	case "SYMLINK_NOT_ALLOWED", "DELETE_FILE_ONLY":
-		return "delete only a regular workspace file; do not follow or remove symlink paths"
-	case "DELETE_USE_REMOVE":
-		return "use remove_prepare, ask the web user to confirm the frozen manifest, then submit_remove with confirmation_uuid; edit never removes files"
+		return "move out only an explicit regular file, directory or symlink entry; do not follow symlink paths"
+	case "MOVE_OUT_REQUIRED":
+		return "use move_out_prepare, ask the web user to confirm the frozen manifest, then submit_move_out with confirmation_uuid; edit never removes files"
 	case "FILE_DENIED", "POLICY_DENIED":
 		return "adjust the path or obtain policy approval"
 	default:
@@ -299,9 +299,9 @@ func editSuggestedNext(code, remoteSessionID string, ae *edit.ApplyError) map[st
 		next["action"] = "split_edit"
 		next["max_changed_lines"] = edit.MaxChangedLines
 		next["note"] = "split edits so total +/- lines <= 1000"
-	case "DELETE_USE_REMOVE":
-		next["tool"] = "remove_prepare"
-		next["purpose"] = "prepare the explicitly confirmed workspace deletion"
+	case "MOVE_OUT_REQUIRED":
+		next["tool"] = "move_out_prepare"
+		next["purpose"] = "prepare the user-requested workspace move to managed quarantine"
 	default:
 		next["tool"] = "edit"
 	}

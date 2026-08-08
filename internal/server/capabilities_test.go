@@ -17,6 +17,7 @@ import (
 	"mcpx/internal/file"
 	"mcpx/internal/operation"
 	"mcpx/internal/remotesession"
+	"mcpx/internal/source"
 )
 
 func TestCapabilityCatalogMatchesRegisteredTools(t *testing.T) {
@@ -62,7 +63,7 @@ func TestMachineToolCapabilitiesApplyRoleAndFeatureState(t *testing.T) {
 func TestMachineCapabilitiesPublishHardLimits(t *testing.T) {
 	limits := publishedLimits()
 	read := limits["read"].(map[string]any)
-	if read["max_source_bytes"] != file.MaxSourceBytes || read["max_items"] != MaxReadItems {
+	if read["max_source_bytes"] != file.MaxSourceBytes || read["max_items"] != MaxReadItems || read["max_direct_entries"] != source.MaxDirectListEntries {
 		t.Fatalf("read limits=%+v", read)
 	}
 	if limits["operation_batch"].(map[string]any)["max_steps"] != operation.MaxSteps {
@@ -71,9 +72,9 @@ func TestMachineCapabilitiesPublishHardLimits(t *testing.T) {
 	if limits["edit"].(map[string]any)["max_changed_lines"] != edit.MaxChangedLines {
 		t.Fatalf("edit limits=%+v", limits["edit"])
 	}
-	remove := limits["remove_prepare"].(map[string]any)
-	if remove["max_targets"] != MaxRemoveTargets || remove["max_manifest_entries"] != MaxRemoveManifestEntries {
-		t.Fatalf("remove limits=%+v", remove)
+	moveOut := limits["move_out_prepare"].(map[string]any)
+	if moveOut["max_targets"] != MaxMoveOutTargets || moveOut["max_response_preview_targets"] != MaxMoveOutResponsePreviewTargets || moveOut["max_manifest_entries"] != nil {
+		t.Fatalf("move-out limits=%+v", moveOut)
 	}
 	items := machineToolCapabilities(config.DefaultConfig(), nil)
 	for _, item := range items {

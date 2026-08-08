@@ -4,11 +4,12 @@ import (
 	"mcpx/internal/edit"
 	"mcpx/internal/file"
 	"mcpx/internal/operation"
+	"mcpx/internal/source"
 )
 
 const MaxReadItems = 20
-const MaxRemoveTargets = 10000
-const MaxRemoveManifestEntries = 100000
+const MaxMoveOutTargets = 10000
+const MaxMoveOutResponsePreviewTargets = 20
 
 // publishedLimits is the single source for hard request limits exposed to
 // models through runtime capabilities. Tool schemas repeat the limits where a
@@ -16,8 +17,9 @@ const MaxRemoveManifestEntries = 100000
 func publishedLimits() map[string]any {
 	return map[string]any{
 		"read": map[string]any{
-			"max_source_bytes": file.MaxSourceBytes,
-			"max_items":        MaxReadItems,
+			"max_source_bytes":   file.MaxSourceBytes,
+			"max_items":          MaxReadItems,
+			"max_direct_entries": source.MaxDirectListEntries,
 		},
 		"operation_batch": map[string]any{
 			"max_steps": operation.MaxSteps,
@@ -25,12 +27,9 @@ func publishedLimits() map[string]any {
 		"edit": map[string]any{
 			"max_changed_lines": edit.MaxChangedLines,
 		},
-		"remove_prepare": map[string]any{
-			"max_targets":          MaxRemoveTargets,
-			"max_manifest_entries": MaxRemoveManifestEntries,
-		},
-		"submit_remove": map[string]any{
-			"max_manifest_entries": MaxRemoveManifestEntries,
+		"move_out_prepare": map[string]any{
+			"max_targets":                  MaxMoveOutTargets,
+			"max_response_preview_targets": MaxMoveOutResponsePreviewTargets,
 		},
 	}
 }

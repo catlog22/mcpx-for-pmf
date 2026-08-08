@@ -1,9 +1,9 @@
 # Public tool short descriptions (list surface). Schema structure stays in Go.
 tools:
-  read: 读取 Workspace 文件、搜索结果、文件列表、上下文或环境；view 决定读取语义，支持 items[] 批量读取。
-  edit: 使用精确片段或完整内容批量修改 Workspace 文件；不提供文件删除。删除必须使用 remove_prepare/submit_remove；返回内联 Unified Diff 与严格变更行统计。
-  remove_prepare: 冻结已注册 Workspace 内明确文件或目录树的删除清单；严格只读，不执行删除，返回 manifest_sha256 和用户批准摘要。
-  submit_remove: 提交网页端模型向用户询问后确认的冻结删除清单；仅接受 remove_prepare 返回的 confirmation_uuid，只删除 SHA/目录树摘要匹配的 Workspace 文件或明确目录，不执行 shell、glob 或 symlink 跟随，并保留 durable audit。
+  read: 读取 Workspace 文件、搜索结果、文件列表、上下文或环境；view 决定读取语义，支持 items[] 批量读取。view=list 同时返回递归普通文件 files 和当前 scope 第一层 entries（file/directory/symlink/other）；清理 Workspace 前优先读取根 entries，entries_complete=false 或 entries_policy_filtered=true 时不得声称范围完整。
+  edit: 使用精确片段或完整内容批量修改 Workspace 文件；不提供文件删除。用户提出删除、移除或清理时必须使用 move_out_prepare/submit_move_out；返回内联 Unified Diff 与严格变更行统计。
+  move_out_prepare: 冻结已注册 Workspace 内明确文件、目录或 symlink 的安全移出清单；严格只读，不执行移动。directory 只校验根路径，不扫描、哈希或返回子树；symlink 冻结链接文本且绝不读取目标。响应最多返回 20 个显式目标预览，避免大目录阻塞模型客户端；若只是检查清单，purpose 必须明确为仅 prepare/仅预览并在此停止；若用户明确要求删除、移除或清理，purpose 从本次 prepare 开始就必须表达真实意图为“安全移至隔离区”，并返回 manifest_sha256、confirmation_uuid 和仅含两个参数的 submit_move_out_arguments。
+  submit_move_out: 提交网页端模型向用户询问后确认的冻结安全移出清单；只接受 remote_session_id 和 move_out_prepare 返回的 confirmation_uuid。manifest、purpose、idempotency_key、Workspace 均由服务端按 UUID 绑定，不允许模型重复填写或覆盖。directory 通过受 Workspace 同级 Root 约束的原子 rename 移至服务端隔离区，symlink 只移动链接入口；均不执行 shell、glob 或 symlink 跟随，并保留 durable audit 与可恢复位置。目录的子项数量和移动字节数不枚举，结果会明确标识为未知。
   observe: 查看会话状态、历史、最近文件变更、任务日志或工作区差异；view=history 支持按事件、请求、Operation、Task、Changeset、关键词、类型、状态和时间过滤，并用 cursor 分页。
   session: 创建、直接接入或关闭 Remote Session；action 决定生命周期。
   execute: 按策略执行命令或项目任务，并统一处理 Task attach/stop/stdin；短命令内联返回，超过 yield_time_ms 才返回 Task ID；execution_mode=async 只表示 Operation 异步调度。

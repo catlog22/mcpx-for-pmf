@@ -91,6 +91,9 @@ func TestReadItemsLimitAndListPathAreStructured(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workspace.Path, "outside.txt"), []byte("outside\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Symlink("scoped", filepath.Join(workspace.Path, "scoped-link")); err != nil {
+		t.Fatal(err)
+	}
 	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
 	remoteID := opened["remote_session_id"].(string)
 	items := make([]any, MaxReadItems+1)
@@ -117,6 +120,37 @@ func TestReadItemsLimitAndListPathAreStructured(t *testing.T) {
 	files, _ := data["files"].([]any)
 	if len(files) != 1 || files[0].(map[string]any)["path"] != "scoped/inside.txt" {
 		t.Fatalf("path scope leaked: %+v", data)
+	}
+	rootList := callEnvelope(t, rt.toolRead, context.Background(), map[string]any{
+		"remote_session_id": remoteID, "view": "list", "entries_limit": 100,
+	})
+	if !statusOK(rootList) {
+		t.Fatalf("root list=%+v", rootList)
+	}
+	rootData, _ := rootList["data"].(map[string]any)
+	if rootData["entries_scope"] != "." || rootData["entries_complete"] != true || rootData["entries_policy_filtered"] != false {
+		t.Fatalf("root direct inventory metadata=%+v", rootData)
+	}
+	entries, _ := rootData["entries"].([]any)
+	kinds := map[string]string{}
+	for _, raw := range entries {
+		entry, _ := raw.(map[string]any)
+		kinds[entry["path"].(string)] = entry["kind"].(string)
+	}
+	if kinds["scoped"] != "directory" || kinds["outside.txt"] != "file" || kinds["scoped-link"] != "symlink" {
+		t.Fatalf("root direct inventory types=%+v", kinds)
+	}
+	pagedRootList := callEnvelope(t, rt.toolRead, context.Background(), map[string]any{
+		"remote_session_id": remoteID, "view": "list", "entries_limit": 2,
+	})
+	pagedData, _ := pagedRootList["data"].(map[string]any)
+	if pagedData["entries_complete"] != false || pagedData["entries_next_cursor"] == "" {
+		t.Fatalf("paged direct inventory must require continuation: %+v", pagedData)
+	}
+	next, _ := pagedData["entries_next_action"].(map[string]any)
+	arguments, _ := next["arguments"].(map[string]any)
+	if next["tool"] != "read" || arguments["view"] != "list" || arguments["entries_cursor"] != pagedData["entries_next_cursor"] {
+		t.Fatalf("direct inventory continuation must use public read tool: %+v", next)
 	}
 }
 

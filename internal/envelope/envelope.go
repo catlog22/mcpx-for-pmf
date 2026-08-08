@@ -260,10 +260,10 @@ func usesBooleanConfirmation(data any) bool {
 
 func classifyError(status Status, code string) (category string, retryable bool, retryHint string) {
 	if code == "CONFIRMATION_REQUIRED" {
-		return "confirmation", true, "Ask the user to confirm the frozen manifest in the web conversation, then retry submit_remove with the confirmation_uuid returned by remove_prepare."
+		return "confirmation", true, "Ask the user to confirm the frozen manifest in the web conversation, then retry submit_move_out with the confirmation_uuid returned by move_out_prepare."
 	}
 	if code == "CONFIRMATION_MISMATCH" {
-		return "conflict", false, "Use the confirmation_uuid returned by remove_prepare for this delete request; do not create a new UUID."
+		return "conflict", false, "Use the confirmation_uuid returned by move_out_prepare for this move-out request; do not create a new UUID."
 	}
 	if status == StatusNeedConfirmation || strings.Contains(code, "CONFIRMATION") {
 		return "confirmation", true, "Ask the user for explicit confirmation, then retry the original tool with the same business arguments and confirmation_token."
@@ -282,8 +282,8 @@ func classifyError(status Status, code string) (category string, retryable bool,
 	if strings.Contains(code, "NOT_FOUND") || strings.Contains(code, "WORKSPACE_NOT_FOUND") {
 		return "not_found", false, "Check the identifier and refresh the relevant list."
 	}
-	if code == "SYMLINK_NOT_ALLOWED" || code == "DELETE_FILE_ONLY" || code == "DELETE_DIRECTORY_ONLY" || code == "PATH_ESCAPE" || code == "PATH_STAT_FAILED" || code == "FILE_READ_FAILED" || code == "DIRECTORY_READ_FAILED" || code == "WORKSPACE_MISMATCH" || code == "DELETE_USE_REMOVE" {
-		return "validation", false, "Correct the explicit Workspace target and retry; removal never follows symlinks or accepts shell paths."
+	if code == "SYMLINK_NOT_ALLOWED" || code == "MOVE_OUT_FILE_ONLY" || code == "MOVE_OUT_DIRECTORY_ONLY" || code == "MOVE_OUT_SYMLINK_ONLY" || code == "PATH_ESCAPE" || code == "PATH_STAT_FAILED" || code == "FILE_READ_FAILED" || code == "DIRECTORY_READ_FAILED" || code == "WORKSPACE_MISMATCH" || code == "MOVE_OUT_REQUIRED" {
+		return "validation", false, "Correct the explicit Workspace target and retry; safe move-out never follows symlinks or accepts shell paths."
 	}
 	if strings.Contains(code, "STALE") || strings.Contains(code, "CONFLICT") || strings.Contains(code, "VERSION") || strings.Contains(code, "PATCH_CONTEXT") || strings.Contains(code, "PATCH_HUNKS") || strings.Contains(code, "PATCH_APPLY") || strings.Contains(code, "ROLLBACK") || code == "DIRECTORY_CHANGED" {
 		return "conflict", true, "Read the current revision and regenerate the operation."
@@ -294,17 +294,17 @@ func classifyError(status Status, code string) (category string, retryable bool,
 	if code == "LIMIT_EXCEEDED" {
 		return "validation", false, "Reduce the request to the advertised limit and retry."
 	}
-	if code == "DELETE_IN_PROGRESS" {
-		return "runtime", true, "Wait for the current submit_remove request, then retry with the same idempotency key."
+	if code == "MOVE_OUT_IN_PROGRESS" {
+		return "runtime", true, "Wait for the current submit_move_out request, then retry with the same confirmation_uuid."
 	}
 	if code == "FILE_TOO_LARGE" {
 		return "capacity", false, "Use a bounded window read, or reduce the requested full-read source size."
 	}
-	if code == "DELETE_REQUEST_EXPIRED" || code == "DELETE_MANIFEST_MISMATCH" {
-		return "validation", false, "Prepare a new removal manifest and ask the web user to confirm it again."
+	if code == "MOVE_OUT_REQUEST_EXPIRED" || code == "MOVE_OUT_MANIFEST_MISMATCH" || code == "MOVE_OUT_PURPOSE_MISMATCH" {
+		return "validation", false, "Prepare a new move-out manifest and ask the web user to confirm it again."
 	}
-	if code == "DELETE_FAILED" || code == "DELETE_STATE_IN_DOUBT" || code == "DELETE_STORE_ERROR" {
-		return "runtime", true, "Inspect the durable removal request and audit event before retrying."
+	if code == "MOVE_OUT_FAILED" || code == "MOVE_OUT_STATE_IN_DOUBT" || code == "MOVE_OUT_STORE_ERROR" || code == "MOVE_OUT_QUARANTINE_ERROR" {
+		return "runtime", true, "Inspect the durable move-out request and audit event before retrying."
 	}
 	if strings.Contains(code, "INVALID") || strings.Contains(code, "BAD_REQUEST") || strings.Contains(code, "VALIDATION") || strings.Contains(code, "UNSUPPORTED") || strings.Contains(code, "REQUIRED") || strings.Contains(code, "AMBIGUOUS") {
 		return "validation", false, "Correct the request arguments and retry."

@@ -396,6 +396,13 @@ Base64 数据。
 `view="search"`、`view="list"` 和 `view="context"`，不要为了确认一个已知路径
 先重复列目录。
 
+`read(view="list")` 同时返回两类结果：`files` 是递归普通文件分页；`entries` 是当前
+scope 的第一层条目，并以 `kind=file|directory|symlink|other` 标记类型，不会展开目录内容。
+清理“只保留某文件”的 Workspace 前，先读取根 scope 的 `entries`：只有
+`entries_complete=true` 且 `entries_policy_filtered=false` 时才能把它当作完整可见根清单。
+若存在 `entries_next_cursor`，按 `entries_next_action` 读取其余第一层条目；不要从
+`files` 的首个分页推断顶层目录。
+
 ### 3. 修改文件
 
 默认修改路径如下：
@@ -404,7 +411,8 @@ Base64 数据。
 read(view="file") → edit → observe(view="changes")
 ```
 
-`edit` 接收 `edits[]`，支持 create、update、delete、rename；update 优先使用
+`edit` 接收 `edits[]`，支持 create、update、rename；用户提出删除、移除或清理时必须使用专用的
+`move_out_prepare → submit_move_out` 流程，目标会安全移至隔离区而非永久删除，update 优先使用
 精确唯一 `replacements`。同一请求带 `idempotency_key` 时，重试返回原终态，
 参数变化返回 `IDEMPOTENCY_CONFLICT`。默认只返回有界 diff 预览；需要完整内容时
 使用 `observe(view="diff", edit_id, offset, limit)` 分片读取。
@@ -414,22 +422,31 @@ read(view="file") → edit → observe(view="changes")
 32 步；`edit` 最多 1000 条真实变更行。`read(view="list", path=...)` 的 `path`
 是硬作用域。
 
-`edit` 只支持 create、update、rename；删除必须使用两阶段的
-`remove_prepare → submit_remove`，禁止通过 `execute`、shell、glob 或 symlink 绕过：
+`edit` 只支持 create、update、rename；删除、移除或清理必须使用两阶段的
+`move_out_prepare → submit_move_out`，禁止通过 `execute`、shell、glob 或 symlink 绕过：
 
-1. `remove_prepare` 接收 Workspace 内明确的 `file` 或 `directory` 目标，冻结文件
-   SHA、目录树、数量和字节数，不产生文件变更。
-2. 服务端返回 `confirmation_uuid`、`delete_request_id`、`manifest_sha256` 和原始
-   `idempotency_key`，并在 `submit_remove_arguments` 中给出可直接复制的完整提交参数。
+1. `move_out_prepare` 接收 Workspace 内明确的 `file`、`directory` 或 `symlink` 目标。它只校验
+   目录根路径，不扫描、哈希或返回目录子项；file 冻结 SHA，symlink 冻结链接文本摘要。响应只返回
+   最多 20 个显式目标预览、总目标数和 manifest SHA，因此数万文件目录不会撑大模型上下文。
+   `purpose` 必须先表达最终语义：仅检查就写“仅 prepare/仅预览”并停止；用户请求删除、移除或清理时
+   则从 prepare 开始明确写“安全移至隔离区”，不能在 submit 时临时改写语义。
+2. 服务端返回 `confirmation_uuid`、`move_request_id`、`manifest_sha256` 和原始
+   `idempotency_key` 供展示和审计；`submit_move_out_arguments` 只包含
+   `remote_session_id` 与 `confirmation_uuid` 两个提交参数。
 3. 网页端模型向用户展示冻结清单并询问；用户确认后，模型将
-   `submit_remove_arguments` 原样提交给 `submit_remove`。
-4. `submit_remove` 重新校验 Workspace 范围、UUID、manifest、SHA、过期时间和
-   TOCTOU，服务端内部按 bounded chunks 删除并写入持久化审计。
+   `submit_move_out_arguments` 原样提交给 `submit_move_out`。
+4. `submit_move_out` 按 UUID 从服务端取回并重新校验 Workspace 范围、manifest、文件 SHA、过期时间和
+   purpose；客户端无法覆盖这些冻结值。明确的 `directory` 是移出根，服务端以受 Workspace 同级 Root 约束的原子 rename 移至
+   Workspace 父目录下的 `.mcpx-quarantine/<move_request_id>/`；返回的 `quarantine_path` 相对此父目录。
+   `symlink`（包括目录确认后被替换的 symlink）只移动链接入口，
+   绝不跟随目标。提交写入持久化审计，并返回可恢复的隔离路径。
 
-删除能力支持明确指定的非空目录树，但拒绝越界路径、symlink 和特殊文件。`submit_remove`
-在 MCP `tools/list` 中声明 `readOnlyHint=false`、`destructiveHint=true`、
+安全移出能力支持明确指定的非空目录树和 symlink；目录内的 symlink、特殊文件不会阻断移动，也不会在
+prepare 时被逐项核验或回传，但
+absolute path、`..` 越界和中间 symlink 仍拒绝。`submit_move_out`
+在 MCP `tools/list` 中声明 `readOnlyHint=false`、`destructiveHint=false`、
 `idempotentHint=true` 和 `openWorldHint=false`，并发布仅限注册 Workspace、仅文件系统、
-无 shell、revision guarded、持久化审计等机器可读约束。
+无 shell、revision guarded、同级隔离区原子移动、可恢复和持久化审计等机器可读约束。
 
 示例：
 

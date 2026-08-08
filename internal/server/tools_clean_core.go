@@ -9,6 +9,7 @@ import (
 	"mcpx/internal/edit"
 	"mcpx/internal/file"
 	"mcpx/internal/server/prompts"
+	"mcpx/internal/source"
 )
 
 // cleanEditSafetyMeta is deliberately additive metadata for MCP Hosts. It does
@@ -18,7 +19,7 @@ import (
 var cleanEditSafetyMeta = mcp.Meta{
 	"mcpx/safety": map[string]any{
 		"classification":    "constrained_workspace_file_mutation",
-		"approval":          "host_user_approval_not_used_for_delete",
+		"approval":          "web_model_user_confirmation_required_for_move_out",
 		"scope":             "registered_workspace_root",
 		"target":            "regular_files_only_for_create_update_rename",
 		"revision_guard":    "sha256",
@@ -28,7 +29,7 @@ var cleanEditSafetyMeta = mcp.Meta{
 		"execution":         "filesystem_only",
 		"shell_bypass":      "forbidden",
 		"approval_evidence": []string{"purpose", "explicit_paths", "base_sha256", "server_snapshot"},
-		"server_rejections": []string{"path_escape", "symlink", "non_regular_file", "stale_revision", "file_policy_denied", "delete_use_remove_prepare"},
+		"server_rejections": []string{"path_escape", "symlink", "non_regular_file", "stale_revision", "file_policy_denied", "move_out_required"},
 	},
 }
 
@@ -96,9 +97,11 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 	}, "批量文件读取项")
 	readItems["maxItems"] = MaxReadItems
 	readItems["description"] = fmt.Sprintf("批量文件读取项；最多 %d 项；window 可读取超过单次 full 上限的源文件", MaxReadItems)
-	readPath := stringSchema("文件路径；view=list 时是硬作用域目录/文件，不会返回作用域外结果")
+	readPath := stringSchema("文件路径；view=list 时是硬作用域目录/文件，不会返回作用域外结果；同时返回该 scope 第一层的目录、文件和 symlink 条目")
 	maxBytesPerFile := numberSchema(fmt.Sprintf("单文件返回字节预算；完整源文件上限为 %d bytes，超大文件请用 window", file.MaxSourceBytes))
 	maxBytesPerFile["maximum"] = file.MaxSourceBytes
+	directEntriesLimit := numberSchema(fmt.Sprintf("view=list 第一层 entries 返回数量；默认 %d，最大 %d", source.DefaultDirectListEntries, source.MaxDirectListEntries))
+	directEntriesLimit["maximum"] = source.MaxDirectListEntries
 	r.addTool(s, cleanCoreTool("read", desc["read"], map[string]any{
 		"remote_session_id":    remoteSession,
 		"view":                 enumSchema("读取视图", "file", "search", "list", "context", "environment"),
@@ -115,6 +118,8 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"include_glob":         stringSchema("包含 glob"),
 		"exclude_glob":         stringSchema("排除 glob"),
 		"cursor":               stringSchema("分页游标"),
+		"entries_cursor":       stringSchema("view=list 的第一层 entries 分页游标；与递归 files 的 cursor 独立"),
+		"entries_limit":        directEntriesLimit,
 		"max_results":          numberSchema("最多匹配文件数"),
 		"max_bytes_per_file":   maxBytesPerFile,
 		"regex":                booleanSchema("是否按 RE2 正则解释"),
@@ -132,7 +137,7 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"additionalProperties": false,
 		"properties": map[string]any{
 			"path":        path,
-			"operation":   enumSchema("文件操作；删除请使用 remove_prepare/submit_remove", "create", "update", "rename"),
+			"operation":   enumSchema("文件操作；用户提出删除、移除或清理时请使用 move_out_prepare/submit_move_out", "create", "update", "rename"),
 			"base_sha256": stringSchema("读取时获得的文件 sha256"),
 			"content":     stringSchema("新文件的完整内容"),
 			"new_path":    stringSchema("rename 的目标路径"),
@@ -156,35 +161,30 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"apply":             booleanSchema("是否立即应用；默认 true"),
 	}, []string{"remote_session_id", "purpose", "edits"}, cleanEditToolAnnotation), r.toolEdit)
 
-	deleteTarget := map[string]any{
+	moveOutTarget := map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
 		"properties": map[string]any{
 			"path":            path,
-			"kind":            enumSchema("删除目标类型；file 删除普通文件，directory 删除指定目录树", "file", "directory"),
-			"expected_sha256": stringSchema("文件 SHA-256；目录可留空，由 prepare 计算冻结目录树摘要"),
+			"kind":            enumSchema("移出目标类型；file 移出普通文件，directory 原子移出指定目录树，symlink 只移出链接入口", "file", "directory", "symlink"),
+			"expected_sha256": stringSchema("file 必填 SHA-256；directory 必须省略；symlink 可选，prepare 会冻结链接文本摘要"),
 		},
 		"required": []string{"path", "kind"},
 	}
-	deleteTargets := arraySchema(deleteTarget, "明确的文件/目录删除清单；服务端冻结完整目录树并分块执行")
-	deleteTargets["minItems"] = 1
-	deleteTargets["maxItems"] = deleteRequestMaxTargets
-	r.addTool(s, cleanCoreTool("remove_prepare", "冻结已注册 Workspace 内的明确文件/目录删除清单；只读，不执行删除，返回不可变 manifest_sha256 和服务端生成的 confirmation_uuid。网页端模型必须先向用户展示清单并询问，确认后再提交。禁止 shell、glob 和 symlink 越界。", map[string]any{
+	moveOutTargets := arraySchema(moveOutTarget, "明确的文件、目录或 symlink 安全移出清单；directory 原子移出当前目录树，symlink 只移出链接入口且不跟随目标")
+	moveOutTargets["minItems"] = 1
+	moveOutTargets["maxItems"] = moveOutRequestMaxTargets
+	r.addTool(s, cleanCoreTool("move_out_prepare", "冻结已注册 Workspace 内的明确文件、目录或 symlink 安全移出清单；只读，不执行移动，返回不可变 manifest_sha256 和服务端生成的 confirmation_uuid。directory 是显式移出根：prepare 只校验根路径，不扫描、哈希或返回子树；提交时通过受 Root 约束的原子 rename 移至 Workspace 同级服务端隔离区。symlink 只移动链接入口，绝不跟随目标。响应最多返回 20 个显式目标预览。网页端模型必须先向用户展示清单并询问，确认后再提交。禁止 shell、glob 和中间 symlink 越界。", map[string]any{
 		"remote_session_id": remoteSession,
 		"workspace":         workspace,
-		"purpose":           stringSchema("向用户展示的删除目的"),
-		"targets":           deleteTargets,
-		"idempotency_key":   stringSchema("同一删除准备请求重试时复用；不同清单必须使用新 key"),
-	}, []string{"remote_session_id", "workspace", "purpose", "targets", "idempotency_key"}, workspaceDeletePrepareAnnotation), r.toolWorkspaceDeletePrepare)
-	r.addTool(s, cleanCoreTool("submit_remove", "提交网页端模型已向用户询问并确认的、已冻结 manifest 中的 Workspace 文件/目录删除；仅接受 remove_prepare 返回的 confirmation_uuid，不接受自由路径、glob、shell 或 ARC/Host metadata。服务端会重新校验 manifest、SHA、权限和审计。", map[string]any{
+		"purpose":           stringSchema("向用户展示的安全移出目的；删除/移除/清理请求也必须准确描述为移至隔离区"),
+		"targets":           moveOutTargets,
+		"idempotency_key":   stringSchema("同一安全移出准备请求重试时复用；不同清单必须使用新 key"),
+	}, []string{"remote_session_id", "workspace", "purpose", "targets", "idempotency_key"}, workspaceMoveOutPrepareAnnotation), r.toolWorkspaceMoveOutPrepare)
+	r.addTool(s, cleanCoreTool("submit_move_out", "提交网页端模型已向用户询问并确认的、已冻结 manifest 中的 Workspace 文件、目录或 symlink 安全移出；只接受 remote_session_id 和 move_out_prepare 返回的 confirmation_uuid。冻结 manifest、purpose、idempotency_key 和 Workspace 均由服务端按 UUID 绑定并重新校验，客户端不能覆盖它们，也不接受自由路径、glob、shell 或 ARC/Host metadata。提交使用受 Workspace 同级 Root 约束的原子 rename 移至服务端隔离区，不做永久删除且可恢复；symlink 只移动链接入口且不跟随目标。", map[string]any{
 		"remote_session_id": remoteSession,
-		"workspace":         workspace,
-		"purpose":           stringSchema("向网页端用户展示并取得明确确认的删除目的"),
-		"delete_request_id": stringSchema("remove_prepare 返回的冻结删除请求 ID"),
-		"manifest_sha256":   stringSchema("冻结清单的 SHA-256"),
-		"confirmation_uuid": stringSchema("remove_prepare 返回的服务端生成 UUID；网页端模型向用户展示冻结清单并获得明确确认后原样带回"),
-		"idempotency_key":   stringSchema("必须与 prepare 完全一致；重试时复用"),
-	}, []string{"remote_session_id", "workspace", "purpose", "delete_request_id", "manifest_sha256", "confirmation_uuid", "idempotency_key"}, workspaceDeleteCommitAnnotation), r.toolWorkspaceDeleteCommit)
+		"confirmation_uuid": stringSchema("move_out_prepare 返回的服务端生成 UUID；网页端模型向用户展示冻结清单并获得明确确认后原样带回"),
+	}, []string{"remote_session_id", "confirmation_uuid"}, workspaceMoveOutCommitAnnotation), r.toolWorkspaceMoveOutCommit)
 
 	r.addTool(s, cleanCoreTool("observe", desc["observe"], map[string]any{
 		"remote_session_id": remoteSession,

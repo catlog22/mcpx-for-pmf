@@ -368,8 +368,8 @@ func TestCleanEditApplyFalseNeverMutatesFilesystem(t *testing.T) {
 		"apply": false,
 		"edits": []any{map[string]any{"path": "dry-run.txt", "operation": "delete", "base_sha256": digestForTest(original)}},
 	})
-	if statusOK(deletePreview) || errorCode(deletePreview) != "delete_use_remove" {
-		t.Fatalf("edit delete must route to remove_prepare: %+v", deletePreview)
+	if statusOK(deletePreview) || errorCode(deletePreview) != "move_out_required" {
+		t.Fatalf("edit delete must route to move_out_prepare: %+v", deletePreview)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("rejected delete preview changed file: %v", err)

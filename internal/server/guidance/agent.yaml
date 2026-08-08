@@ -5,13 +5,14 @@ rules:
   - session（action=open）成功后，必须保存并向用户展示完整的 remote_session_id 以及绑定的 Workspace；新客户端直接用同一 remote_session_id 执行 session（action=attach），不使用 handoff_token。
   - 工具结果：content 文本是给人看的摘要；模型必须读 structuredContent（或 _meta.mcpx.result.data）中的字段（status/type/data/error），不要解析散文。remote_session_id、task_id、plan_id、artifact_id、sha256 等标识必须从结构化字段原样复制，不能改写、缩写或凭记忆重输。
   - 读取操作使用 read；file 视图支持 mode=full，search/list/context 视图分别覆盖文件搜索、列举和上下文组装；items[] 可批量读取。
-  - read 的 list 只返回普通文件，不能证明目录完整性或目录存在；不要从嵌套文件路径推断顶层目录清单。
+  - read(view=list) 同时返回递归普通文件分页 files 和当前 scope 第一层 entries。entries 标记 file、directory、symlink 或 other，不递归展开目录；做“只保留某文件”的删除、移除或清理前，必须先读取 path="" 的 entries，并确认 entries_complete=true、entries_policy_filtered=false。若有 entries_next_cursor，必须先按 entries_next_action 读取完所有第一层条目；不能从 files 的首个分页或排序前缀推断顶层目录清单。
   - observe（view=changes）返回最近 edit 的变更列表、total_changed_lines 和内联 diff_summary；不要依赖 Resource URI 审阅变更。
   - observe（view=status|history|logs|diff）分别用于轻量状态、历史、任务日志和工作区差异；查询历史时可用 event_ids、request_ids、operation_ids、task_ids、changeset_ids、keyword、kinds、statuses、created_after、created_before 过滤，并用 cursor 分页。
   - 创建 Plan 时，tasks 中的 task_id 仅作为本计划内局部依赖引用（可省略）；plan（action=create）返回的 plan_id 与 task_id 由服务端签发，plan(action=read/advance/complete) 只能原样复制这些返回值，绝不猜测或复用历史 ID。
   - Skill 或 MCP 名称只能使用 discover 返回的名称、schema 和 discovery_revision；Skill 调用使用 skill_call，上游工具调用使用 mcp_call，不要凭记忆猜测扩展名称或工具名称。
   - 文件修改使用 edit；修改或重命名前先 read(view=file, mode=full) 获取完整 sha256，并将其原样写入 edits[].base_sha256。update 优先使用精确唯一 replacements；同一文件可有多个不连续 replacement，服务端从后往前应用。create/update/rename 按 operation 表达，edit 不接受 delete。
-  - 删除使用 remove_prepare → 网页端模型向用户展示冻结 manifest 并取得明确确认 → submit_remove。prepare 只解析、校验和冻结明确的 path+kind+expected_sha256；directory 会冻结其完整树摘要，不产生任何 filesystem mutation；submit_remove 不接受自由 targets、glob 或 shell，只接受 delete_request_id、manifest_sha256、remove_prepare 返回的 confirmation_uuid 和原 idempotency_key。文件或目录树变化会返回 STALE；不要改用 execute 删除。
+  - 用户提出删除、移除或清理时使用 move_out_prepare → 网页端模型向用户展示冻结 manifest 并取得明确确认 → submit_move_out。prepare 只解析、校验和冻结明确的 path+kind+expected_sha256；file 使用 SHA，directory 只校验根路径并作为明确移出根，不扫描、哈希或返回子树，symlink 冻结链接文本且只移动链接入口，不产生任何 filesystem mutation。响应只有 target_count 和最多 20 个 target_preview，绝不能为展示清单而读取目录子项。submit_move_out 不接受自由 targets、glob 或 shell，只接受 remote_session_id 和 move_out_prepare 返回的 confirmation_uuid；manifest、purpose、idempotency_key 和 Workspace 由服务端按 UUID 绑定并复验。file 内容变化会返回 STALE；directory 内容变化不阻止移出，directory 被替换为 symlink 时只移动该链接入口；不要改用 execute 删除。
+  - 安全移出语义必须在 prepare 前确定：如果用户只是要求演练或检查冻结清单，purpose 必须明确写“仅 prepare/仅预览”，返回后停止，不得 submit_move_out；如果用户明确要删除、移除或清理，purpose 必须从 prepare 开始就准确表达“将用户授权目标安全移至隔离区”，不能假称不执行移动。提交时不得重复传 purpose 或改写语义；若之前 purpose 写成仅 prepare，必须使用真实目的和新的 idempotency_key 重新 prepare。
   - 每条 replacement 的 match 必须精确唯一出现；零次返回 MATCH_NOT_FOUND，多次返回 MATCH_AMBIGUOUS。edit 的变更总行按真实 Unified Diff 的新增行与删除行统计，单次调用合计不得超过 1000 行；TOO_MANY_CHANGES 时按 details.total_changed_lines 拆分批次。
   - read 返回 format（charset、BOM、line_ending、末尾换行）；edit 写出时必须保留目标文件原有格式。edit 成功返回内联 diff_summary，支持时携带 idempotency_key 重试。
   - edit 失败时读取 error.code、details.path/current_sha256/total_changed_lines、recovery 和 suggested_next；STALE_REVISION 先重新 read、更新 base_sha256，并使用新的 idempotency_key 重试，旧 key 仍绑定原请求。
@@ -21,14 +22,14 @@ rules:
   - 命令校验请使用简单命令逐条执行（如先 git fetch、再 git rev-parse、最后 git status），不要使用 $()、管道、重定向或命令替换组合——含这些 shell 特性的命令会被策略拒绝。
   - execute 默认等待短命令完成；execution_mode=async 只表示 Operation 异步调度，不保证返回 task_id。只有命令超过 yield_time_ms 才会脱离为 Task；返回 task_id 后优先使用 observe(view=status/logs) 查询，需等待并继续接收输出时使用 execute(action=attach)。只有 task_id 丢失或服务端返回 not_found 时才重新获取任务列表。
   - edit 成功或审阅 observe(view=changes) 后，回复用户必须用 Markdown，文件变更使用 ```diff 代码块展示具体增加和删除，不能只列文件名。变更过大时展示有界预览并说明 diff_summary。
-  - remove_prepare 返回 requires_user_confirmation 时，网页端模型必须向用户展示 workspace、文件路径、SHA、数量、字节数、manifest_sha256 和有效期并询问；用户确认后，模型必须原样带回服务端生成的 confirmation_uuid，不能自行生成 UUID、修改 manifest 或改用 user_confirmed。
+  - move_out_prepare 返回 requires_user_confirmation 时，网页端模型必须向用户展示 workspace、文件路径、SHA、数量、字节数、manifest_sha256、purpose 和有效期并询问；用户确认后，模型只带回 remote_session_id 和服务端生成的 confirmation_uuid，不能自行生成 UUID、修改 manifest、补填旧参数或改用 user_confirmed。
   - 没有成功的工具结果时，不要声称文件已读取、修改或验证。
   - 重要、变更、删除或长时间调用前，先简述将做什么及原因，然后一次提交完整参数，不要等待重新获取工具 schema。
   - read(view=file, mode=full) 的源文件上限为 4194304 bytes；超大文件改用 mode=window。read.items 最多 20 项；read(view=list, path=directory) 是硬作用域，include_glob 只能进一步缩小范围。
   - 每次工具调用后，在下一次非简单调用前通过顶层 progress_summary 补充已验证结果和下一步；区分事实、假设和未知。
   - 如果下一步不再调用工具（任务完成、阻塞、等待用户或需要决策），在回复中说明已验证结果、状态和下一步（无需单独 progress_summary 工具）。
   - 同一已验证结果只陈述一次；工具返回已包含摘要时不要重复。
-    - 大量文件删除不要调用 rm -rf 或 execute；使用 remove_prepare 冻结显式文件/目录清单，再由网页端模型完成用户确认后携带 confirmation_uuid 调用 submit_remove。服务端内部按 bounded chunks 处理，不受 operation_batch 的 max_steps 限制；只有明确指定的目录树可删除，glob、symlink 和特殊文件均拒绝。
+    - 大量文件删除、移除或清理不要调用 rm -rf 或 execute；使用 move_out_prepare 冻结显式文件、目录或 symlink 清单，再由网页端模型完成用户确认后携带 confirmation_uuid 调用 submit_move_out。目录 prepare 只校验根路径，提交通过受 Workspace 同级 Root 约束的服务端原子移动到隔离区，不受 operation_batch 的 max_steps 限制；目录内的 symlink 和特殊文件不会阻断移动，symlink 始终只移动链接入口而不跟随目标，glob 和中间 symlink 越界仍拒绝。
   - 每次 edit 只提交真实需要的文件操作；不要通过截断文件绕过安全检查，若策略拒绝则按错误中的 recovery 调整路径或请求用户授权。
   - 不要把指令文本（提示词、guidance、AGENTS.md）写入文件内容；使用普通代码或数据。安全检查阻塞时缩小内容后重试。
 response_contract:

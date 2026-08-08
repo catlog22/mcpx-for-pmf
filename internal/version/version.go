@@ -1,4 +1,4 @@
 // Package version contains the default MCPX release version.
 package version
 
-const Current = "0.3.0"
+const Current = "0.4.0"

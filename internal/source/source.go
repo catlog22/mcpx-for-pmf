@@ -44,6 +44,23 @@ type ListResult struct {
 	Total      int     `json:"total"`
 }
 
+// DirectEntry is an immediate child of a requested source scope. Unlike
+// ListResult.Files, it includes directories and symbolic links and never
+// recursively expands them. It exists so an agent can establish a complete
+// top-level workspace inventory before preparing a broad move-out operation.
+type DirectEntry struct {
+	Path string `json:"path"`
+	Kind string `json:"kind"`
+	Size int64  `json:"size,omitempty"`
+}
+
+type DirectListResult struct {
+	Entries        []DirectEntry `json:"entries"`
+	Total          int           `json:"total"`
+	NextCursor     string        `json:"next_cursor,omitempty"`
+	PolicyFiltered bool          `json:"policy_filtered,omitempty"`
+}
+
 type Match struct {
 	Path   string   `json:"path"`
 	Line   int      `json:"line"`
@@ -101,8 +118,120 @@ var ignoredDirectories = map[string]bool{
 	"dist": true, "build": true, "bin": true, "target": true, ".next": true,
 }
 
+const MaxDirectListEntries = 500
+const DefaultDirectListEntries = 100
+
 func List(root, pattern, cursor string, limit int, includeHashes bool, allowed func(string) bool) (ListResult, error) {
 	return ListWith(root, pattern, "", cursor, limit, includeHashes, allowed)
+}
+
+// ListDirect returns the direct children of a scope without walking child
+// directories or following symbolic links. An empty scope means the workspace
+// root. Entries are sorted by path, and policy-filtered entries are counted
+// only through PolicyFiltered so callers never mistake a filtered inventory
+// for a full filesystem listing.
+func ListDirect(root, scope, cursor string, limit int, allowed func(string) bool) (DirectListResult, error) {
+	if limit <= 0 || limit > MaxDirectListEntries {
+		limit = DefaultDirectListEntries
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return DirectListResult{}, err
+	}
+	rootAbs = filepath.Clean(rootAbs)
+	base := rootAbs
+	scope = filepath.ToSlash(filepath.Clean(strings.TrimSpace(scope)))
+	if scope == "." {
+		scope = ""
+	}
+	if scope != "" {
+		if _, err = file.Resolve(rootAbs, scope); err != nil {
+			return DirectListResult{}, err
+		}
+		base, err = file.LexicalPath(rootAbs, scope)
+		if err != nil {
+			return DirectListResult{}, err
+		}
+		info, err := os.Lstat(base)
+		if err != nil {
+			return DirectListResult{}, err
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			entry := DirectEntry{Path: scope, Kind: directFileInfoKind(info)}
+			if entry.Kind == "file" {
+				entry.Size = info.Size()
+			}
+			if allowed != nil && !allowed(scope) {
+				return DirectListResult{PolicyFiltered: true}, nil
+			}
+			return DirectListResult{Entries: []DirectEntry{entry}, Total: 1}, nil
+		}
+	}
+	items, err := os.ReadDir(base)
+	if err != nil {
+		return DirectListResult{}, err
+	}
+	all := make([]DirectEntry, 0, len(items))
+	policyFiltered := false
+	for _, item := range items {
+		relative := item.Name()
+		if scope != "" {
+			relative = filepath.ToSlash(filepath.Join(scope, item.Name()))
+		}
+		if allowed != nil && !allowed(relative) && !allowed(relative+"/") {
+			policyFiltered = true
+			continue
+		}
+		entry := DirectEntry{Path: filepath.ToSlash(relative), Kind: directEntryKind(item)}
+		if entry.Kind == "file" {
+			if info, infoErr := item.Info(); infoErr == nil {
+				entry.Size = info.Size()
+			}
+		}
+		all = append(all, entry)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].Path < all[j].Path })
+	start := decodeCursor(cursor)
+	if start > len(all) {
+		start = len(all)
+	}
+	end := start + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	result := DirectListResult{Entries: append([]DirectEntry(nil), all[start:end]...), Total: len(all), PolicyFiltered: policyFiltered}
+	if end < len(all) {
+		result.NextCursor = encodeCursor(end)
+	}
+	return result, nil
+}
+
+func directEntryKind(item os.DirEntry) string {
+	mode := item.Type()
+	switch {
+	case mode&os.ModeSymlink != 0:
+		return "symlink"
+	case item.IsDir():
+		return "directory"
+	case mode.IsRegular():
+		return "file"
+	default:
+		return "other"
+	}
+}
+
+func directFileInfoKind(info os.FileInfo) string {
+	mode := info.Mode()
+	switch {
+	case mode&os.ModeSymlink != 0:
+		return "symlink"
+	case info.IsDir():
+		return "directory"
+	case mode.IsRegular():
+		return "file"
+	default:
+		return "other"
+	}
 }
 
 // ListWith adds a server-side exclude glob so callers stop walking once their

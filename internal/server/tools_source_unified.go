@@ -630,20 +630,51 @@ func (r *Runtime) toolContextListAction(ctx context.Context, req *mcp.CallToolRe
 	if scopeAllowed != nil {
 		allowed = func(candidate string) bool { return baseAllowed(candidate) && scopeAllowed(candidate) }
 	}
+	directLimit := intPayload(envReq.Payload, "entries_limit")
+	if directLimit <= 0 || directLimit > source.MaxDirectListEntries {
+		directLimit = source.DefaultDirectListEntries
+	}
+	direct, err := source.ListDirect(session.WorkspacePath, sourcePayloadString(envReq.Payload, "path"), sourcePayloadString(envReq.Payload, "entries_cursor"), directLimit, allowed)
+	if err != nil {
+		return r.sourceError(envReq, session.ID, session.WorkspaceName, err)
+	}
 	list, err := source.ListWith(session.WorkspacePath, pattern, sourcePayloadString(envReq.Payload, "exclude_glob"), sourcePayloadString(envReq.Payload, "cursor"), intPayload(envReq.Payload, "limit"), boolPayload(envReq.Payload, "include_sha256"), allowed)
 	if err != nil {
 		return r.sourceError(envReq, session.ID, session.WorkspaceName, err)
 	}
-	data := map[string]any{"files": list.Files, "total": list.Total}
+	directScope := strings.TrimSpace(sourcePayloadString(envReq.Payload, "path"))
+	if directScope == "" || directScope == "." {
+		directScope = "."
+	}
+	data := map[string]any{
+		"entries":                 direct.Entries,
+		"entries_scope":           directScope,
+		"entries_total":           direct.Total,
+		"entries_limit":           directLimit,
+		"entries_complete":        direct.NextCursor == "" && !direct.PolicyFiltered,
+		"entries_policy_filtered": direct.PolicyFiltered,
+		"files":                   list.Files,
+		"total":                   list.Total,
+	}
 	if list.NextCursor != "" {
 		data["next_cursor"] = list.NextCursor
-		data["next_action"] = nextAction("context_query", map[string]any{
-			"remote_session_id": session.ID, "action": "list", "path": sourcePayloadString(envReq.Payload, "path"), "include_glob": pattern,
+		data["next_action"] = nextAction("read", map[string]any{
+			"remote_session_id": session.ID, "view": "list", "path": sourcePayloadString(envReq.Payload, "path"), "include_glob": pattern,
 			"exclude_glob": sourcePayloadString(envReq.Payload, "exclude_glob"), "cursor": list.NextCursor,
 			"limit": intPayload(envReq.Payload, "limit"), "include_sha256": boolPayload(envReq.Payload, "include_sha256"),
 		})
 	}
-	return compactToolResult(data, fmt.Sprintf("Source list returned %d of %d file(s).", len(list.Files), list.Total)), nil
+	if direct.NextCursor != "" {
+		data["entries_next_cursor"] = direct.NextCursor
+		data["entries_next_action"] = nextAction("read", map[string]any{
+			"remote_session_id": session.ID,
+			"view":              "list",
+			"path":              sourcePayloadString(envReq.Payload, "path"),
+			"entries_cursor":    direct.NextCursor,
+			"entries_limit":     directLimit,
+		})
+	}
+	return compactToolResult(data, fmt.Sprintf("Source list returned %d direct entry(s) and %d of %d recursive file(s).", direct.Total, len(list.Files), list.Total)), nil
 }
 
 // hardListScope turns read(list).path into an actual boundary. include_glob
