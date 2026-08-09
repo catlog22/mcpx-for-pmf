@@ -181,13 +181,36 @@ func TestRenderTextHidesToolStartAndShowsHumanReadAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"• Read auth.go", "↳ Read 1 source item(s); 42 bytes returned."} {
+	for _, want := range []string{"• Read auth.go (lines 11-30)", "↳ Read 1 source item(s); 42 bytes returned."} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("human read rendering missing %q: %s", want, text)
 		}
 	}
 	if strings.Contains(text, "TOOL") || strings.Contains(text, "intent:") || strings.Contains(text, "```json") || strings.Contains(text, "\"path\":\"auth.go\"") {
 		t.Fatalf("human read rendering leaked protocol details: %q", text)
+	}
+}
+
+func TestRenderTextShowsBatchReadPathsAndRanges(t *testing.T) {
+	var output bytes.Buffer
+	if err := RenderText(&output, Event{
+		Tool:   "read",
+		Type:   TypeToolCompleted,
+		Input:  []byte(`{"view":"file","items":[{"path":"internal/arc/arc.go","offset":0,"limit":40},{"path":"internal/arc/human.go","offset":80,"limit":20},{"path":"internal/arc/presentation.go","mode":"full"}]}`),
+		Output: []byte(`{"status":"succeeded","summary":"Read 3 source items."}`),
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{
+		"• Read 3 files",
+		"↳ internal/arc/arc.go (lines 1-40)",
+		"↳ internal/arc/human.go (lines 81-100)",
+		"↳ internal/arc/presentation.go (full)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("batch read rendering missing %q: %s", want, text)
+		}
 	}
 }
 
@@ -431,8 +454,66 @@ func TestRenderTextShowsExecutedCommandAndProgressSummary(t *testing.T) {
 			t.Fatalf("command rendering missing %q: %s", want, text)
 		}
 	}
-	if strings.Contains(text, "TOOL COMPLETED") || strings.Contains(text, "status=") || strings.Contains(text, "elapsed=") {
-		t.Fatalf("legacy completion label leaked: %s", text)
+	if strings.Contains(text, "TOOL COMPLETED") || strings.Contains(text, "status=") || strings.Contains(text, "elapsed=") || strings.Contains(text, "duration=") {
+		t.Fatalf("legacy completion label or default telemetry leaked: %s", text)
+	}
+}
+
+func TestRenderTextColorsCommandAndStreams(t *testing.T) {
+	var stdout bytes.Buffer
+	if err := RenderText(&stdout, Event{
+		Tool:    "command_execute",
+		Type:    TypeCommandOutput,
+		Command: "go test ./...",
+		Stream:  "stdout",
+		Output:  []byte(`{"text":"ok\n"}`),
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	stdoutText := stdout.String()
+	for _, want := range []string{
+		ansiAmber + "Ran" + ansiReset,
+		ansiAmber + "go test ./..." + ansiReset,
+		ansiGray + "stdout:" + ansiReset,
+	} {
+		if !strings.Contains(stdoutText, want) {
+			t.Fatalf("stdout command color missing %q: %q", want, stdoutText)
+		}
+	}
+
+	var stderr bytes.Buffer
+	if err := RenderText(&stderr, Event{
+		Tool:    "command_execute",
+		Type:    TypeCommandOutput,
+		Command: "go test ./...",
+		Stream:  "stderr",
+		Output:  []byte(`{"text":"failed\n"}`),
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	if want := ansiYellow + "stderr:" + ansiReset; !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr command color missing %q: %q", want, stderr.String())
+	}
+
+	var failed bytes.Buffer
+	if err := RenderText(&failed, Event{
+		Tool:    "command_execute",
+		Type:    TypeToolCompleted,
+		Status:  "failed",
+		Command: "go test ./...",
+		Input:   []byte(`{"command":"go test ./..."}`),
+		Output:  []byte(`{"status":"failed","error":"tests failed"}`),
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	failedText := failed.String()
+	for _, want := range []string{
+		ansiRed + "Command failed" + ansiReset,
+		ansiRed + "go test ./..." + ansiReset,
+	} {
+		if !strings.Contains(failedText, want) {
+			t.Fatalf("failed command color missing %q: %q", want, failedText)
+		}
 	}
 }
 
@@ -472,6 +553,27 @@ func TestRenderTextShowsMarkdownFileDiff(t *testing.T) {
 	}
 	if strings.Contains(text, "```diff") || strings.Contains(text, "status=") {
 		t.Fatalf("file diff rendering=%q", text)
+	}
+}
+
+func TestRenderTextShowsMoveOutAsWorkspaceMutation(t *testing.T) {
+	var output bytes.Buffer
+	if err := RenderText(&output, Event{
+		Tool:   "move_out",
+		Type:   TypeFileChanged,
+		Status: "committed",
+		Output: []byte(`{"status":"committed","moved_count":1,"failed_count":0,"target_count":1,"reversible":true,"target_preview":[{"path":"src/old.go","kind":"file","status":"moved","quarantine_path":"trash://old.go"}]}`),
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{"• Removed src/old.go", "↳ Moved to quarantine", "↳ Moved 1 · failed 0 · reversible"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("move_out rendering missing %q: %s", want, text)
+		}
+	}
+	if strings.Contains(text, "file details unavailable") || strings.Contains(text, "target_preview") {
+		t.Fatalf("move_out leaked generic/protocol rendering: %s", text)
 	}
 }
 

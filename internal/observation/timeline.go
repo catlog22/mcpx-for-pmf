@@ -38,6 +38,7 @@ type interactionBlock struct {
 	bodyLines        int
 	ellipsis         bool
 	commandOutput    bool
+	fileChanged      bool
 	outputLines      map[string]int
 	lastOutputStream string
 	contextShown     bool
@@ -173,6 +174,9 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 	if event.Type == TypeCommandOutput {
 		block.commandOutput = true
 	}
+	if event.Type == TypeFileChanged {
+		block.fileChanged = true
+	}
 
 	var rendered bytes.Buffer
 	stream := strings.TrimSpace(event.Stream)
@@ -191,7 +195,9 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 		detail:               r.detail,
 		diffMode:             r.diffMode,
 		diffCache:            r.diffCache,
+		suppressAction:       event.Type == TypeToolCompleted && (block.commandOutput || block.fileChanged),
 		suppressOutputAction: suppressOutputAction,
+		commandOutputStarted: wasCommandOutput,
 		suppressContext:      block.contextShown,
 		suppressDuration:     block.pendingStarted && event.Type == TypeToolCompleted,
 		outputLineStart:      outputLineStart,
@@ -441,7 +447,7 @@ func (r *TextRenderer) activate(w io.Writer, block *interactionBlock, event Even
 			}
 		}
 	}
-	if !block.opened && r.lastClosedKey != "" && r.lastClosedKey != block.key {
+	if r.detail && !block.opened && r.lastClosedKey != "" && r.lastClosedKey != block.key {
 		if err := r.writeOperationSeparator(w, event); err != nil {
 			return err
 		}

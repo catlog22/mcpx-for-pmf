@@ -35,7 +35,9 @@ type renderOptions struct {
 	detail               bool
 	diffMode             DiffMode
 	diffCache            *diffDocumentCache
+	suppressAction       bool
 	suppressOutputAction bool
+	commandOutputStarted bool
 	suppressContext      bool
 	suppressDuration     bool
 	outputLineStart      int
@@ -84,7 +86,10 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 	var payload map[string]any
 	_ = json.Unmarshal(event.Output, &payload)
 	verb, label := toolAction(event.Tool, event.Input)
-	if (event.Tool == "file_read" || (event.Tool == "source_read" && publicView(event.Input) == "file")) && label == "files" {
+	if isCommandTool(event.Tool) && strings.TrimSpace(event.Command) != "" {
+		label = compactCommand(event.Command)
+	}
+	if isFileReadInput(event.Tool, event.Input) && label == "files" {
 		if result, ok := payload["result"].(map[string]any); ok {
 			if outputLabel := fileReadResultLabel(result); outputLabel != "" {
 				label = outputLabel
@@ -96,8 +101,19 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 	if failed {
 		verb = failureActionVerb(event.Tool, verb)
 	}
-	if err := writeEventAction(w, event, verb, label, actionColor(event.Tool, failed), options.colorMode != ColorModeNone); err != nil {
-		return err
+	if !options.suppressAction {
+		if isCommandTool(event.Tool) {
+			if err := writeCommandAction(w, event, verb, label, actionColor(event.Tool, failed), options.colorMode != ColorModeNone); err != nil {
+				return err
+			}
+		} else if err := writeEventAction(w, event, verb, label, actionColor(event.Tool, failed), options.colorMode != ColorModeNone); err != nil {
+			return err
+		}
+	}
+	if readItems := fileReadDetailLines(event.Tool, event.Input); len(readItems) > 0 {
+		if err := writeChildren(w, readItems, options.colorMode != ColorModeNone); err != nil {
+			return err
+		}
 	}
 
 	details := make([]string, 0, 3)
@@ -197,13 +213,25 @@ func renderCommandOutput(w io.Writer, event Event, options renderOptions) error 
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
-	stream := event.Stream
+	stream := strings.TrimSpace(event.Stream)
 	if stream == "" {
 		stream = "output"
 	}
-	if !options.suppressOutputAction {
-		if err := writeEventAction(w, event, "Read", stream, commandStreamColor(event.Stream), options.colorMode != ColorModeNone); err != nil {
+	command := strings.TrimSpace(event.Command)
+	if command != "" && !options.commandOutputStarted {
+		if err := writeCommandAction(w, event, "Ran", compactCommand(command), actionColor(event.Tool, false), options.colorMode != ColorModeNone); err != nil {
 			return err
+		}
+	}
+	if !options.suppressOutputAction {
+		if command != "" {
+			if err := writeCommandStreamHeader(w, stream, options.colorMode != ColorModeNone); err != nil {
+				return err
+			}
+		} else {
+			if err := writeEventAction(w, event, "Read", stream, commandStreamColor(event.Stream), options.colorMode != ColorModeNone); err != nil {
+				return err
+			}
 		}
 	}
 	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
@@ -221,6 +249,11 @@ func renderCommandOutput(w io.Writer, event Event, options renderOptions) error 
 }
 
 func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
+	if strings.EqualFold(strings.TrimSpace(event.Tool), "move_out") {
+		if handled, err := renderMoveOutChanged(w, event, options); handled || err != nil {
+			return err
+		}
+	}
 	var payload struct {
 		Results []fileChangeView `json:"results"`
 	}
@@ -328,6 +361,86 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 		}
 	}
 	return nil
+}
+
+func renderMoveOutChanged(w io.Writer, event Event, options renderOptions) (bool, error) {
+	var payload struct {
+		Status                 string `json:"status"`
+		MovedCount             int    `json:"moved_count"`
+		FailedCount            int    `json:"failed_count"`
+		TargetCount            int    `json:"target_count"`
+		TargetPreviewTruncated bool   `json:"target_preview_truncated"`
+		Reversible             bool   `json:"reversible"`
+		TargetPreview          []struct {
+			Path           string `json:"path"`
+			Status         string `json:"status"`
+			QuarantinePath string `json:"quarantine_path"`
+			ErrorCode      string `json:"error_code"`
+		} `json:"target_preview"`
+	}
+	if json.Unmarshal(event.Output, &payload) != nil || len(payload.TargetPreview) == 0 {
+		return false, nil
+	}
+	total := payload.TargetCount
+	if total <= 0 {
+		total = len(payload.TargetPreview)
+	}
+	verb := "Removed"
+	label := fmt.Sprintf("%d targets", total)
+	if total == 1 {
+		label = payload.TargetPreview[0].Path
+	}
+	if payload.MovedCount == 0 && payload.FailedCount > 0 {
+		verb = "Move failed"
+	} else if payload.FailedCount > 0 {
+		label = fmt.Sprintf("%d of %d targets", payload.MovedCount, total)
+	}
+	if err := writeEventAction(w, event, verb, label, ansiGreen, options.colorMode != ColorModeNone); err != nil {
+		return true, err
+	}
+	for _, target := range payload.TargetPreview {
+		path := strings.TrimSpace(target.Path)
+		if path == "" {
+			path = "target"
+		}
+		status := strings.ToLower(strings.TrimSpace(target.Status))
+		line := ""
+		switch status {
+		case "moved", "committed", "succeeded", "success":
+			if total == 1 {
+				line = "Moved to quarantine"
+			} else {
+				line = path + " — moved to quarantine"
+			}
+		default:
+			if total == 1 {
+				line = "Move failed"
+			} else {
+				line = path + " — move failed"
+			}
+			if code := strings.TrimSpace(target.ErrorCode); code != "" {
+				line += ": " + code
+			}
+		}
+		if err := writeChild(w, line, options.colorMode != ColorModeNone); err != nil {
+			return true, err
+		}
+	}
+	if payload.TargetPreviewTruncated {
+		if err := writeChild(w, fmt.Sprintf("... and %d more targets", total-len(payload.TargetPreview)), options.colorMode != ColorModeNone); err != nil {
+			return true, err
+		}
+	}
+	summary := fmt.Sprintf("Moved %d · failed %d", payload.MovedCount, payload.FailedCount)
+	if payload.Reversible {
+		summary += " · reversible"
+	} else {
+		summary += " · not reversible"
+	}
+	if err := writeChild(w, summary, options.colorMode != ColorModeNone); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 func formatCompactDiffStats(added, removed int) string {
@@ -439,6 +552,18 @@ func writeEventAction(w io.Writer, event Event, verb, label, fallbackColor strin
 	return err
 }
 
+func writeCommandAction(w io.Writer, event Event, verb, command, fallbackColor string, color bool) error {
+	verb = sanitizeTerminalText(verb)
+	command = sanitizeTerminalText(command)
+	if command == "" {
+		command = "command"
+	}
+	colorCode := eventActionColor(event, fallbackColor)
+	marker := eventMarker(event)
+	_, err := fmt.Fprintf(w, "%s %s %s\n", paint(marker, colorCode, color), paint(verb, colorCode, color), paint(command, colorCode, color))
+	return err
+}
+
 func writeEventActionWithDiffStats(w io.Writer, event Event, verb, label, fallbackColor string, added, removed int, mode ColorMode) error {
 	verb = sanitizeTerminalText(verb)
 	label = sanitizeTerminalText(label)
@@ -455,12 +580,22 @@ func writeEventActionWithDiffStats(w io.Writer, event Event, verb, label, fallba
 
 func commandStreamColor(stream string) string {
 	if strings.EqualFold(strings.TrimSpace(stream), "stderr") {
-		return ansiRed
+		return ansiYellow
 	}
 	if strings.EqualFold(strings.TrimSpace(stream), "stdout") {
-		return ansiBlue
+		return ansiGray
 	}
 	return ansiAmber
+}
+
+func writeCommandStreamHeader(w io.Writer, stream string, color bool) error {
+	stream = strings.TrimSpace(sanitizeTerminalText(stream))
+	if stream == "" {
+		stream = "output"
+	}
+	colorCode := commandStreamColor(stream)
+	_, err := fmt.Fprintf(w, "  %s %s\n", paint("↳", colorCode, color), paint(stream+":", colorCode, color))
+	return err
 }
 
 func writeChildren(w io.Writer, values []string, color bool) error {
@@ -603,12 +738,16 @@ func toolAction(tool string, raw []byte) (string, string) {
 	}
 
 	switch tool {
-	case "command_execute", "command_run":
+	case "execute", "command_execute", "command_run":
 		label, _ = input["command"].(string)
 		if strings.TrimSpace(label) == "" {
 			label, _ = input["task"].(string)
 		}
 		label = compactCommand(label)
+	case "read":
+		if publicView(raw) == "file" || (publicView(raw) == "" && (input["path"] != nil || input["items"] != nil)) {
+			label = fileReadLabel(input)
+		}
 	case "file_read":
 		label = fileReadLabel(input)
 	case "context_query":
@@ -676,16 +815,16 @@ func publicView(raw []byte) string {
 
 func eventFactLine(event Event, detail, suppressDuration bool) string {
 	parts := make([]string, 0, 9)
-	if event.Command != "" {
+	if detail && event.Command != "" {
 		parts = append(parts, "command="+compactCommand(event.Command))
 	}
-	if event.WorkingDirectory != "" {
+	if detail && event.WorkingDirectory != "" {
 		parts = append(parts, "cwd="+compactLine(event.WorkingDirectory))
 	}
 	if event.ExitCode != nil {
 		parts = append(parts, fmt.Sprintf("exit=%d", *event.ExitCode))
 	}
-	if event.DurationMs > 0 && !suppressDuration {
+	if detail && event.DurationMs > 0 && !suppressDuration {
 		parts = append(parts, fmt.Sprintf("duration=%dms", event.DurationMs))
 	}
 	if event.SkillName != "" {
@@ -698,7 +837,7 @@ func eventFactLine(event Event, detail, suppressDuration bool) string {
 		}
 		parts = append(parts, mcp)
 	}
-	if event.Path != "" {
+	if detail && event.Path != "" {
 		parts = append(parts, "path="+event.Path)
 	}
 	if detail && event.Purpose != "" {
@@ -733,7 +872,7 @@ func stringValue(value any) string {
 
 func actionVerb(tool, action string) string {
 	switch tool {
-	case "command_execute", "command_run":
+	case "execute", "command_execute", "command_run":
 		return "Ran"
 	case "context_query":
 		return "Searched"
@@ -904,24 +1043,112 @@ func fileReadLabel(input map[string]any) string {
 		return "files"
 	}
 	if path, ok := input["path"].(string); ok && strings.TrimSpace(path) != "" {
-		return path
+		return strings.TrimSpace(path) + readScopeLabel(input)
 	}
 	items, _ := input["items"].([]any)
-	paths := make([]string, 0, len(items))
+	labels := make([]string, 0, len(items))
 	for _, raw := range items {
 		item, _ := raw.(map[string]any)
 		path, _ := item["path"].(string)
 		if strings.TrimSpace(path) != "" {
-			paths = append(paths, path)
+			labels = append(labels, strings.TrimSpace(path)+readScopeLabel(item))
 		}
 	}
-	if len(paths) == 1 {
-		return paths[0]
+	if len(labels) == 1 {
+		return labels[0]
 	}
-	if len(paths) > 1 {
-		return fmt.Sprintf("%d files (%s)", len(paths), strings.Join(paths[:minInt(len(paths), 3)], ", "))
+	if len(labels) > 1 {
+		return fmt.Sprintf("%d files", len(labels))
 	}
 	return "files"
+}
+
+func fileReadDetailLines(tool string, raw []byte) []string {
+	if !isFileReadInput(tool, raw) {
+		return nil
+	}
+	input := inputMap(raw)
+	items, _ := input["items"].([]any)
+	if len(items) <= 1 {
+		return nil
+	}
+	const maxReadItems = 20
+	lines := make([]string, 0, minInt(len(items), maxReadItems)+1)
+	for _, rawItem := range items[:minInt(len(items), maxReadItems)] {
+		item, _ := rawItem.(map[string]any)
+		path, _ := item["path"].(string)
+		if path = strings.TrimSpace(path); path != "" {
+			lines = append(lines, path+readScopeLabel(item))
+		}
+	}
+	if len(items) > maxReadItems {
+		lines = append(lines, fmt.Sprintf("... and %d more files", len(items)-maxReadItems))
+	}
+	return lines
+}
+
+func isFileReadInput(tool string, raw []byte) bool {
+	input := inputMap(raw)
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "file_read":
+		return true
+	case "read", "source_read":
+		view := strings.ToLower(strings.TrimSpace(stringValue(input["view"])))
+		return view == "file" || (view == "" && (input["path"] != nil || input["items"] != nil))
+	default:
+		return false
+	}
+}
+
+func readScopeLabel(input map[string]any) string {
+	if input == nil {
+		return ""
+	}
+	offset, hasOffset := integerValue(input["offset"])
+	limit, hasLimit := integerValue(input["limit"])
+	if hasOffset && offset < 0 {
+		hasOffset = false
+	}
+	if hasLimit && limit <= 0 {
+		hasLimit = false
+	}
+	if hasOffset || hasLimit {
+		start := 1
+		if hasOffset {
+			start = offset + 1
+		}
+		if hasLimit {
+			return fmt.Sprintf(" (lines %d-%d)", start, start+limit-1)
+		}
+		return fmt.Sprintf(" (from line %d)", start)
+	}
+	mode := strings.ToLower(strings.TrimSpace(stringValue(input["mode"])))
+	if mode == "window" {
+		return " (window)"
+	}
+	return " (full)"
+}
+
+func integerValue(value any) (int, bool) {
+	switch number := value.(type) {
+	case float64:
+		return int(number), true
+	case int:
+		return number, true
+	case int64:
+		return int(number), true
+	default:
+		return 0, false
+	}
+}
+
+func isCommandTool(tool string) bool {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "execute", "command_execute", "command_run":
+		return true
+	default:
+		return false
+	}
 }
 
 func fileReadResultLabel(result map[string]any) string {

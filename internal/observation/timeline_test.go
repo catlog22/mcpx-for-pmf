@@ -24,7 +24,7 @@ func TestTextRendererGroupsInteractionIntoBoundedBlock(t *testing.T) {
 	for sequence := int64(43); sequence <= 100; sequence++ {
 		events = append(events, Event{
 			Sequence: sequence, RequestID: "req_42", Tool: "command_execute", Type: TypeCommandOutput,
-			Stream: "stdout", Output: []byte(fmt.Sprintf(`{"text":"line-%d-a\nline-%d-b","bytes":17}`, sequence, sequence)),
+			Command: "go test ./internal/auth", Stream: "stdout", Output: []byte(fmt.Sprintf(`{"text":"line-%d-a\nline-%d-b","bytes":17}`, sequence, sequence)),
 		})
 	}
 	events = append(events, Event{
@@ -51,8 +51,8 @@ func TestTextRendererGroupsInteractionIntoBoundedBlock(t *testing.T) {
 	if strings.Contains(text, "╭─") || strings.Contains(text, "╰") || strings.Contains(text, "│ ") {
 		t.Fatalf("compact renderer leaked framed timeline: %q", text)
 	}
-	if !strings.Contains(text, "Read stdout") || !strings.Contains(text, "output truncated") {
-		t.Fatalf("compact output or overflow marker missing: %q", text)
+	if strings.Count(text, "Ran go test ./internal/auth") != 1 || !strings.Contains(text, "↳ stdout:") || !strings.Contains(text, "output truncated") {
+		t.Fatalf("command-centric compact output or overflow marker missing: %q", text)
 	}
 	if !strings.HasSuffix(text, "\n\n") {
 		t.Fatalf("footer is not followed by blank line: %q", text)
@@ -78,6 +78,7 @@ func TestTextRendererStartsContinuationAfterCompletion(t *testing.T) {
 
 func TestTextRendererSeparatesAdjacentOperationsWithToolAndStatus(t *testing.T) {
 	renderer := NewTextRendererWithMode(ColorModeANSI16, 80)
+	renderer.SetDetail(true)
 	var output bytes.Buffer
 	for _, event := range []Event{
 		{Sequence: 1, RequestID: "req_read", Tool: "read", Type: TypeToolCompleted, Status: "succeeded", Input: []byte(`{"view":"file","path":"a.go"}`), Output: []byte(`{"status":"succeeded","result":{"content":[{"type":"text","text":"Read a.go."}]}}`)},
@@ -96,6 +97,28 @@ func TestTextRendererSeparatesAdjacentOperationsWithToolAndStatus(t *testing.T) 
 	}
 	if strings.Count(text, ansiReset) < 4 {
 		t.Fatalf("colored adjacent operations were not independently reset: %q", text)
+	}
+}
+
+func TestTextRendererDefaultHidesOperationAndDurationTelemetry(t *testing.T) {
+	renderer := NewTextRenderer(false)
+	var output bytes.Buffer
+	for _, event := range []Event{
+		{Sequence: 1, RequestID: "req_1", Tool: "read", Type: TypeToolCompleted, Status: "succeeded", Input: []byte(`{"view":"file","path":"a.go"}`), Output: []byte(`{"status":"succeeded"}`)},
+		{Sequence: 2, RequestID: "req_2", OperationID: "op_secret", Tool: "execute", Type: TypeToolCompleted, Status: "succeeded", DurationMs: 27, Command: "go test ./...", Input: []byte(`{"command":"go test ./..."}`), Output: []byte(`{"status":"succeeded"}`)},
+	} {
+		if err := renderer.RenderEvent(&output, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	text := output.String()
+	if !strings.Contains(text, "• Ran go test ./...") {
+		t.Fatalf("real command missing: %q", text)
+	}
+	for _, forbidden := range []string{"operation=op_secret", "duration=27ms", "── execute"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("default telemetry leaked %q: %q", forbidden, text)
+		}
 	}
 }
 
@@ -179,11 +202,11 @@ func TestTextRendererMergesCommandOutputChunksAndStreams(t *testing.T) {
 	renderer := NewTextRenderer(false)
 	var output bytes.Buffer
 	events := []Event{
-		{Sequence: 1, RequestID: "req_output", Tool: "command_execute", Type: TypeToolStarted},
-		{Sequence: 2, RequestID: "req_output", Tool: "command_execute", Type: TypeCommandOutput, Stream: "stdout", Output: []byte(`{"text":"first\n"}`)},
-		{Sequence: 3, RequestID: "req_output", Tool: "command_execute", Type: TypeCommandOutput, Stream: "stdout", Offset: 6, Output: []byte(`{"text":"second\n"}`)},
-		{Sequence: 4, RequestID: "req_output", Tool: "command_execute", Type: TypeCommandOutput, Stream: "stderr", Output: []byte(`{"text":"warning\n"}`)},
-		{Sequence: 5, RequestID: "req_output", Tool: "command_execute", Type: TypeToolCompleted, Output: []byte(`{"status":"succeeded","result":{"content":[{"type":"text","text":"done"}]}}`)},
+		{Sequence: 1, RequestID: "req_output", Tool: "command_execute", Type: TypeToolStarted, Input: []byte(`{"command":"go test ./..."}`)},
+		{Sequence: 2, RequestID: "req_output", Tool: "command_execute", Type: TypeCommandOutput, Command: "go test ./...", Stream: "stdout", Output: []byte(`{"text":"first\n"}`)},
+		{Sequence: 3, RequestID: "req_output", Tool: "command_execute", Type: TypeCommandOutput, Command: "go test ./...", Stream: "stdout", Offset: 6, Output: []byte(`{"text":"second\n"}`)},
+		{Sequence: 4, RequestID: "req_output", Tool: "command_execute", Type: TypeCommandOutput, Command: "go test ./...", Stream: "stderr", Output: []byte(`{"text":"warning\n"}`)},
+		{Sequence: 5, RequestID: "req_output", Tool: "command_execute", Type: TypeToolCompleted, Command: "go test ./...", Output: []byte(`{"status":"succeeded","result":{"content":[{"type":"text","text":"done"}]}}`)},
 	}
 	for _, event := range events {
 		if err := renderer.RenderEvent(&output, event); err != nil {
@@ -191,8 +214,8 @@ func TestTextRendererMergesCommandOutputChunksAndStreams(t *testing.T) {
 		}
 	}
 	text := output.String()
-	if strings.Count(text, "Read stdout") != 1 || strings.Count(text, "Read stderr") != 1 {
-		t.Fatalf("stream headers were not merged: %q", text)
+	if strings.Count(text, "Ran go test ./...") != 1 || strings.Count(text, "↳ stdout:") != 1 || strings.Count(text, "↳ stderr:") != 1 {
+		t.Fatalf("command/stream headers were not merged into one block: %q", text)
 	}
 	for _, want := range []string{"1 | first", "2 | second", "1 | warning"} {
 		if !strings.Contains(text, want) {
@@ -219,7 +242,7 @@ func TestTextRendererFoldsRepeatedReadEvents(t *testing.T) {
 		}
 	}
 	text := output.String()
-	if strings.Count(text, "Read src/demo.go") != 1 || !strings.Contains(text, "Repeated src/demo.go x2") {
+	if strings.Count(text, "Read src/demo.go (full)") != 1 || !strings.Contains(text, "Repeated src/demo.go (full) x2") {
 		t.Fatalf("repeated read was not folded: %q", text)
 	}
 }
@@ -231,7 +254,7 @@ func TestTextRendererShowsProgressBeforeCompletionOnce(t *testing.T) {
 	for _, event := range []Event{
 		{Sequence: 0, RequestID: "req_previous", Tool: "read", Type: TypeToolCompleted, Status: "succeeded", Output: []byte(`{"status":"succeeded"}`)},
 		{Sequence: 1, RequestID: "req_progress", Tool: "execute", Type: TypeToolStarted, Goal: "验证变更", Purpose: "运行测试", ReasoningSummary: "先验证最小闭环", ProgressSummary: progress, NextStep: "检查失败日志", PlanID: "pl_progress", PlanTaskID: "pt_progress", ExecutionTaskID: "task_progress", OperationID: "op_progress"},
-		{Sequence: 2, RequestID: "req_progress", Tool: "execute", Type: TypeToolCompleted, Status: "succeeded", DurationMs: 27, Goal: "验证变更", Purpose: "运行测试", ReasoningSummary: "先验证最小闭环", ProgressSummary: progress, NextStep: "检查失败日志", PlanID: "pl_progress", PlanTaskID: "pt_progress", ExecutionTaskID: "task_progress", OperationID: "op_progress", Input: []byte(`{"command":"go test ./..."}`), Output: []byte(`{"status":"succeeded"}`)},
+		{Sequence: 2, RequestID: "req_progress", Tool: "execute", Type: TypeToolCompleted, Status: "succeeded", DurationMs: 27, Goal: "验证变更", Purpose: "运行测试", ReasoningSummary: "先验证最小闭环", ProgressSummary: progress, NextStep: "检查失败日志", PlanID: "pl_progress", PlanTaskID: "pt_progress", ExecutionTaskID: "task_progress", OperationID: "op_progress", Command: "go test ./...", Input: []byte(`{"command":"go test ./..."}`), Output: []byte(`{"status":"succeeded"}`)},
 	} {
 		if err := renderer.RenderEvent(&output, event); err != nil {
 			t.Fatal(err)
@@ -246,11 +269,13 @@ func TestTextRendererShowsProgressBeforeCompletionOnce(t *testing.T) {
 			t.Fatalf("semantic context missing %q: %q", want, text)
 		}
 	}
-	if !strings.Contains(text, "goal: 验证变更 · purpose: 运行测试") || !strings.Contains(text, "plan: pl_progress · plan task: pt_progress · execution task: task_progress") || !strings.Contains(text, "── execute · started · operation=op_progress · duration=27ms") {
-		t.Fatalf("semantic context was not grouped: %q", text)
+	if !strings.Contains(text, "goal: 验证变更 · purpose: 运行测试") || !strings.Contains(text, "plan: pl_progress · plan task: pt_progress · execution task: task_progress") || !strings.Contains(text, "• Ran go test ./...") {
+		t.Fatalf("semantic context or command was not grouped: %q", text)
 	}
-	if strings.Contains(text, "↳ operation: op_progress") {
-		t.Fatalf("operation id should be part of the operation header: %q", text)
+	for _, forbidden := range []string{"operation=op_progress", "duration=27ms", "↳ operation: op_progress"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("default telemetry leaked %q: %q", forbidden, text)
+		}
 	}
 }
 
