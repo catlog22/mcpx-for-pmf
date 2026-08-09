@@ -36,20 +36,20 @@ func TestQueryMemoryProjectsStableFieldsAndFiltersWorkspace(t *testing.T) {
 	firstAt := time.Date(2026, 8, 1, 16, 0, 0, 0, time.UTC)
 	secondAt := firstAt.Add(2 * time.Hour)
 	progressInput, _ := json.Marshal(map[string]any{
-		"summary": "完成项目初始化", "result_summary": "创建了核心模块",
-		"status": "completed", "next_step": "运行测试", "related_tool": "edit",
+		"current": "完成项目初始化", "result": "创建了核心模块",
+		"status": "completed", "next": "运行测试", "related_tool": "edit",
 	})
 	progressOutput, _ := json.Marshal(map[string]any{
 		"status": "ok", "timing": map[string]any{"processing_ms": 999},
 		"result": map[string]any{
-			"summary": "完成项目初始化", "result_summary": "创建了核心模块",
-			"status": "completed", "next_step": "运行测试", "related_tool": "edit",
+			"current": "完成项目初始化", "result": "创建了核心模块",
+			"status": "completed", "next": "运行测试", "related_tool": "edit",
 			"remote_session_id": "secret-session", "resource_uri": "mcpx://secret",
 		},
 	})
 	if _, err := store.Append(context.Background(), Event{
-		Workspace: "demo", Tool: "progress_report", Type: TypeToolCompleted,
-		Input: progressInput, Output: progressOutput, Summary: "progress_report ok", CreatedAt: firstAt,
+		Workspace: "demo", RemoteSessionID: "rs-demo", Tool: "progress", Type: TypeToolCompleted,
+		Input: progressInput, Output: progressOutput, Summary: "progress ok", CreatedAt: firstAt,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestQueryMemoryProjectsStableFieldsAndFiltersWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := store.Append(context.Background(), Event{
-		Workspace: "other", Tool: "progress_report", Type: TypeToolCompleted,
+		Workspace: "other", RemoteSessionID: "rs-other", Tool: "progress", Type: TypeToolCompleted,
 		Input: progressInput, Output: progressOutput, Summary: "其他 Workspace", CreatedAt: secondAt,
 	}); err != nil {
 		t.Fatal(err)
@@ -95,13 +95,22 @@ func TestQueryMemoryProjectsStableFieldsAndFiltersWorkspace(t *testing.T) {
 	}
 
 	page, err = store.QueryMemory(context.Background(), MemoryQuery{
-		Workspace: "demo", Keyword: "项目初始化", ID: "1", Latest: 1, Location: location,
+		Workspace: "demo", SessionID: "rs-demo", Type: "progress", Keyword: "项目初始化", ID: "1", Latest: 1, Location: location,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 1 || page.Items[0].Status != "completed" || page.Items[0].Next != "运行测试" {
+	if page.Total != 1 || page.Items[0].Status != "completed" || page.Items[0].Next != "运行测试" || page.Items[0].Result != "创建了核心模块" {
 		t.Fatalf("progress page=%+v", page)
+	}
+	wrongSession, err := store.QueryMemory(context.Background(), MemoryQuery{
+		Workspace: "demo", SessionID: "rs-other", Type: "progress", Latest: 1, Location: location,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wrongSession.Total != 0 || len(wrongSession.Items) != 0 {
+		t.Fatalf("session filter leaked progress: %+v", wrongSession)
 	}
 }
 

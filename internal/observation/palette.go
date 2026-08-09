@@ -64,7 +64,9 @@ func actionColor(tool string, failed bool) string {
 		return ansiMagenta
 	case "artifact":
 		return ansiBlue
-	case "progress_report", "observer.notice":
+	case "progress":
+		return ansiCyan
+	case "observer.notice":
 		return ansiGray
 	default:
 		return ansiGray

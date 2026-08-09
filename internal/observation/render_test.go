@@ -137,6 +137,98 @@ func TestRenderTextPreservesPlainMCPErrorMessage(t *testing.T) {
 	}
 }
 
+func TestRenderTextSkipsEmptyFailureHeadersAndKeepsUsefulContext(t *testing.T) {
+	var output bytes.Buffer
+	if err := RenderText(&output, Event{
+		Tool:   "edit",
+		Type:   TypeToolCompleted,
+		Input:  []byte(`{"purpose":"update files"}`),
+		Output: []byte(`{"status":"failed","summary":"Context:\nMATCH_AMBIGUOUS: replacement matched 3 locations\npath: flux-boot-ui/src/store/modules/consultComm.ts\nhint: use a more specific replacement anchor\nignored fourth line"}`),
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	for _, want := range []string{
+		"! Edit failed edit",
+		"failed: MATCH_AMBIGUOUS: replacement matched 3 locations",
+		"path: flux-boot-ui/src/store/modules/consultComm.ts",
+		"hint: use a more specific replacement anchor",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("failure detail missing %q: %q", want, got)
+		}
+	}
+	for _, forbidden := range []string{"failed: Context:", "ignored fourth line"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("failure rendering leaked %q: %q", forbidden, got)
+		}
+	}
+}
+
+func TestRenderTextExtractsUsefulNestedMultilineFailure(t *testing.T) {
+	var output bytes.Buffer
+	if err := RenderText(&output, Event{
+		Tool:   "edit",
+		Type:   TypeToolCompleted,
+		Output: []byte(`{"status":"error","result":{"content":[{"type":"text","text":"Error:\nREVISION_MISMATCH: file changed since read\npath: internal/observation/render.go"}]}}`),
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	for _, want := range []string{
+		"failed: REVISION_MISMATCH: file changed since read",
+		"path: internal/observation/render.go",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("nested multiline failure missing %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "failed: Error:") {
+		t.Fatalf("nested failure retained empty header: %q", got)
+	}
+}
+
+func TestRenderTextShowsSemanticProgressStates(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		want   string
+	}{
+		{name: "working", status: "in_progress", want: "◆ Progress 正在补消息历史测试"},
+		{name: "done", status: "completed", want: "✓ Done 消息 Tab 和问诊聊天页已完成"},
+		{name: "waiting", status: "waiting_for_user", want: "? Waiting 需要确认推送 origin/main"},
+		{name: "blocked", status: "blocked", want: "! Blocked 缺少测试环境配置"},
+		{name: "failed", status: "failed", want: "✗ Failed 全仓测试仍有失败"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			current := map[string]string{
+				"in_progress":      "正在补消息历史测试",
+				"completed":        "消息 Tab 和问诊聊天页已完成",
+				"waiting_for_user": "需要确认推送 origin/main",
+				"blocked":          "缺少测试环境配置",
+				"failed":           "全仓测试仍有失败",
+			}[test.status]
+			input := `{"status":` + strconv.Quote(test.status) + `,"current":` + strconv.Quote(current) + `,"result":"2 files changed · tests checked","next":"根据状态继续"}`
+			if err := RenderText(&output, Event{
+				Tool: "progress", Type: TypeToolCompleted, Input: []byte(input), Output: []byte(`{"status":"succeeded"}`),
+			}, false); err != nil {
+				t.Fatal(err)
+			}
+			got := output.String()
+			for _, want := range []string{test.want, "↳ result: 2 files changed · tests checked", "↳ next: 根据状态继续"} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("progress rendering missing %q: %q", want, got)
+				}
+			}
+			if strings.Contains(got, "Reported") {
+				t.Fatalf("progress used generic tool rendering: %q", got)
+			}
+		})
+	}
+}
+
 func TestRenderTextShowsFailedToolAndSnapshotReason(t *testing.T) {
 	var output bytes.Buffer
 	if err := RenderText(&output, Event{

@@ -972,7 +972,7 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 		data["remote_session"] = map[string]any{"id": session.ID, "role": session.Role, "status": session.Status}
 	}
 	data["revision"] = capabilityRevision(data)
-	data["evaluation_revision"] = "clean-core-p1-p4-v1"
+	data["evaluation_revision"] = "clean-core-p1-p5-v1"
 	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remoteID, Workspace: ws.Name, Tool: "capability_list", Status: "ok"})
 	return r.remoteResult(envReq, remoteID, ws.Name, data)
 }

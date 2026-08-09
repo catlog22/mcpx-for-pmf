@@ -243,10 +243,10 @@ func observationPredicate(category, alias string) (string, error) {
 	switch category {
 	case "process":
 		return fmt.Sprintf(`(%s.event_type IN ('tool.started', 'command.output', 'observer.notice') OR
-         (%s.event_type = 'tool.completed' AND %s.tool_name <> 'progress_report'))`, alias, alias, alias), nil
+         (%s.event_type = 'tool.completed' AND %s.tool_name <> 'progress'))`, alias, alias, alias), nil
 	case "memory":
 		return fmt.Sprintf(`(%s.event_type IN ('file.changed', 'session.lifecycle') OR
-         (%s.event_type = 'tool.completed' AND %s.tool_name = 'progress_report'))`, alias, alias, alias), nil
+         (%s.event_type = 'tool.completed' AND %s.tool_name = 'progress'))`, alias, alias, alias), nil
 	default:
 		return "", fmt.Errorf("unknown observation retention category %q", category)
 	}

@@ -252,5 +252,15 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"path":               path,
 	}, []string{"remote_session_id", "view"}, readOnlyToolAnnotation), r.toolObserve)
 
+	r.addTool(s, cleanCoreTool("progress", desc["progress"], map[string]any{
+		"remote_session_id": remoteSession,
+		"status":            enumSchema("模型当前工作状态；停止 MCPX 工具调用前必须使用终态 completed、waiting_for_user、blocked 或 failed", "in_progress", "completed", "waiting_for_user", "blocked", "failed"),
+		"current":           stringSchema("当前阶段或终态的用户可见摘要；陈述已发生或正在发生的工作"),
+		"result":            stringSchema("已验证结果摘要；没有证据时不要声称已完成或通过"),
+		"next":              stringSchema("下一步动作；completed 时通常留空"),
+		"phase":             stringSchema("可选的阶段名称，例如 implementation、verification、release"),
+		"related_tool":      stringSchema("可选的相关 MCPX 工具名"),
+	}, []string{"remote_session_id", "current"}, sessionToolAnnotation), r.toolProgress)
+
 	r.registerConsolidatedToolsCatalog(s)
 }

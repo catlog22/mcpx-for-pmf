@@ -26,17 +26,17 @@ func TestWorkspaceStateMemoryReturnsBoundedFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	input, _ := json.Marshal(map[string]any{
-		"summary": "完成初始化", "result_summary": "创建核心文件", "status": "completed", "next_step": "运行测试",
+		"current": "完成初始化", "result": "创建核心文件", "status": "completed", "next": "运行测试",
 	})
 	output, _ := json.Marshal(map[string]any{
 		"result": map[string]any{
-			"summary": "完成初始化", "result_summary": "创建核心文件", "status": "completed", "next_step": "运行测试",
+			"current": "完成初始化", "result": "创建核心文件", "status": "completed", "next": "运行测试",
 		},
 	})
 	if _, err := rt.observation.store.Append(context.Background(), observation.Event{
-		Workspace: "demo", RemoteSessionID: created.Session.ID, Tool: "progress_report",
+		Workspace: "demo", RemoteSessionID: created.Session.ID, Tool: "progress",
 		Type: observation.TypeToolCompleted, Input: input, Output: output,
-		Summary: "progress_report ok", CreatedAt: time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC),
+		Summary: "progress ok", CreatedAt: time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC),
 	}); err != nil {
 		t.Fatal(err)
 	}

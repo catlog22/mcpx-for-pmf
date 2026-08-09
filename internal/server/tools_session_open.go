@@ -13,6 +13,7 @@ import (
 	"mcpx/internal/audit"
 	"mcpx/internal/instruction"
 	"mcpx/internal/mcpproxy"
+	"mcpx/internal/observation"
 	"mcpx/internal/projecttask"
 	"mcpx/internal/remotesession"
 	"mcpx/internal/skill"
@@ -81,10 +82,11 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		pendingConfirmations any
 		taskList             any
 		artifacts            any
+		latestModelState     any
 	)
 	var tasks any
 	var bootstrap sync.WaitGroup
-	bootstrap.Add(6)
+	bootstrap.Add(7)
 	go func() {
 		defer bootstrap.Done()
 		if manager, err := r.mcpManagerForWorkspace(wsPath); err == nil {
@@ -124,6 +126,21 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		pendingConfirmations = pendingConfirmationItems(r.approvals.ListRemoteSession(session.ID))
 		taskList, _ = r.tasks.List(session.ID, 20)
 		artifacts, _ = r.artifacts.List(ctx, session.ID, "", 20)
+	}()
+	go func() {
+		defer bootstrap.Done()
+		if r.observation == nil || r.observation.store == nil {
+			return
+		}
+		page, err := r.observation.store.QueryMemory(ctx, observation.MemoryQuery{
+			Workspace: session.WorkspaceName,
+			SessionID: session.ID,
+			Type:      "progress",
+			Latest:    1,
+		})
+		if err == nil && len(page.Items) > 0 {
+			latestModelState = page.Items[0]
+		}
 	}()
 	bootstrap.Wait()
 
@@ -197,8 +214,11 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 			"plan_delivery":  []string{"plan", "edit", "execute", "artifact", "observe"},
 			"extension_call": []string{"discover", "skill_call", "mcp_call"},
 		},
-		"evaluation_revision": "clean-core-p1-p4-v1",
+		"evaluation_revision": "clean-core-p1-p5-v1",
 		"opened_at":           time.Now().UTC().Format(time.RFC3339),
+	}
+	if latestModelState != nil {
+		data["latest_model_state"] = latestModelState
 	}
 	r.omitUnchangedSessionCapabilities(envReq.Payload, data, revisions)
 

@@ -273,39 +273,6 @@ func (r *Runtime) toolTaskControl(ctx context.Context, req *mcp.CallToolRequest)
 	return r.toolTaskManage(ctx, publicDispatch(req, "action", publicSelector(req, "operation")))
 }
 
-func (r *Runtime) toolProgressReportPublic(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args := mcpresult.Arguments(req)
-	updates := map[string]any{}
-	if current, ok := args["current"].(string); ok {
-		updates["summary"] = current
-	}
-	if next, ok := args["next"].(string); ok {
-		updates["next_step"] = next
-	}
-	if evidence, ok := args["evidence"].([]any); ok {
-		items := make([]string, 0, len(evidence))
-		for _, item := range evidence {
-			if value, ok := item.(string); ok && strings.TrimSpace(value) != "" {
-				items = append(items, strings.TrimSpace(value))
-			}
-		}
-		updates["result_summary"] = strings.Join(items, "；")
-	}
-	if _, exists := args["status"]; !exists {
-		switch publicSelector(req, "phase") {
-		case "completed":
-			updates["status"] = "completed"
-		case "waiting":
-			updates["status"] = "waiting_for_user"
-		case "blocked":
-			updates["status"] = "blocked"
-		default:
-			updates["status"] = "in_progress"
-		}
-	}
-	return r.toolProgressReport(ctx, forwardedRequest(req, updates))
-}
-
 func (r *Runtime) toolPlanCreatePublic(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolPlanManage(ctx, publicDispatch(req, "action", "create"))
 }

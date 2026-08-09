@@ -23,6 +23,8 @@ const (
 // compact expression form until the store validates and compiles them.
 type MemoryQuery struct {
 	Workspace string
+	SessionID string
+	Type      string
 	Keyword   string
 	ID        string
 	Time      string
@@ -210,9 +212,25 @@ func (s *Store) QueryMemory(ctx context.Context, query MemoryQuery) (MemoryPage,
 
 	where := []string{
 		"workspace_name = ?",
-		`(event_type IN ('file.changed', 'session.lifecycle') OR (event_type = 'tool.completed' AND tool_name = 'progress_report'))`,
+		`(event_type IN ('file.changed', 'session.lifecycle') OR (event_type = 'tool.completed' AND tool_name = 'progress'))`,
 	}
 	args := []any{query.Workspace}
+	if query.SessionID = strings.TrimSpace(query.SessionID); query.SessionID != "" {
+		where = append(where, "remote_session_id = ?")
+		args = append(args, query.SessionID)
+	}
+	if query.Type = strings.ToLower(strings.TrimSpace(query.Type)); query.Type != "" {
+		switch query.Type {
+		case "progress":
+			where = append(where, `(event_type = 'tool.completed' AND tool_name = 'progress')`)
+		case "file_changed":
+			where = append(where, "event_type = 'file.changed'")
+		case "session_lifecycle":
+			where = append(where, "event_type = 'session.lifecycle'")
+		default:
+			return MemoryPage{}, fmt.Errorf("%w: unsupported type %q", ErrInvalidMemoryQuery, query.Type)
+		}
+	}
 	if len(idRanges) > 0 {
 		parts := make([]string, 0, len(idRanges))
 		for _, item := range idRanges {
@@ -281,12 +299,12 @@ func projectMemoryEvent(row memoryEventRow, location *time.Location) (MemoryItem
 		result = nested
 	}
 	switch {
-	case row.EventType == TypeToolCompleted && row.Tool == "progress_report":
+	case row.EventType == TypeToolCompleted && row.Tool == "progress":
 		item.Type = "progress"
-		item.Summary = firstMemoryString(input, result, "summary")
-		item.Result = firstMemoryString(input, result, "result_summary")
+		item.Summary = firstMemoryString(input, result, "current")
+		item.Result = firstMemoryString(input, result, "result")
 		item.Status = firstMemoryString(input, result, "status")
-		item.Next = firstMemoryString(input, result, "next_step")
+		item.Next = firstMemoryString(input, result, "next")
 		item.RelatedTool = firstMemoryString(input, result, "related_tool")
 		if item.Summary == "" {
 			item.Summary = strings.TrimSpace(row.ProgressSummary)

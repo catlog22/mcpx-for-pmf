@@ -73,6 +73,23 @@ func insertRetentionEvent(t *testing.T, db *sql.DB, workspace, remoteID, eventTy
 	return sequence
 }
 
+func TestObservationRetentionTreatsProgressAsMemory(t *testing.T) {
+	process, err := observationPredicate("process", "e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory, err := observationPredicate("memory", "e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(process, "tool_name <> 'progress'") {
+		t.Fatalf("process predicate does not exclude progress: %s", process)
+	}
+	if !strings.Contains(memory, "tool_name = 'progress'") {
+		t.Fatalf("memory predicate does not retain progress: %s", memory)
+	}
+}
+
 func TestObservationRetentionNewestWindowIsNotCorrelated(t *testing.T) {
 	db, _, now := newRetentionTestService(t, "")
 	query, err := observationDeletionQuery("process")

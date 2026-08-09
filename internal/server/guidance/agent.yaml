@@ -1,4 +1,4 @@
-version: "1.25"
+version: "1.26"
 priority: high
 summary: 使用 clean-core MCPX 工具检查、修改、执行和观察；execute 仅用于明确要求的命令。
 rules:
@@ -29,8 +29,9 @@ rules:
   - 没有成功的工具结果时，不要声称文件已读取、修改或验证。
   - 重要、变更、删除或长时间调用前，先简述将做什么及原因，然后一次提交完整参数，不要等待重新获取工具 schema。
   - read(view=file, mode=full) 的源文件上限为 4194304 bytes；超大文件改用 mode=window。read.items 最多 20 项；read(view=list, path=directory) 是硬作用域，include_glob 只能进一步缩小范围。
-  - 每次工具调用后，在下一次非简单调用前通过顶层 progress_summary 补充已验证结果和下一步；区分事实、假设和未知。
-  - 如果下一步不再调用工具（任务完成、阻塞、等待用户或需要决策），在回复中说明已验证结果、状态和下一步（无需单独 progress_summary 工具）。
+  - 每次工具调用后，在下一次非简单调用前通过顶层 progress_summary 补充已验证结果和下一步；区分事实、假设和未知。连续工具链优先使用 progress_summary，不要为了每一次 read/edit/execute 都额外调用 progress。
+  - progress 是用户可见的语义状态事件：只在完成明显阶段、进入长耗时步骤、等待用户、发生阻塞/失败或最终完成时调用。in_progress 用于里程碑，completed 只能基于已有工具结果或验证证据，禁止把计划或猜测报告成完成。
+  - 本轮一旦调用过任何 MCPX 工具，在准备停止 MCPX 工具调用并向用户给出最终回复前，必须调用一次 progress 汇报终态；status 必须是 completed、waiting_for_user、blocked 或 failed。current 说明当前终态，result 只写已验证结果，next 写仍需用户或后续执行的动作。最终 progress 成功后再回复用户。
   - 同一已验证结果只陈述一次；工具返回已包含摘要时不要重复。
     - 大量文件删除、移除或清理不要调用 rm -rf 或 execute；使用 move_out(action=prepare) 冻结显式文件、目录或 symlink 清单，再由网页端模型完成用户确认后携带 confirmation_uuid 调用 move_out(action=submit)。目录 prepare 只校验根路径，submit 将目标移至操作系统回收站，不受 operation_batch 的 max_steps 限制；目录内的 symlink 和特殊文件不会阻断移动，symlink 始终只移动链接入口而不跟随目标，glob 和中间 symlink 越界仍拒绝。
   - 每次 edit 只提交真实需要的文件操作；不要通过截断文件绕过安全检查，若策略拒绝则按错误中的 recovery 调整路径或请求用户授权。
@@ -43,7 +44,7 @@ response_contract:
     - 重要、变更、删除或长时间操作必须先说明准备做什么
   after_tool_call:
     - 实际调用的工具、查询或命令及其真实结果
-    - 下一次工具调用使用 progress_summary 补发上一次工具的可验证结果和下一步；没有下一次工具调用时在回复中说明结果与下一步
+    - 下一次常规工具调用使用 progress_summary 补发上一次工具的可验证结果和下一步；准备停止 MCPX 工具调用时先用 progress 汇报终态，再回复用户
     - 读取、创建、修改、移动或删除的文件
     - 每项文件变更的具体内容和影响；代码变更使用 Markdown ```diff 代码块
     - 测试、构建、检查及其真实结果
@@ -87,6 +88,8 @@ tool_routing:
     - execute
   observe_work:
     - observe
+  report_progress:
+    - progress
   run_work:
     - execute
   ask_user_confirmation:

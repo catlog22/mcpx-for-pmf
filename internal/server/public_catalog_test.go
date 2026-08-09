@@ -17,7 +17,7 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	runtime.registerTools(protocol)
 
 	want := []string{
-		"session", "read", "edit", "move_out", "observe",
+		"session", "read", "edit", "move_out", "observe", "progress",
 		"operation_batch", "operation_manage",
 		"execute", "plan", "artifact", "discover", "skill_call", "mcp_call",
 		"runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide",
@@ -147,6 +147,23 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 			}
 		}
 	}
+	progressTool := runtime.listedToolMap()["progress"]
+	var progressSchema map[string]any
+	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(progressTool), &progressSchema); err != nil {
+		t.Fatal(err)
+	}
+	progressProperties, _ := progressSchema["properties"].(map[string]any)
+	for _, field := range []string{"remote_session_id", "status", "current", "result", "next", "phase", "related_tool"} {
+		if progressProperties[field] == nil {
+			t.Fatalf("progress schema missing %q: %s", field, mcpresult.ToolSchemaJSON(progressTool))
+		}
+	}
+	statusSchema, _ := progressProperties["status"].(map[string]any)
+	statusValues, _ := statusSchema["enum"].([]any)
+	if !containsSchemaRequired(statusValues, "failed") || !containsSchemaRequired(statusValues, "completed") {
+		t.Fatalf("progress status enum=%v", statusValues)
+	}
+
 	observeTool := runtime.listedToolMap()["observe"]
 	var observeSchema map[string]any
 	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(observeTool), &observeSchema); err != nil {

@@ -12,11 +12,11 @@ import (
 	"mcpx/internal/remotesession"
 )
 
-const cleanCoreCapabilityVersion = "clean-core-p4"
+const cleanCoreCapabilityVersion = "clean-core-p5"
 
 func capabilityGroups() map[string][]string {
 	return map[string][]string{
-		"core":    {"session", "read", "edit", "move_out", "observe", "execute", "plan", "artifact", "discover", "skill_call", "mcp_call"},
+		"core":    {"session", "read", "edit", "move_out", "observe", "progress", "execute", "plan", "artifact", "discover", "skill_call", "mcp_call"},
 		"support": {"operation_batch", "operation_manage", "runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide"},
 	}
 }
@@ -34,6 +34,7 @@ type toolCapabilityDefinition struct {
 // are fingerprinted from the resulting MCP registration.
 var toolCapabilityDefinitions = []toolCapabilityDefinition{
 	{Name: "observe", Domain: "observation", RequiresRemoteSession: true},
+	{Name: "progress", Domain: "progress", RequiresRemoteSession: true},
 	{Name: "operation_batch", Domain: "operation", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "operation_manage", Domain: "operation", RequiresRemoteSession: true},
 	{Name: "session", Domain: "session"},

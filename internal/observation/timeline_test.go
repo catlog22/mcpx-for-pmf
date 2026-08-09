@@ -128,14 +128,14 @@ func TestTextRendererDefaultShowsTranscriptContextActionSeparatorAndRunDuration(
 	}
 }
 
-func TestTextRendererSuppressesConsecutiveDuplicateProgressReports(t *testing.T) {
+func TestTextRendererSuppressesConsecutiveDuplicateProgressUpdates(t *testing.T) {
 	renderer := NewTextRenderer(false)
 	var output bytes.Buffer
-	progress := func(sequence int64, requestID, summary string) Event {
+	progress := func(sequence int64, requestID, current string) Event {
 		return Event{
-			Sequence: sequence, RequestID: requestID, Workspace: "demo", Tool: "progress_report",
+			Sequence: sequence, RequestID: requestID, Workspace: "demo", Tool: "progress",
 			Type:   TypeToolCompleted,
-			Input:  []byte(fmt.Sprintf(`{"summary":%q,"result_summary":"已删除顶层目录","status":"in_progress","next_step":"重新枚举","related_tool":"context_query"}`, summary)),
+			Input:  []byte(fmt.Sprintf(`{"current":%q,"result":"已删除顶层目录","status":"in_progress","next":"重新枚举","related_tool":"read"}`, current)),
 			Output: []byte(`{"status":"ok","result":{"content":[{"type":"text","text":"progress"}]}}`),
 		}
 	}
@@ -511,9 +511,9 @@ func TestTextRendererRefreshesWidthAfterTerminalResize(t *testing.T) {
 	if err := renderer.RenderEvent(&output, Event{
 		Sequence:  9,
 		RequestID: "req_resize",
-		Tool:      "progress_report",
+		Tool:      "progress",
 		Type:      TypeToolCompleted,
-		Input:     []byte(`{"summary":"报告进度"}`),
+		Input:     []byte(`{"current":"报告进度"}`),
 		Output:    []byte(`{"status":"ok","result":{"content":[{"type":"text","text":"这是一段在终端缩窄后也不能从左侧溢出的长文本。"}]}}`),
 	}); err != nil {
 		t.Fatal(err)

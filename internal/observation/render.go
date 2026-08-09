@@ -100,6 +100,9 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 	}
 	status, _ := payload["status"].(string)
 	failed, failureMessage := toolFailure(payload)
+	if isProgressTool(event.Tool) && !failed {
+		return renderProgressCompleted(w, event, options)
+	}
 	if failed {
 		verb = failureActionVerb(event.Tool, verb)
 	}
@@ -127,7 +130,9 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 			failureMessage = errorSummary(payload)
 		}
 		if message := failureMessage; message != "" {
-			details = append(details, "failed: "+compactLine(message))
+			if detail := failureDisplay(message); detail != "" {
+				details = append(details, detail)
+			}
 		}
 		if len(details) == 0 && status != "" && status != "succeeded" {
 			details = append(details, strings.ReplaceAll(status, "_", " "))
@@ -168,6 +173,98 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 
 func renderProgressSummary(w io.Writer, event Event, options renderOptions) error {
 	return writeChildren(w, semanticContextLines(event, options.suppressGoal, options.terminalWidth), options.colorMode != ColorModeNone)
+}
+
+type progressView struct {
+	Status      string
+	Current     string
+	Result      string
+	Next        string
+	Phase       string
+	RelatedTool string
+}
+
+func isProgressTool(tool string) bool {
+	return strings.EqualFold(strings.TrimSpace(tool), "progress")
+}
+
+func progressEventView(event Event) progressView {
+	input := inputMap(event.Input)
+	view := progressView{
+		Status:      strings.ToLower(firstProgressString(input, "status")),
+		Current:     firstProgressString(input, "current"),
+		Result:      firstProgressString(input, "result"),
+		Next:        firstProgressString(input, "next"),
+		Phase:       firstProgressString(input, "phase"),
+		RelatedTool: firstProgressString(input, "related_tool"),
+	}
+	if view.Status == "" {
+		view.Status = "in_progress"
+	}
+	if view.Current == "" {
+		view.Current = strings.TrimSpace(event.ProgressSummary)
+	}
+	return view
+}
+
+func firstProgressString(input map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value := stringValue(input[key]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func renderProgressCompleted(w io.Writer, event Event, options renderOptions) error {
+	view := progressEventView(event)
+	if view.Current == "" {
+		view.Current = "progress update"
+	}
+	marker, verb, color := progressAppearance(view.Status)
+	if err := writeProgressAction(w, marker, verb, view.Current, color, options.colorMode != ColorModeNone); err != nil {
+		return err
+	}
+	details := make([]string, 0, 4)
+	if view.Result != "" {
+		details = append(details, "result: "+view.Result)
+	}
+	if view.Next != "" {
+		details = append(details, "next: "+view.Next)
+	}
+	if options.detail && view.Phase != "" {
+		details = append(details, "phase: "+view.Phase)
+	}
+	if options.detail && view.RelatedTool != "" {
+		details = append(details, "related tool: "+view.RelatedTool)
+	}
+	return writeChildren(w, details, options.colorMode != ColorModeNone)
+}
+
+func progressAppearance(status string) (marker, verb, color string) {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed":
+		return "✓", "Done", ansiGreen
+	case "waiting_for_user":
+		return "?", "Waiting", ansiYellow
+	case "blocked":
+		return "!", "Blocked", ansiYellow
+	case "failed":
+		return "✗", "Failed", ansiRed
+	default:
+		return "◆", "Progress", ansiCyan
+	}
+}
+
+func writeProgressAction(w io.Writer, marker, verb, current, color string, enabled bool) error {
+	marker = sanitizeTerminalText(marker)
+	verb = sanitizeTerminalText(verb)
+	current = strings.TrimSpace(sanitizeTerminalText(current))
+	if current == "" {
+		current = "progress update"
+	}
+	_, err := fmt.Fprintf(w, "%s %s %s\n", paint(marker, color, enabled), paint(verb, color, enabled), current)
+	return err
 }
 
 func hasSemanticContext(event Event) bool {
@@ -839,11 +936,8 @@ func toolAction(tool string, raw []byte) (string, string) {
 		} else {
 			label = contextQueryCommand(map[string]any{"action": input["view"], "query": input["query"], "paths": input["paths"], "include_glob": input["include_glob"], "exclude_glob": input["exclude_glob"]})
 		}
-	case "progress_report":
-		label, _ = input["summary"].(string)
-		if strings.TrimSpace(label) == "" {
-			label, _ = input["current"].(string)
-		}
+	case "progress":
+		label, _ = input["current"].(string)
 	case "workspace_list":
 		label = "workspaces"
 	case "session_open":
@@ -975,8 +1069,8 @@ func actionVerb(tool, action string) string {
 		return "Opened"
 	case "workspace_list":
 		return "Listed"
-	case "progress_report":
-		return "Reported"
+	case "progress":
+		return "Progress"
 	case "session_transition":
 		return "Updated"
 	case "screenshot_capture":
@@ -1328,7 +1422,9 @@ func minInt(left, right int) int {
 
 func errorSummary(payload map[string]any) string {
 	if message, ok := payload["error"].(string); ok {
-		return compactLine(message)
+		if summary := failureSummary(message); summary != "" {
+			return summary
+		}
 	}
 	if details, ok := payload["error"].(map[string]any); ok {
 		return formatErrorDetails(details)
@@ -1345,7 +1441,7 @@ func toolFailure(payload map[string]any) (bool, string) {
 	status := strings.ToLower(strings.TrimSpace(stringValue(payload["status"])))
 	failedStatus := isErrorStatus(status) || status == "denied" || status == "unauthorized"
 	if failedStatus {
-		if summary := compactLine(stringValue(payload["summary"])); summary != "" && !strings.EqualFold(summary, status) {
+		if summary := failureSummary(stringValue(payload["summary"])); summary != "" && !strings.EqualFold(summary, status) {
 			return true, summary
 		}
 		return true, errorSummary(payload)
@@ -1375,6 +1471,8 @@ func failureActionVerb(tool, fallback string) string {
 		return "Plan failed"
 	case "artifact", "artifact_manage", "artifact_read", "artifact_register":
 		return "Artifact failed"
+	case "progress":
+		return "Progress failed"
 	}
 	if value := strings.TrimSpace(tool); value != "" {
 		value = strings.ReplaceAll(value, "_", " ")
@@ -1397,7 +1495,7 @@ func nestedErrorSummary(result map[string]any, allowPlainText bool) string {
 		var envelope map[string]any
 		if json.Unmarshal([]byte(strings.TrimSpace(text)), &envelope) != nil {
 			if allowPlainText {
-				if message := compactLine(text); message != "" {
+				if message := failureSummary(text); message != "" {
 					return message
 				}
 			}
@@ -1408,7 +1506,9 @@ func nestedErrorSummary(result map[string]any, allowPlainText bool) string {
 		}
 		if status, _ := envelope["status"].(string); status == "error" {
 			if message, _ := envelope["message"].(string); strings.TrimSpace(message) != "" {
-				return compactLine(message)
+				if summary := failureSummary(message); summary != "" {
+					return summary
+				}
 			}
 			return "operation failed"
 		}
@@ -1510,6 +1610,41 @@ func diffLinePrefix(line diffLine) string {
 	default:
 		return "| "
 	}
+}
+
+func failureSummary(value string) string {
+	const maxFailureLines = 3
+	lines := make([]string, 0, maxFailureLines)
+	for _, raw := range strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(strings.TrimRight(raw, "\r"))
+		if line == "" || isFailureHeader(line) {
+			continue
+		}
+		lines = append(lines, compactCodeLine(line))
+		if len(lines) == maxFailureLines {
+			break
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func isFailureHeader(line string) bool {
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "context:", "error:", "errors:", "detail:", "details:", "message:", "cause:":
+		return true
+	default:
+		return false
+	}
+}
+
+func failureDisplay(value string) string {
+	summary := failureSummary(value)
+	if summary == "" {
+		return ""
+	}
+	lines := strings.Split(summary, "\n")
+	lines[0] = "failed: " + lines[0]
+	return strings.Join(lines, "\n")
 }
 
 func compactLine(value string) string {
@@ -2192,7 +2327,7 @@ func errorEnvelopeSummary(value map[string]any) string {
 	}
 	switch details := raw.(type) {
 	case string:
-		return compactLine(details)
+		return failureSummary(details)
 	case map[string]any:
 		return formatErrorDetails(details)
 	default:
@@ -2204,14 +2339,16 @@ func formatErrorDetails(details map[string]any) string {
 	code, _ := details["code"].(string)
 	message, _ := details["message"].(string)
 	code = strings.TrimSpace(code)
-	message = compactLine(message)
+	message = failureSummary(message)
 	switch {
 	case code != "" && message != "":
-		return compactLine(code + ": " + message)
+		lines := strings.Split(message, "\n")
+		lines[0] = compactCodeLine(code + ": " + lines[0])
+		return strings.Join(lines, "\n")
 	case message != "":
 		return message
 	case code != "":
-		return code
+		return compactCodeLine(code)
 	default:
 		return compactMap(details)
 	}

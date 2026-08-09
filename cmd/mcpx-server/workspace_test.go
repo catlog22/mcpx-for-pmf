@@ -128,9 +128,9 @@ func TestRenderWorkspaceFrameRefreshesRendererWidth(t *testing.T) {
 		Event: &observation.Event{
 			Sequence:  4,
 			RequestID: "req_resize",
-			Tool:      "progress_report",
+			Tool:      "progress",
 			Type:      observation.TypeToolCompleted,
-			Input:     []byte(`{"summary":"报告进度"}`),
+			Input:     []byte(`{"current":"报告进度"}`),
 			Output:    []byte(`{"status":"ok","result":{"content":[{"type":"text","text":"这是一段在终端缩窄后也不能从左侧溢出的长文本。"}]}}`),
 		},
 	}, "text", false, renderer); err != nil {

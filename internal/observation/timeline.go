@@ -154,13 +154,13 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 	if err := r.writeTranscriptContext(w, event); err != nil {
 		return err
 	}
-	if event.Tool == "progress_report" && event.Type == TypeToolCompleted {
+	if isProgressTool(event.Tool) && event.Type == TypeToolCompleted {
 		fingerprint := progressFingerprint(event)
 		if fingerprint != "" && fingerprint == r.lastProgressFingerprint {
 			return nil
 		}
 		r.lastProgressFingerprint = fingerprint
-	} else if event.Tool != "progress_report" || event.Type != TypeToolStarted {
+	} else if !isProgressTool(event.Tool) || event.Type != TypeToolStarted {
 		r.lastProgressFingerprint = ""
 	}
 	if duplicate, count := r.duplicateEvent(event); duplicate {
@@ -350,22 +350,13 @@ func (r *TextRenderer) renderDuplicateNotice(w io.Writer, event Event, count int
 }
 
 func progressFingerprint(event Event) string {
-	var input struct {
-		Summary       string `json:"summary"`
-		ResultSummary string `json:"result_summary"`
-		Status        string `json:"status"`
-		NextStep      string `json:"next_step"`
-		RelatedTool   string `json:"related_tool"`
-	}
-	if err := json.Unmarshal(event.Input, &input); err != nil {
+	view := progressEventView(event)
+	if strings.TrimSpace(view.Current) == "" {
 		return ""
 	}
 	values := []string{
-		event.Workspace, event.RemoteSessionID, input.Summary, input.ResultSummary,
-		input.Status, input.NextStep, input.RelatedTool,
-	}
-	if strings.TrimSpace(input.Summary) == "" && strings.TrimSpace(event.ProgressSummary) == "" {
-		return ""
+		event.Workspace, event.RemoteSessionID, view.Current, view.Result,
+		view.Status, view.Next, view.Phase, view.RelatedTool,
 	}
 	return strings.Join(values, "\x00")
 }
