@@ -67,6 +67,41 @@ func TestCleanCoreExecuteIdempotencyAndUserConfirmation(t *testing.T) {
 	}
 }
 
+func TestCleanCoreCommandConfirmationRefreshesPendingWhenPurposeChanges(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	rt.cfg.Security.Commands.Confirm = append(rt.cfg.Security.Commands.Confirm, `^echo\b`)
+	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
+	remoteID := opened["remote_session_id"].(string)
+
+	request := map[string]any{
+		"action": "run", "remote_session_id": remoteID,
+		"purpose": "push the first release commit", "command": "echo confirmed",
+		"scope": "workspace",
+	}
+	firstWaiting := callEnvelope(t, rt.toolExecute, context.Background(), request)
+	if firstWaiting["status"] != "waiting_confirmation" {
+		t.Fatalf("first confirmation should wait=%+v", firstWaiting)
+	}
+	firstDigest := firstWaiting["data"].(map[string]any)["command_digest"].(string)
+
+	changed := cloneMap(request)
+	changed["purpose"] = "push two release commits"
+	changed["user_confirmed"] = true
+	secondWaiting := callEnvelope(t, rt.toolExecute, context.Background(), changed)
+	if secondWaiting["status"] != "waiting_confirmation" {
+		t.Fatalf("changed business intent must create a fresh pending confirmation=%+v", secondWaiting)
+	}
+	secondDigest := secondWaiting["data"].(map[string]any)["command_digest"].(string)
+	if secondDigest == firstDigest {
+		t.Fatalf("changed purpose reused command digest %q", secondDigest)
+	}
+
+	confirmed := callEnvelope(t, rt.toolExecute, context.Background(), changed)
+	if !statusOK(confirmed) {
+		t.Fatalf("confirmation for refreshed pending must execute instead of looping=%+v", confirmed)
+	}
+}
+
 func TestCleanCoreMissingCommandUsesExecutionTaxonomy(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	rt.cfg.Security.Commands.Allow = append(rt.cfg.Security.Commands.Allow, `^mcpx-command-that-does-not-exist$`)

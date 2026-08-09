@@ -80,6 +80,7 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolReque
 						CommandDigest: commandDigest, WorkDir: remote.WorkspacePath,
 						RequestID: envReq.RequestID, Workspace: remote.WorkspaceName,
 						RemoteSessionID: remote.ID, PrincipalID: principal.ID,
+						ContentKey: cleanCommandConfirmationContentKey(principal.ID, commandDigest),
 					})
 					if confirmationErr != nil {
 						return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "confirmation_store_error", confirmationErr.Error())
@@ -349,6 +350,13 @@ func (r *Runtime) pendingCommandConfirmation(remoteSessionID, principalID, comma
 		}
 	}
 	return approval.Pending{}, false
+}
+
+// cleanCommandConfirmationContentKey binds clean-core user confirmation to the
+// exact semantic command digest. Legacy confirmation-token clients retain the
+// broader command/scope dedup behavior in approval.contentKey.
+func cleanCommandConfirmationContentKey(principalID, digest string) string {
+	return strings.Join([]string{"clean-command", principalID, digest}, "\x00")
 }
 
 func (r *Runtime) consumePendingCommandConfirmation(remoteSessionID, principalID, command, purpose, scope, confirmationToken string) {
