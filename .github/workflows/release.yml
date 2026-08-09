@@ -1,42 +1,87 @@
-# Push a version tag created from protected main to build multi-platform binaries
-# and publish a GitHub Release. Changes must enter main through a PR.
-# Assets are binaries only (prd/ and docs/superpowers/ are never packaged).
-#
-#   git tag v0.1.0
-#   git push origin v0.1.0
-#
+# Every main push evaluates internal/version.Current and publishes that version
+# when its GitHub Release does not already exist. Manual tag pushes are not needed.
 name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Existing tag to release (e.g. v0.1.0); empty = current ref"
-        required: false
-        default: ""
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          VERSION="$(sed -nE 's/^const Current = "([^"]+)"$/\1/p' internal/version/version.go)"
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::invalid internal/version.Current: ${VERSION}"
+            exit 1
+          fi
+
+          TAG="v${VERSION}"
+          git fetch --force --tags origin
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+
+          if git show-ref --verify --quiet "refs/tags/${TAG}"; then
+            TAG_COMMIT="$(git rev-list -n 1 "${TAG}")"
+            if gh release view "${TAG}" >/dev/null 2>&1; then
+              echo "publish=false" >> "${GITHUB_OUTPUT}"
+              echo "create_tag=false" >> "${GITHUB_OUTPUT}"
+              echo "Release ${TAG} already exists; skipping."
+              exit 0
+            fi
+            echo "publish=true" >> "${GITHUB_OUTPUT}"
+            echo "create_tag=false" >> "${GITHUB_OUTPUT}"
+            echo "release_ref=${TAG}" >> "${GITHUB_OUTPUT}"
+            echo "Recovering incomplete ${TAG} from tagged commit ${TAG_COMMIT}."
+            exit 0
+          fi
+
+          echo "publish=true" >> "${GITHUB_OUTPUT}"
+          echo "create_tag=true" >> "${GITHUB_OUTPUT}"
+          echo "release_ref=${TAG}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create release tag
+        if: steps.version.outputs.publish == 'true' && steps.version.outputs.create_tag == 'true'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.version.outputs.tag }}" -m "MCPX ${{ steps.version.outputs.version }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Checkout release tag
+        if: steps.version.outputs.publish == 'true'
+        shell: bash
+        run: git checkout --detach "${{ steps.version.outputs.release_ref }}"
+
       - name: Setup Go
+        if: steps.version.outputs.publish == 'true'
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Run GoReleaser
+        if: steps.version.outputs.publish == 'true'
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser

@@ -76,6 +76,8 @@ func main() {
 			os.Exit(runWorkspaceCommand(os.Args[2:]))
 		case "oauth-register":
 			os.Exit(runOAuthRegister(os.Args[2:]))
+		case "update":
+			os.Exit(runUpdate(os.Args[2:], build))
 		case "help", "-h", "--help":
 			printUsage()
 			os.Exit(0)
@@ -131,6 +133,7 @@ Usage:
   mcpx observe [flags] <name>      终端只读观测 Workspace 事件
   mcpx workspace register <path>  注册或更新 Workspace（不启动服务）
   mcpx oauth-register [url]        动态注册 OAuth 客户端（粘贴 ChatGPT 回调 URL）
+  mcpx update [flags]              从 GitHub Release 检查并安装新版本
   mcpx -version
 
 oauth-register:

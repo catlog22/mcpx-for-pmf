@@ -9,7 +9,7 @@ import (
 	"mcpx/internal/server/guidance"
 )
 
-const agentGuidanceVersion = "1.22"
+const agentGuidanceVersion = "1.25"
 
 // agentGuidanceConfig mirrors guidance.Config for existing call sites.
 type agentGuidanceConfig = guidance.Config

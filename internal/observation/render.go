@@ -40,6 +40,7 @@ type renderOptions struct {
 	suppressOutputAction bool
 	commandOutputStarted bool
 	suppressContext      bool
+	suppressGoal         bool
 	suppressDuration     bool
 	outputLineStart      int
 }
@@ -117,7 +118,7 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 		}
 	}
 
-	details := make([]string, 0, 3)
+	details := make([]string, 0, 2)
 	if facts := eventFactLine(event, options.detail, options.suppressDuration); facts != "" {
 		details = append(details, facts)
 	}
@@ -128,30 +129,45 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 		if message := failureMessage; message != "" {
 			details = append(details, "failed: "+compactLine(message))
 		}
-	} else {
-		if !options.suppressContext && hasSemanticContext(event) && len(details) < 3 {
-			details = append(details, semanticContextText(event))
+		if len(details) == 0 && status != "" && status != "succeeded" {
+			details = append(details, strings.ReplaceAll(status, "_", " "))
 		}
-		if result, ok := payload["result"].(map[string]any); ok && len(details) < 3 {
-			if output := humanToolOutput(event.Tool, result); output != "" {
-				if suppressCommandOutput && (event.Tool == "command_execute" || event.Tool == "command_run") {
-					output = commandCompletionSummary(output)
-				}
-				details = append(details, output)
+		return writeChildren(w, details, options.colorMode != ColorModeNone)
+	}
+	if len(details) > 0 {
+		if err := writeChildren(w, details, options.colorMode != ColorModeNone); err != nil {
+			return err
+		}
+	}
+	wroteDetail := len(details) > 0
+	if !options.suppressContext && hasSemanticContext(event) {
+		contextLines := semanticContextLines(event, options.suppressGoal, options.terminalWidth)
+		if len(contextLines) > 0 {
+			if err := writeChildren(w, contextLines, options.colorMode != ColorModeNone); err != nil {
+				return err
 			}
+			wroteDetail = true
 		}
 	}
-	if len(details) == 0 && status != "" && status != "succeeded" {
-		details = append(details, strings.ReplaceAll(status, "_", " "))
+	if result, ok := payload["result"].(map[string]any); ok {
+		if output := humanToolOutput(event.Tool, result); output != "" {
+			if suppressCommandOutput && (event.Tool == "command_execute" || event.Tool == "command_run") {
+				output = commandCompletionSummary(output)
+			}
+			if err := writeChild(w, output, options.colorMode != ColorModeNone); err != nil {
+				return err
+			}
+			wroteDetail = true
+		}
 	}
-	if len(details) > 3 {
-		details = details[:3]
+	if !wroteDetail && status != "" && status != "succeeded" {
+		return writeChild(w, strings.ReplaceAll(status, "_", " "), options.colorMode != ColorModeNone)
 	}
-	return writeChildren(w, details, options.colorMode != ColorModeNone)
+	return nil
 }
 
 func renderProgressSummary(w io.Writer, event Event, options renderOptions) error {
-	return writeChildren(w, semanticContextLines(event), options.colorMode != ColorModeNone)
+	return writeChildren(w, semanticContextLines(event, options.suppressGoal, options.terminalWidth), options.colorMode != ColorModeNone)
 }
 
 func hasSemanticContext(event Event) bool {
@@ -160,15 +176,20 @@ func hasSemanticContext(event Event) bool {
 		strings.TrimSpace(event.NextStep) != ""
 }
 
-func semanticContextLines(event Event) []string {
-	return semanticContextGroups([]semanticContextGroup{
-		{
-			{label: "goal", value: event.Goal},
-			{label: "purpose", value: event.Purpose},
-		},
+func semanticContextLines(event Event, suppressGoal bool, terminalWidth int) []string {
+	lines := make([]string, 0, 5)
+	purpose := compactLine(event.Purpose)
+	goal := compactLine(event.Goal)
+	if suppressGoal {
+		goal = ""
+	}
+	lines = append(lines, semanticPurposeGoalLines(purpose, goal, terminalWidth)...)
+	lines = append(lines, semanticContextGroups([]semanticContextGroup{
 		{
 			{label: "reasoning", value: event.ReasoningSummary},
 			{label: "progress", value: event.ProgressSummary},
+		},
+		{
 			{label: "next", value: event.NextStep},
 		},
 		{
@@ -176,7 +197,47 @@ func semanticContextLines(event Event) []string {
 			{label: "plan task", value: event.PlanTaskID},
 			{label: "execution task", value: event.ExecutionTaskID},
 		},
-	})
+	})...)
+	return lines
+}
+
+func semanticPurposeGoalLines(purpose, goal string, terminalWidth int) []string {
+	purposeText := ""
+	goalText := ""
+	if purpose != "" {
+		purposeText = "purpose: " + purpose
+	}
+	if goal != "" {
+		goalText = "goal: " + goal
+	}
+	if purposeText == "" && goalText == "" {
+		return nil
+	}
+	if goalText == "" {
+		return []string{purposeText}
+	}
+	// TextRenderer reserves four cells for wrapped-line continuation in addition
+	// to writeChild's visible "  ↳ " prefix, so align within that effective body.
+	contentWidth := terminalWidth - 8
+	if contentWidth <= 0 {
+		contentWidth = defaultTerminalWidth - 8
+	}
+	if purposeText == "" {
+		padding := contentWidth - displayWidth(goalText)
+		if padding < 0 {
+			padding = 0
+		}
+		return []string{strings.Repeat(" ", padding) + goalText}
+	}
+	gap := contentWidth - displayWidth(purposeText) - displayWidth(goalText)
+	if gap >= 2 {
+		return []string{purposeText + strings.Repeat(" ", gap) + goalText}
+	}
+	padding := contentWidth - displayWidth(goalText)
+	if padding < 0 {
+		padding = 0
+	}
+	return []string{purposeText, strings.Repeat(" ", padding) + goalText}
 }
 
 type semanticContextField struct {
@@ -202,8 +263,8 @@ func semanticContextGroups(groups []semanticContextGroup) []string {
 	return lines
 }
 
-func semanticContextText(event Event) string {
-	return strings.Join(semanticContextLines(event), "\n")
+func semanticContextText(event Event, suppressGoal bool, terminalWidth int) string {
+	return strings.Join(semanticContextLines(event, suppressGoal, terminalWidth), "\n")
 }
 
 func renderCommandOutput(w io.Writer, event Event, options renderOptions) error {

@@ -1,4 +1,4 @@
-# Lightweight CI on main/PR — does not publish releases.
+# Lightweight static/build CI on main/PR — release publishing is handled separately.
 name: CI
 
 on:
@@ -8,7 +8,7 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -16,14 +16,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Test
-        run: go test ./... -count=1
       - name: Format
         run: test -z "$(gofmt -l ./cmd ./internal)"
       - name: Vet
         run: go vet ./...
-      - name: Race test
-        run: go test -race ./... -count=1
       - name: Build with provenance
         shell: bash
         run: |

@@ -275,13 +275,57 @@ func TestTextRendererShowsProgressBeforeCompletionOnce(t *testing.T) {
 			t.Fatalf("semantic context missing %q: %q", want, text)
 		}
 	}
-	if !strings.Contains(text, "goal: 验证变更 · purpose: 运行测试") || !strings.Contains(text, "plan: pl_progress · plan task: pt_progress · execution task: task_progress") || !strings.Contains(text, "• Ran go test ./...") || !strings.Contains(text, "↳ 27ms") {
-		t.Fatalf("semantic context, command, or run duration was not grouped: %q", text)
+	purposeIndex := strings.Index(text, "purpose: 运行测试")
+	goalIndex := strings.Index(text, "goal: 验证变更")
+	if purposeIndex < 0 || goalIndex <= purposeIndex || !strings.Contains(text, "↳ next: 检查失败日志\n") || !strings.Contains(text, "plan: pl_progress · plan task: pt_progress · execution task: task_progress") || !strings.Contains(text, "• Ran go test ./...") || !strings.Contains(text, "↳ 27ms") {
+		t.Fatalf("semantic context hierarchy, command, or run duration was not grouped: %q", text)
 	}
 	for _, forbidden := range []string{"operation=op_progress", "duration=27ms", "↳ operation: op_progress"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("default telemetry leaked %q: %q", forbidden, text)
 		}
+	}
+}
+
+func TestTextRendererRightAlignsGoalAndSuppressesUnchangedGoal(t *testing.T) {
+	renderer := NewTextRendererWithWidth(false, 80)
+	var output bytes.Buffer
+	for _, event := range []Event{
+		{Sequence: 1, RequestID: "req_1", Tool: "read", Type: TypeToolCompleted, Goal: "完成 ARC 改造", Purpose: "读取 render", NextStep: "读取 timeline", Input: []byte(`{"view":"file","path":"render.go"}`), Output: []byte(`{"status":"succeeded"}`)},
+		{Sequence: 2, RequestID: "req_2", Tool: "read", Type: TypeToolCompleted, Goal: "完成 ARC 改造", Purpose: "读取 timeline", NextStep: "修改代码", Input: []byte(`{"view":"file","path":"timeline.go"}`), Output: []byte(`{"status":"succeeded"}`)},
+		{Sequence: 3, RequestID: "req_3", Tool: "read", Type: TypeToolCompleted, Goal: "验证 ARC 改造", Purpose: "读取测试", NextStep: "运行测试", Input: []byte(`{"view":"file","path":"timeline_test.go"}`), Output: []byte(`{"status":"succeeded"}`)},
+	} {
+		if err := renderer.RenderEvent(&output, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	text := output.String()
+	if strings.Count(text, "goal: 完成 ARC 改造") != 1 || strings.Count(text, "goal: 验证 ARC 改造") != 1 {
+		t.Fatalf("goal suppression/change rendering incorrect: %q", text)
+	}
+	for _, want := range []string{"↳ next: 读取 timeline\n", "↳ next: 修改代码\n", "↳ next: 运行测试\n"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("next step should stay on its own line %q: %q", want, text)
+		}
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, "purpose: 读取 render") && strings.Contains(line, "goal: 完成 ARC 改造") {
+			if displayWidth(line) != 76 {
+				t.Fatalf("purpose/goal line width=%d, want 76 effective body columns: %q", displayWidth(line), line)
+			}
+			return
+		}
+	}
+	t.Fatalf("purpose/goal were not rendered on the same right-aligned line: %q", text)
+}
+
+func TestSemanticPurposeGoalLinesFallsBackOnNarrowTerminal(t *testing.T) {
+	lines := semanticPurposeGoalLines("读取很长的 purpose", "完成很长的 goal", 24)
+	if len(lines) != 2 {
+		t.Fatalf("narrow purpose/goal lines=%#v, want 2 lines", lines)
+	}
+	if !strings.HasPrefix(lines[0], "purpose: ") || !strings.Contains(lines[1], "goal: ") {
+		t.Fatalf("narrow purpose/goal fallback=%#v", lines)
 	}
 }
 

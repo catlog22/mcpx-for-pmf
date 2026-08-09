@@ -1,9 +1,10 @@
-version: "1.23"
+version: "1.25"
 priority: high
 summary: 使用 clean-core MCPX 工具检查、修改、执行和观察；execute 仅用于明确要求的命令。
 rules:
   - session（action=open）成功后，必须保存并向用户展示完整的 remote_session_id 以及绑定的 Workspace；新客户端直接用同一 remote_session_id 执行 session（action=attach），不使用 handoff_token。
   - 工具结果：content 文本是给人看的摘要；模型必须读 structuredContent（或 _meta.mcpx.result.data）中的字段（status/type/data/error），不要解析散文。remote_session_id、plan_id、plan_task_id、execution_task_id、operation_id、artifact_id、sha256 等标识必须从结构化字段原样复制，不能改写、缩写或凭记忆重输。
+  - purpose 必须是一句简短、具体、可审计的真实操作语义，说明动作、对象、目的和必要的影响边界，避免重复 goal/reasoning。不要按语言或命令名机械宣称“安全/只读”，而要按真实副作用分类：版本、帮助和纯检查只有确实无写入时才声明只读；编译/静态检查说明可能产生的缓存或构建产物，以及确实不会发生的安装、系统替换或产物执行；项目测试或脚本可能执行仓库代码，不能宣称只读；依赖安装/解析说明会修改的依赖目录、锁文件或缓存；写入、发布、推送、安装、删除、部署等有副作用调用，如果当前用户已经明确要求或完成确认，必须真实写明“按用户要求/用户已授权”并限定具体范围。不得为了通过安全检查虚构“安全”“只读”或“已授权”，未取得授权时必须如实表述并走对应确认流程。
   - 读取操作使用 read；file 视图支持 mode=full，search/list/context 视图分别覆盖文件搜索、列举和上下文组装；items[] 可批量读取。
   - read(view=context, search_mode=smart) 使用确定性的 lexical/heuristic 排序，不是 embedding 语义检索；结果读取 score、rank、matched_terms 和 match_reason。需要高置信目标定位时，先用 read(view=search) 或 search_mode=exact 缩小 hard scope，再用 context 获取命中窗口。
   - read(view=list) 同时返回递归普通文件分页 files 和当前 scope 第一层 entries。entries 标记 file、directory、symlink 或 other，不递归展开目录；做“只保留某文件”的删除、移除或清理前，必须先读取 path="" 的 entries，并确认 entries_complete=true、entries_policy_filtered=false。若有 entries_next_cursor，必须先按 entries_next_action 读取完所有第一层条目；不能从 files 的首个分页或排序前缀推断顶层目录清单。
@@ -19,7 +20,7 @@ rules:
   - edit 失败时读取 error.code、details.path/current_sha256/total_changed_lines、recovery 和 suggested_next；STALE_REVISION 先重新 read、更新 base_sha256，并使用新的 idempotency_key 重试，旧 key 仍绑定原请求。
   - edit 默认一次应用整批变更；超大变更拆成多个 edit 调用，每批都重新使用当前文件 sha256，避免把旧 revision 当作新依据。
   - 嵌套文件只提交文件操作；edit 会创建缺失的父目录，不要把目录路径作为普通文件创建。
-  - environment_read 用于获取主机、Python 和工具链等环境事实；environment（action=snapshot_create）用于保存快照。execute 仅用于用户明确要求且符合命令策略的命令、测试或构建。
+  - environment_read 用于获取主机、Python 和工具链等环境事实；environment（action=snapshot_create）用于保存快照。execute 仅用于用户明确要求且符合命令策略的命令、测试或构建。purpose 示例应跨语言且按副作用写：`python --version`、`node --version`、`cargo --version`、`java -version` 可说明仅读取版本；`node --check`、`tsc --noEmit` 等只有在确实不写文件时才说明纯检查；`go build`、`cargo check/build`、`javac`、`mvn/gradle package`、`dotnet build`、`cmake --build` 可能产生缓存或构建产物，应如实说明输出范围；`pytest`、`python -m unittest`、`npm/pnpm/yarn test`、`cargo test`、`mvn/gradle test`、`dotnet test` 会执行项目代码，不得称为只读；`npm/pnpm/yarn install`、`pip/poetry install` 等会写依赖目录/环境或锁文件；push/release/deploy/install/delete 等仅在用户已明确要求或确认时声明用户授权和具体目标范围。
   - execute 支持使用 `&&`、`||` 和 `;` 组合简单命令。服务端会在启动 shell 前拆分全部 segment，逐段应用 deny/confirm/allow 策略并写入 preflight audit；任一 segment deny 则整条拒绝，任一 segment confirm 则对整条冻结 command 请求一次用户确认，只有全部 segment 通过且启用的审计写入成功后，才把原命令一次性交给 shell，保留原始 `&&`/`||` 条件语义。仍禁止 $()、反引号命令替换、管道、重定向、单个 `&` 和换行。
   - 需要通过 execute 做文本/文件扫描时，若环境已知可用，优先使用 `rg` / `rg --files`，其次可用 `fd`；仅在这些工具不可用时回退 `grep` / `find`。不要为了探测工具存在而额外执行无价值命令；可直接利用 environment_read/toolchain 结果或前序执行事实。搜索命令允许用 `&&`/`||` 连接可独立审计的简单命令，但仍不要使用管道或重定向。
   - execute 默认等待短命令完成；execution_mode=async 只表示 Operation 异步调度，不保证返回 execution_task_id。只有命令超过 yield_time_ms 才会脱离为执行 Task；返回 execution_task_id 后优先使用 observe(view=status/logs) 查询，需等待并继续接收输出时使用 execute(action=attach)。只有 execution_task_id 丢失或服务端返回 not_found 时才重新获取执行任务列表。

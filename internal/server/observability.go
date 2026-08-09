@@ -97,7 +97,7 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 	}
 	purpose := map[string]any{
 		"type":        "string",
-		"description": "本次调用的用户目标或语义用途；高风险工具会要求填写",
+		"description": purposeDescription(tool.Name),
 	}
 	reasoningSummary := map[string]any{
 		"type":        "string",
@@ -175,6 +175,30 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 		tool.InputSchema = json.RawMessage(encoded)
 	}
 	return tool
+}
+
+func purposeDescription(toolName string) string {
+	const base = "用一句简短、具体的话说明本次操作、对象和目的；只陈述真实语义，避免重复 goal/reasoning。"
+	switch strings.ToLower(strings.TrimSpace(toolName)) {
+	case "read", "observe", "runtime_read", "environment_read", "discover":
+		return base + " 只读操作应明确仅读取/检查，不修改 Workspace 或系统状态。"
+	case "execute":
+		return base + " 按命令真实副作用描述，不按语言套模板：版本/帮助/纯检查只有确实无写入时才声明只读；编译/静态检查应说明可能产生的缓存或构建产物及不会发生的安装/系统替换；pytest、python -m unittest、npm/pnpm/yarn test、cargo test、mvn/gradle test、dotnet test 等会执行项目代码，不得称为只读；npm/pnpm/yarn install、pip/poetry、cargo fetch、mvn/gradle 等依赖动作应说明依赖或缓存写入；push/release/deploy/install/delete 等外部或破坏性动作仅在用户已明确要求或确认时写明用户已授权，并限定具体目标。禁止为通过安全检查虚构安全、只读或授权。"
+	case "edit":
+		return base + " 明确要修改的 Workspace 文件和变更目的；用户已明确要求该修改时应写明按用户要求/已授权，并注明 edit 不执行删除；禁止虚构授权。"
+	case "move_out":
+		return base + " prepare 为预览时明确仅冻结/预览、不移动；用户明确要求删除/移除时从 prepare 起写明用户已授权将明确目标安全移至隔离区；submit 只使用已确认的 confirmation_uuid；禁止虚构授权。"
+	case "session", "plan", "operation_batch", "operation_manage", "environment", "artifact":
+		return base + " 会改变 MCPX 会话、计划或元数据状态时准确说明变更范围；只有用户已明确要求时才表述为用户授权。"
+	case "skill_call", "mcp_call":
+		return base + " 明确上游调用会执行什么；若可能产生外部副作用，只有用户已明确要求或确认时才写明授权和作用范围。"
+	case "screenshot_capture":
+		return base + " 明确仅截取用户请求的显示器或区域，不修改 Workspace。"
+	case "secret_provide":
+		return base + " 明确仅向当前会话内存提供用户给出的 Secret，不写入结果或日志。"
+	default:
+		return base + " 如操作存在写入或外部副作用，只有用户已明确要求或确认时才写明授权和具体范围；禁止虚构安全或授权。"
+	}
 }
 
 func appendRequired(value any, required string) []string {
