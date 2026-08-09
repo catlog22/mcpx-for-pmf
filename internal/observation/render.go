@@ -260,7 +260,7 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 			label += " [" + format + "]"
 		}
 	}
-	if err := writeEventAction(w, event, fileChangeVerb(files), label, actionColor(event.toolOrType(), false), options.colorMode != ColorModeNone); err != nil {
+	if err := writeEventActionWithDiffStats(w, event, fileChangeVerb(files), label, actionColor(event.toolOrType(), false), added, removed, options.colorMode); err != nil {
 		return err
 	}
 	if payload.DeleteSummary != nil && strings.TrimSpace(payload.DeleteSummary.Display) != "" {
@@ -312,7 +312,7 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 		if format := fileFormatSummary(file); format != "" {
 			line += " [" + format + "]"
 		}
-		if err := writeChild(w, line, options.colorMode != ColorModeNone); err != nil {
+		if err := writeChildWithDiffStats(w, line, document.added, document.removed, options.colorMode); err != nil {
 			return err
 		}
 		if file.Diff != "" && options.diffMode != DiffModeSummary {
@@ -341,6 +341,17 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 
 func formatCompactDiffStats(added, removed int) string {
 	return fmt.Sprintf(" [-%d,+%d]", removed, added)
+}
+
+func styleCompactDiffStats(value string, added, removed int, mode ColorMode) string {
+	if mode == ColorModeNone {
+		return value
+	}
+	plain := formatCompactDiffStats(added, removed)
+	styled := " [" +
+		paint(fmt.Sprintf("-%d", removed), diffRemovedForeground(mode), true) + "," +
+		paint(fmt.Sprintf("+%d", added), diffAddedForeground(mode), true) + "]"
+	return strings.Replace(value, plain, styled, 1)
 }
 
 type fileChangeView struct {
@@ -437,6 +448,20 @@ func writeEventAction(w io.Writer, event Event, verb, label, fallbackColor strin
 	return err
 }
 
+func writeEventActionWithDiffStats(w io.Writer, event Event, verb, label, fallbackColor string, added, removed int, mode ColorMode) error {
+	verb = sanitizeTerminalText(verb)
+	label = sanitizeTerminalText(label)
+	if label == "" {
+		label = "operation"
+	}
+	label = styleCompactDiffStats(label, added, removed, mode)
+	color := mode != ColorModeNone
+	colorCode := eventActionColor(event, fallbackColor)
+	marker := eventMarker(event)
+	_, err := fmt.Fprintf(w, "%s %s %s\n", paint(marker, colorCode, color), paint(verb, colorCode, color), label)
+	return err
+}
+
 func commandStreamColor(stream string) string {
 	if strings.EqualFold(strings.TrimSpace(stream), "stderr") {
 		return ansiRed
@@ -481,6 +506,16 @@ func writeChild(w io.Writer, value string, color bool) error {
 		}
 	}
 	return nil
+}
+
+func writeChildWithDiffStats(w io.Writer, value string, added, removed int, mode ColorMode) error {
+	value = strings.TrimRight(sanitizeTerminalText(value), "\r\n")
+	if value == "" {
+		return nil
+	}
+	value = styleCompactDiffStats(value, added, removed, mode)
+	_, err := fmt.Fprintf(w, "  %s %s\n", paint("↳", ansiBlue, mode != ColorModeNone), value)
+	return err
 }
 
 func writeCodeChild(w io.Writer, value string, options renderOptions, width int) error {

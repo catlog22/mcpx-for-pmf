@@ -65,7 +65,7 @@ func TestDefaultCommandPolicyAllowsUnmatchedCommands(t *testing.T) {
 }
 
 func TestMatchCommandRejectsUnsafeOperators(t *testing.T) {
-	// Pipes, redirections, background operators, and command substitution
+	// Active pipes, redirections, background operators, and command substitution
 	// cannot be split into independently judged segments and are rejected.
 	rules := config.CommandRules{}
 	for _, command := range []string{
@@ -73,12 +73,35 @@ func TestMatchCommandRejectsUnsafeOperators(t *testing.T) {
 		"ls > out.txt",
 		"cat < in.txt",
 		"ls $(dangerous)",
+		"echo \"$(dangerous)\"",
 		"ls `id`",
+		"echo \"`id`\"",
 		"sleep 5 &",
 		"ls\nrm -rf x",
 	} {
 		if got := MatchCommand(rules, command); got != Deny {
 			t.Errorf("%q: got %s, want deny", command, got)
+		}
+	}
+}
+
+func TestMatchCommandTreatsQuotedAndEscapedOperatorsAsLiterals(t *testing.T) {
+	rules := config.DefaultConfig().Security.Commands
+	for _, command := range []string{
+		`grep -R -n "changed_lines\|diff_summary\|Created\|Updated" internal cmd`,
+		`printf '%s\n' 'left|right'`,
+		`printf "%s" "left > right"`,
+		`printf "%s" '$(not-a-substitution)'`,
+		`printf "%s" '\` + "`" + `not-a-substitution\` + "`" + `'`,
+		`printf foo \| bar`,
+		`printf "text; rm -rf ignored"`,
+		`printf "text && rm -rf ignored"`,
+	} {
+		if got := MatchCommand(rules, command); got != Allow {
+			t.Errorf("literal operator command %q: got %s, want allow", command, got)
+		}
+		if HasUnsafeShellOperator(command) {
+			t.Errorf("literal operator command %q reported unsafe", command)
 		}
 	}
 }

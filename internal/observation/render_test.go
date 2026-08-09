@@ -539,6 +539,26 @@ func TestRenderFileChangedSupportsSummaryAndPreviewModes(t *testing.T) {
 	}
 }
 
+func TestRenderFileChangedColorsCompactDiffStats(t *testing.T) {
+	payload := []byte(`{"files":[{"path":"demo.go","operation":"create","diff":"--- /dev/null\n+++ b/demo.go\n@@ -0,0 +1 @@\n+new\n"}]}`)
+	var colored bytes.Buffer
+	if err := renderFileChanged(&colored, Event{Type: TypeFileChanged, Output: payload}, renderOptions{diffMode: DiffModeSummary, colorMode: ColorModeANSI16}); err != nil {
+		t.Fatal(err)
+	}
+	wantStats := ansiRed + "-0" + ansiReset + "," + ansiGreen + "+1" + ansiReset
+	if !strings.Contains(colored.String(), wantStats) {
+		t.Fatalf("colored compact stats missing %q: %q", wantStats, colored.String())
+	}
+
+	var plain bytes.Buffer
+	if err := renderFileChanged(&plain, Event{Type: TypeFileChanged, Output: payload}, renderOptions{diffMode: DiffModeSummary, colorMode: ColorModeNone}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain.String(), "\033[") || !strings.Contains(plain.String(), "Created demo.go [-0,+1]") {
+		t.Fatalf("plain compact stats=%q", plain.String())
+	}
+}
+
 func TestRenderTextShowsSourceFormatMetadata(t *testing.T) {
 	var output bytes.Buffer
 	if err := RenderText(&output, Event{

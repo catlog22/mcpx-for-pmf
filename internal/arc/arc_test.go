@@ -262,6 +262,9 @@ func TestWrapToolResultMapsSemanticConfirmationWithoutApprovalAction(t *testing.
 	if !strings.Contains(text, "confirmation_token: `ct_full_token_1234567890abcdef`") {
 		t.Fatalf("confirmation display must carry the token in text: %s", text)
 	}
+	if !strings.Contains(text, "```sh\ngo test ./...\n```") {
+		t.Fatalf("confirmation command must be shell-highlightable: %s", text)
+	}
 	result := decodeEnvelope(t, wrapped)["mcpx"].(map[string]any)["result"].(map[string]any)
 	if result["type"] != "error" || result["schema"] != SchemaError {
 		t.Fatalf("result = %+v", result)
@@ -271,6 +274,21 @@ func TestWrapToolResultMapsSemanticConfirmationWithoutApprovalAction(t *testing.
 	}
 	if _, exists := result["actions"]; exists {
 		t.Fatalf("semantic confirmation must not create an approval action: %+v", result["actions"])
+	}
+}
+
+func TestWrapToolResultRendersCommandAsShellBlock(t *testing.T) {
+	raw := mcpresult.NewText(`{"status":"succeeded","data":{"command":"grep -n foo README.md","completed_in_call":true,"exit_code":0,"stdout":"12:foo\n","stderr":""}}`)
+	wrapped := WrapToolResult("command_execute", ResultContext{}, raw)
+	text := wrapped.Content[0].(*mcp.TextContent).Text
+	for _, want := range []string{"Command:", "```sh\ngrep -n foo README.md\n```", "stdout:", "```text\n12:foo\n```"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("command ARC display missing %q: %s", want, text)
+		}
+	}
+	result := decodeEnvelope(t, wrapped)["mcpx"].(map[string]any)["result"].(map[string]any)
+	if result["type"] != "log" || result["schema"] != SchemaLog {
+		t.Fatalf("command result contract changed: %+v", result)
 	}
 }
 

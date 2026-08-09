@@ -51,11 +51,12 @@ func ParseDefault(s string) Decision {
 // segments; pipes, redirections, background operators, and command substitution
 // are structurally rejected because they cannot be split safely.
 func MatchCommand(rules config.CommandRules, command string) Decision {
-	if containsUnsafeOperator(command) {
+	segments, unsafe := commandSegments(command)
+	if unsafe {
 		return Deny
 	}
 	needsConfirmation := false
-	for _, segment := range splitSegments(command) {
+	for _, segment := range segments {
 		switch matchSegment(rules, segment) {
 		case Deny:
 			return Deny
@@ -87,28 +88,83 @@ func matchSegment(rules config.CommandRules, segment string) Decision {
 	return decision
 }
 
-// containsUnsafeOperator reports shell syntax that cannot be split into
+// HasUnsafeShellOperator reports active shell syntax that cannot be split into
 // independently judged segments: pipes, redirections, background operators,
-// newlines, and command substitution. The && sequence is consumed first so a
-// bare & (background) still triggers rejection.
-func containsUnsafeOperator(command string) bool {
-	withoutAnd := strings.ReplaceAll(command, "&&", "")
-	return strings.ContainsAny(command, "|<>`\n") ||
-		strings.Contains(command, "$(") ||
-		strings.Contains(withoutAnd, "&")
+// newlines, and command substitution. Operators inside quotes or escaped with a
+// backslash are treated as literal argument content rather than shell control
+// syntax.
+func HasUnsafeShellOperator(command string) bool {
+	_, unsafe := commandSegments(command)
+	return unsafe
 }
 
-// splitSegments splits a command on && and ; so every segment is judged
-// independently. Segments containing an unsafe operator are already rejected
-// by containsUnsafeOperator before this point.
-func splitSegments(command string) []string {
-	var segments []string
-	for _, andPart := range strings.Split(command, "&&") {
-		for _, semiPart := range strings.Split(andPart, ";") {
-			segments = append(segments, strings.TrimSpace(semiPart))
+// commandSegments scans shell control syntax without trying to fully parse a
+// shell language. It only needs to distinguish active operators from literal
+// characters in quoted/escaped arguments, and split safe && / ; separators.
+func commandSegments(command string) ([]string, bool) {
+	segments := make([]string, 0, 2)
+	start := 0
+	var quote byte
+	escaped := false
+	appendSegment := func(end int) {
+		segments = append(segments, strings.TrimSpace(command[start:end]))
+	}
+
+	for index := 0; index < len(command); index++ {
+		current := command[index]
+		if escaped {
+			escaped = false
+			continue
+		}
+
+		switch quote {
+		case '\'':
+			if current == '\'' {
+				quote = 0
+			}
+			continue
+		case '"':
+			switch current {
+			case '\\':
+				escaped = true
+			case '"':
+				quote = 0
+			case '`':
+				return nil, true
+			case '$':
+				if index+1 < len(command) && command[index+1] == '(' {
+					return nil, true
+				}
+			}
+			continue
+		}
+
+		switch current {
+		case '\\':
+			escaped = true
+		case '\'', '"':
+			quote = current
+		case '|', '<', '>', '`', '\n', '\r':
+			return nil, true
+		case '$':
+			if index+1 < len(command) && command[index+1] == '(' {
+				return nil, true
+			}
+		case '&':
+			if index+1 < len(command) && command[index+1] == '&' {
+				appendSegment(index)
+				index++
+				start = index + 1
+				continue
+			}
+			return nil, true
+		case ';':
+			appendSegment(index)
+			start = index + 1
 		}
 	}
-	return segments
+	appendSegment(len(command))
+	return segments, false
 }
 
 func autoAllowReadonlyEnabled(rules config.CommandRules) bool {

@@ -46,6 +46,9 @@ func RenderToolContent(tool, resultType, renderer, summary string, data any) (st
 		if text, ok := renderCommandConfirmation(summary, asMap); ok {
 			return text, true
 		}
+		if text, ok := renderCommandResult(summary, asMap); ok {
+			return text, true
+		}
 	case "edit":
 		if text, ok := renderEditConfirmation(summary, asMap); ok {
 			return text, true
@@ -165,12 +168,59 @@ func renderCommandConfirmation(summary string, data map[string]any) (string, boo
 	}
 	builder.WriteString("命令等待语义确认：请向用户展示命令及用途，获得明确确认后，使用相同 command 和 confirmation_token 原样重试。")
 	if command != "" {
-		fmt.Fprintf(&builder, "\n- command: %s", inlineCode(command))
+		builder.WriteString("\n\nCommand:\n")
+		builder.WriteString(markdownCodeBlock("sh", command))
 	}
 	if purpose := compactHuman(humanField(data, "purpose")); purpose != "" {
 		fmt.Fprintf(&builder, "\n- purpose: %s", purpose)
 	}
 	return strings.TrimSpace(builder.String()), true
+}
+
+func renderCommandResult(summary string, data map[string]any) (string, bool) {
+	command := humanField(data, "command")
+	if command == "" {
+		return summary, false
+	}
+
+	var builder strings.Builder
+	status := strings.TrimSpace(strings.SplitN(summary, "\n", 2)[0])
+	if status == "" {
+		if completed, ok := data["completed_in_call"].(bool); ok && !completed {
+			status = "Command is running."
+		} else if exitCode := humanField(data, "exit_code"); exitCode != "" {
+			status = "Command completed with exit code " + exitCode + "."
+		} else {
+			status = "Command result."
+		}
+	}
+	builder.WriteString(status)
+	builder.WriteString("\n\nCommand:\n")
+	builder.WriteString(markdownCodeBlock("sh", command))
+
+	for _, stream := range []string{"stdout", "stderr"} {
+		value := strings.TrimRight(humanField(data, stream), "\r\n")
+		if value == "" {
+			continue
+		}
+		builder.WriteString("\n\n")
+		builder.WriteString(stream)
+		builder.WriteString(":\n")
+		builder.WriteString(markdownCodeBlock("text", value))
+	}
+	if truncated, _ := data["output_truncated"].(bool); truncated {
+		builder.WriteString("\n\nOutput truncated; use the returned execution task/log offsets to continue reading.")
+	}
+	return strings.TrimSpace(builder.String()), true
+}
+
+func markdownCodeBlock(language, value string) string {
+	value = strings.TrimRight(value, "\r\n")
+	fence := "```"
+	for strings.Contains(value, fence) {
+		fence += "`"
+	}
+	return fence + language + "\n" + value + "\n" + fence
 }
 
 // renderOperationConfirmation exposes the waiting operation id and step

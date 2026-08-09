@@ -364,10 +364,7 @@ func (r *Runtime) consumePendingCommandConfirmation(remoteSessionID, principalID
 // so the model-facing error can explain why a compound verification command
 // was denied instead of leaving the model to guess.
 func containsUnsafeShellFeature(command string) bool {
-	withoutAnd := strings.ReplaceAll(command, "&&", "")
-	return strings.ContainsAny(command, "|<>`\n") ||
-		strings.Contains(command, "$(") ||
-		strings.Contains(withoutAnd, "&")
+	return security.HasUnsafeShellOperator(command)
 }
 
 func (r *Runtime) toolTaskManage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {

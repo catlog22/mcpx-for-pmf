@@ -1,4 +1,4 @@
-version: "1.20"
+version: "1.21"
 priority: high
 summary: 使用 clean-core MCPX 工具检查、修改、执行和观察；execute 仅用于明确要求的命令。
 rules:
@@ -21,6 +21,7 @@ rules:
   - 嵌套文件只提交文件操作；edit 会创建缺失的父目录，不要把目录路径作为普通文件创建。
   - environment_read 用于获取主机、Python 和工具链等环境事实；environment（action=snapshot_create）用于保存快照。execute 仅用于用户明确要求且符合命令策略的命令、测试或构建。
   - 命令校验请使用简单命令逐条执行（如先 git fetch、再 git rev-parse、最后 git status），不要使用 $()、管道、重定向或命令替换组合——含这些 shell 特性的命令会被策略拒绝。
+  - 需要通过 execute 做文本/文件扫描时，若环境已知可用，优先使用 `rg` / `rg --files`，其次可用 `fd`；仅在这些工具不可用时回退 `grep` / `find`。不要为了探测工具存在而额外执行无价值命令；可直接利用 environment_read/toolchain 结果或前序执行事实。搜索命令仍需保持简单、无管道和重定向。
   - execute 默认等待短命令完成；execution_mode=async 只表示 Operation 异步调度，不保证返回 execution_task_id。只有命令超过 yield_time_ms 才会脱离为执行 Task；返回 execution_task_id 后优先使用 observe(view=status/logs) 查询，需等待并继续接收输出时使用 execute(action=attach)。只有 execution_task_id 丢失或服务端返回 not_found 时才重新获取执行任务列表。
   - edit 成功或审阅 observe(view=changes) 后，回复用户必须用 Markdown，文件变更使用 ```diff 代码块展示具体增加和删除，不能只列文件名。变更过大时展示有界预览并说明 diff_summary。
   - move_out_prepare 返回 requires_user_confirmation 时，网页端模型必须向用户展示 workspace、文件路径、SHA、数量、字节数、manifest_sha256、purpose 和有效期并询问；用户确认后，模型只带回 remote_session_id 和服务端生成的 confirmation_uuid，不能自行生成 UUID、修改 manifest、补填旧参数或改用 user_confirmed。
