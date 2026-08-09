@@ -27,7 +27,7 @@ func publishedLimits() map[string]any {
 		"edit": map[string]any{
 			"max_changed_lines": edit.MaxChangedLines,
 		},
-		"move_out_prepare": map[string]any{
+		"move_out": map[string]any{
 			"max_targets":                  MaxMoveOutTargets,
 			"max_response_preview_targets": MaxMoveOutResponsePreviewTargets,
 		},

@@ -76,6 +76,21 @@ func boolPointerValue(value *bool) bool {
 }
 
 func requireIntentSchema(tool mcp.Tool) mcp.Tool {
+	strictActions := map[string]bool{}
+	if tool.Meta != nil {
+		switch values := tool.Meta["mcpx/strict_action_arguments"].(type) {
+		case []string:
+			for _, value := range values {
+				strictActions[strings.TrimSpace(value)] = true
+			}
+		case []any:
+			for _, raw := range values {
+				if value, ok := raw.(string); ok {
+					strictActions[strings.TrimSpace(value)] = true
+				}
+			}
+		}
+	}
 	goal := map[string]any{
 		"type":        "string",
 		"description": "本轮工作的总体目标；只填写当前任务需要保持的目标",
@@ -136,6 +151,14 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 			branchProperties, _ := branch["properties"].(map[string]any)
 			if branchProperties == nil {
 				branchProperties = map[string]any{}
+			}
+			action := ""
+			if actionSchema, ok := branchProperties["action"].(map[string]any); ok {
+				action, _ = actionSchema["const"].(string)
+			}
+			if strictActions[action] {
+				branch["properties"] = branchProperties
+				continue
 			}
 			branchProperties["goal"] = goal
 			branchProperties["purpose"] = purpose

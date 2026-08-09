@@ -12,7 +12,6 @@ import (
 
 	"mcpx/internal/mcpresult"
 
-	"mcpx/internal/changeset"
 	"mcpx/internal/envelope"
 	"mcpx/internal/logging"
 	"mcpx/internal/observation"
@@ -407,40 +406,6 @@ func (r *Runtime) observeOperationEvent(event operation.Event) {
 		Status:            status,
 		Summary:           event.Summary,
 		CreatedAt:         event.CreatedAt,
-	})
-}
-
-func (r *Runtime) observeAppliedChangeset(ctx context.Context, req envelope.Request, session remotesession.Session, item changeset.Changeset) {
-	if r == nil || r.observation == nil {
-		return
-	}
-	dto := changeSummaryDTO(item)
-	encoded, err := json.Marshal(dto)
-	if err != nil {
-		encoded = []byte(`{"changeset_id":"","files":[],"truncated":true}`)
-	}
-	bounded, truncated := observation.SanitizeJSON(encoded, observation.MaxEventBytes)
-	_ = r.observation.Record(ctx, observation.Event{
-		Workspace:        session.WorkspaceName,
-		RemoteSessionID:  session.ID,
-		RequestID:        req.RequestID,
-		CallID:           observationCallID(req),
-		OperationID:      item.ID,
-		Type:             observation.TypeFileChanged,
-		Status:           "succeeded",
-		Goal:             req.Goal,
-		Purpose:          firstSemanticPurpose(req),
-		Intent:           req.Intent,
-		ReasoningSummary: req.ReasoningSummary,
-		ProgressSummary:  req.ProgressSummary,
-		NextStep:         req.NextStep,
-		PlanID:           req.PlanID,
-		PlanTaskID:       req.PlanTaskID,
-		ExecutionTaskID:  req.ExecutionTaskID,
-		Output:           bounded,
-		Summary:          item.Summary,
-		ResourceURI:      fmt.Sprintf("mcpx://remote-sessions/%s/changesets/%s/diff", session.ID, item.ID),
-		Truncated:        truncated,
 	})
 }
 

@@ -1,5 +1,5 @@
 // Package edit implements a lightweight, high-throughput file edit engine for
-// the clean-core MCP surface. It does not use the changeset journal path.
+// the clean-core MCP surface.
 package edit
 
 import "errors"

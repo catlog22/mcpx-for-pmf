@@ -9,7 +9,7 @@ import (
 	"mcpx/internal/server/guidance"
 )
 
-const agentGuidanceVersion = "1.20"
+const agentGuidanceVersion = "1.22"
 
 // agentGuidanceConfig mirrors guidance.Config for existing call sites.
 type agentGuidanceConfig = guidance.Config
@@ -32,7 +32,7 @@ func loadDefaultAgentGuidance() agentGuidanceConfig {
 
 // agentGuidance is the short, stable routing contract shown after session（action=open）.
 // It deliberately contains no workspace path, secret, confirmation token, or
-// concrete tool argument value. It does include the compact change
+// concrete tool argument value. It does include the compact edit
 // payload cheat-sheet so agents can construct valid calls even when a host
 // compresses or drops tool schemas from a long conversation context.
 func agentGuidance() map[string]any {
@@ -143,24 +143,6 @@ func normalizePublicAction(tool string, arguments map[string]any) (string, map[s
 		} else {
 			setView("search")
 		}
-	case "change_manage":
-		tool = "observe"
-		if action == "history" {
-			setView("history")
-		} else {
-			setView("changes")
-		}
-	case "change_execute":
-		tool = "edit"
-		delete(result, "action")
-	case "change", "change_read":
-		legacyTool := tool
-		tool = "observe"
-		if action == "history" || legacyTool == "change_read" {
-			setView("history")
-		} else {
-			setView("changes")
-		}
 	case "command_execute":
 		tool = "execute"
 		if action == "" {
@@ -247,7 +229,7 @@ func normalizePublicAction(tool string, arguments map[string]any) (string, map[s
 
 func isCleanPublicTool(tool string) bool {
 	switch tool {
-	case "session", "read", "edit", "observe", "execute", "plan", "artifact", "discover", "skill_call", "mcp_call",
+	case "session", "read", "edit", "move_out", "observe", "execute", "plan", "artifact", "discover", "skill_call", "mcp_call",
 		"operation_batch", "operation_manage", "runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide":
 		return true
 	default:

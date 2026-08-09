@@ -15,7 +15,7 @@ Development state is stored in SQLite-backed Remote Sessions. It is independent 
 | **Remote Session** | Persistent SQLite sessions, ACLs, and one-time handoff tokens across clients and transports. |
 | **Workspace** | Register multiple projects and bind each Remote Session to an explicit project. |
 | **Terminal** | Run short commands or persistent tasks, inspect logs and ports, attach, and stop tasks. |
-| **Source and Changeset** | Read source with SHA-256 revisions, review Unified Diffs, detect conflicts, apply atomically, and roll back. |
+| **Source and Edit** | Read source with SHA-256 revisions, apply atomic create/update/rename edits, preserve file format, and inspect Unified Diffs. |
 | **Project Task** | Discover project-defined test, build, and check tasks and parse structured diagnostics. |
 | **Environment** | Inspect OS, architecture, kernel, display, container, shell, resources, filesystem, and toolchain. |
 | **Extensions** | Proxy upstream MCP servers and discover or execute local Skills. |
@@ -133,15 +133,21 @@ curl -sS -m 5 \
 
 ## Tool surface
 
-The main tools include `workspace_list`, `session_open`, `file_read`, `context_query`, `change_execute`, `command_execute`, `session_manage`, `change_manage`, `plan_manage`, `task_manage`, `runtime_inspect`, `environment_inspect`, `workspace_state`, `extension_manage`, `artifact_manage`, `approval_manage`, `screenshot_capture`, and `secrets_provide`.
+`tools/list` is the authoritative source for tool names, descriptions, input schemas, and annotations. The current public surface contains 18 tools: 11 core tools and 7 support tools.
 
-All direct file modifications go through `change_execute`. The recommended workflow is:
+The core tools are `session`, `read`, `edit`, `move_out`, `observe`, `execute`, `plan`, `artifact`, `discover`, `skill_call`, and `mcp_call`. The support tools are `operation_batch`, `operation_manage`, `runtime_read`, `environment_read`, `environment`, `screenshot_capture`, and `secret_provide`.
 
-1. Open or resume a Remote Session.
-2. Query or read the relevant source and its revision.
-3. Create and review a Changeset and Unified Diff.
-4. Apply the change through `change_execute`.
-5. Run tests or project tasks with `command_execute` and inspect the resulting state.
+All stateful tools use the full `remote_session_id`. The normal source-edit workflow is:
+
+1. Open or attach to a Remote Session with `session`.
+2. Read the relevant file and its SHA-256 revision with `read`.
+3. Apply create, update, or rename operations atomically with `edit`; updates should prefer exact, unique replacements.
+4. Inspect the resulting changes or full diff with `observe`.
+5. Run tests or project tasks with `execute`.
+
+`edit` does not delete files. Deletion, removal, and cleanup use one `move_out` tool with two actions: `move_out(action="prepare")` freezes an explicit manifest without mutating the filesystem; after the user confirms that frozen manifest, `move_out(action="submit")` safely moves the targets to the operating system trash. The prepare result returns an exact `next_action` for submit. The submit branch is intentionally strict and accepts only `action`, `remote_session_id`, and `confirmation_uuid`; the manifest, purpose, workspace, and idempotency key remain server-bound.
+
+`execute` supports simple compound commands joined by `&&`, `||`, and `;`. Before any shell process starts, MCPX splits every segment, evaluates command policy for every segment, and records the structured preflight decision. Any denied segment rejects the entire command; any confirmation-required segment causes one confirmation for the frozen whole command. Only after all segments pass and enabled preflight audit persistence succeeds is the original command passed to the shell once. Pipes, redirections, a single background `&`, newlines, `$()`, and backtick command substitution remain rejected. This is an atomic **policy/audit gate**, not transactional rollback: after the shell starts, normal `&&`/`||` conditional semantics apply and side effects from an already executed segment are not rolled back automatically.
 
 ## Security boundaries
 

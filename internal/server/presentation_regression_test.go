@@ -14,14 +14,16 @@ func TestInstrumentToolPublishesARCPresentationAndPreservesAttachments(t *testin
 	resource := mcpresult.NewResourceLink("mcpx://test/artifact", "artifact", "artifact", "text/plain")
 	handler := func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		result := mcpresult.NewStructured(map[string]any{
-			"changeset_id": "chg_test",
-			"status":       "prepared",
-		}, "Changeset prepared.")
+			"edit_id":      "edit_test",
+			"status":       "succeeded",
+			"diff_summary": "--- a/demo.go\n+++ b/demo.go\n@@ -1 +1 @@\n-old\n+new\n",
+			"results":      []any{map[string]any{"path": "demo.go", "operation": "update"}},
+		}, "Edit applied.")
 		result.Content = append(result.Content, resource)
 		return result, nil
 	}
 
-	wrapped, err := (&Runtime{}).instrumentTool("change_execute", handler)(context.Background(), mcpresult.Request(map[string]any{}))
+	wrapped, err := (&Runtime{}).instrumentTool("edit", handler)(context.Background(), mcpresult.Request(map[string]any{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +38,7 @@ func TestInstrumentToolPublishesARCPresentationAndPreservesAttachments(t *testin
 	if !ok {
 		t.Fatalf("first content type = %T", wrapped.Content[0])
 	}
-	if !strings.Contains(text.Text, "### Changeset chg_test") {
+	if !strings.Contains(text.Text, "### Edit edit_test") {
 		t.Fatalf("code change text must be the rendered display, got: %q", text.Text)
 	}
 	envelope := decodeARCEnvelope(t, wrapped)

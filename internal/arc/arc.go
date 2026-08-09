@@ -363,9 +363,6 @@ func classify(tool string, isError bool, data map[string]any, summary string) (s
 			behavior = "ask_confirm"
 		}
 		errorResult := errorData(data)
-		if hasAnyKey(errorResult, "changeset_id") && hasAnyKey(errorResult, "files", "diff") {
-			return "code_change", errorResult, Hints{PreferredBehavior: behavior}, actionsFrom(data)
-		}
 		return "error", errorResult, Hints{PreferredBehavior: behavior}, actionsFrom(data)
 	}
 
@@ -381,20 +378,13 @@ func classify(tool string, isError bool, data map[string]any, summary string) (s
 		resultType = "plan_task"
 	case tool == "plan_manage" || tool == "plan_create" || tool == "plan_read" || tool == "plan_transition":
 		resultType = "plan"
-	case tool == "change_execute" || tool == "change_manage" || tool == "change_prepare" || tool == "change_read" || tool == "change_apply" || tool == "change_revert":
-		// Tool identity wins over content heuristics: the Changeset DTO also
-		// carries a "files" key which would otherwise classify as search_result.
-		resultType = "code_change"
 	case tool == "edit" && hasAnyKey(inner, "edit_id", "results", "diff_summary"):
-		// Clean-core edit returns results[] rather than the Changeset files[] DTO.
-		// It still has the same user-facing diff semantics.
+		// Clean-core edit results use the code-change renderer.
 		resultType = "code_change"
 	case tool == "context_query" || tool == "source_read":
 		resultType = "search_result"
 	case hasAnyKey(inner, "files", "matches"):
 		resultType = "search_result"
-	case hasAnyKey(inner, "changeset_id", "diff"):
-		resultType = "code_change"
 	case tool == "command_execute" || tool == "command_run" || tool == "task_manage" || tool == "task_read" || tool == "task_control" || hasAnyKey(inner, "stdout", "stderr", "exit_code"):
 		resultType = "log"
 	case hasAnyKey(inner, "columns", "rows"):
@@ -530,9 +520,6 @@ func actionsFrom(data map[string]any) []Action {
 	actionType := "continue"
 	confirm := false
 	label := "Continue with " + tool
-	if strings.Contains(tool, "change") {
-		actionType, confirm, label = "mutation", true, "Continue with "+tool
-	}
 	return []Action{{ID: tool, Type: actionType, Label: label, Confirm: confirm, Arguments: args}}
 }
 
@@ -698,14 +685,15 @@ func resultDataSchema(name string) map[string]any {
 		})
 	case SchemaCodeChange:
 		return object(map[string]any{
-			"changeset_id": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"},
-			"summary": map[string]any{"type": "string"}, "digest": map[string]any{"type": "string"}, "expected_digest": map[string]any{"type": "string"},
-			"files": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{
+			"edit_id": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"},
+			"results": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{
 				"path": map[string]any{"type": "string"}, "new_path": map[string]any{"type": "string"},
 				"operation": map[string]any{"type": "string"}, "diff": map[string]any{"type": "string"},
-				"diff_truncated": map[string]any{"type": "boolean"},
-			}}}, "diff": map[string]any{"type": "object"},
-			"applied": map[string]any{"type": "boolean"}, "verify": map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				"diff_truncated": map[string]any{"type": "boolean"}, "new_sha256": map[string]any{"type": "string"},
+			}}},
+			"total_changed_lines": map[string]any{"type": "integer"}, "diff_summary": map[string]any{"type": "string"},
+			"diff_truncated": map[string]any{"type": "boolean"}, "applied": map[string]any{"type": "boolean"},
+			"preview_only": map[string]any{"type": "boolean"}, "idempotent_replay": map[string]any{"type": "boolean"},
 		})
 	case SchemaTable:
 		return object(map[string]any{

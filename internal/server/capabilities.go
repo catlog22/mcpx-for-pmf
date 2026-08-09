@@ -16,7 +16,7 @@ const cleanCoreCapabilityVersion = "clean-core-p4"
 
 func capabilityGroups() map[string][]string {
 	return map[string][]string{
-		"core":    {"session", "read", "edit", "move_out_prepare", "submit_move_out", "observe", "execute", "plan", "artifact", "discover", "skill_call", "mcp_call"},
+		"core":    {"session", "read", "edit", "move_out", "observe", "execute", "plan", "artifact", "discover", "skill_call", "mcp_call"},
 		"support": {"operation_batch", "operation_manage", "runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide"},
 	}
 }
@@ -39,8 +39,7 @@ var toolCapabilityDefinitions = []toolCapabilityDefinition{
 	{Name: "session", Domain: "session"},
 	{Name: "read", Domain: "source", RequiresRemoteSession: true},
 	{Name: "edit", Domain: "edit", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
-	{Name: "move_out_prepare", Domain: "workspace_move_out", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
-	{Name: "submit_move_out", Domain: "workspace_move_out", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+	{Name: "move_out", Domain: "workspace_move_out", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "execute", Domain: "command", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "terminal"},
 	{Name: "plan", Domain: "plan", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "artifact", Domain: "artifact", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},

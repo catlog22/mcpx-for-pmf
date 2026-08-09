@@ -197,15 +197,11 @@ func TestServiceRejectsCyclesAndPreservesCompletedTasksDuringReplan(t *testing.T
 	}
 }
 
-func TestServiceDeliveryBlocksDraftChangesetAndInvalidEvidence(t *testing.T) {
+func TestServiceDeliveryBlocksInvalidEvidenceUntilVerificationPasses(t *testing.T) {
 	ctx := context.Background()
 	store := openPlanStore(t)
 	defer store.Close()
 	remoteSessionID := seedPlanSession(t, store.DB())
-	_, err := store.DB().Exec(`INSERT INTO changesets (id, remote_session_id, created_by, status, summary, digest, created_at) VALUES ('chg_test', ?, 'principal-test', 'draft', '', 'sha256:test', 1)`, remoteSessionID)
-	if err != nil {
-		t.Fatal(err)
-	}
 	service := NewService(store.DB())
 	created, err := service.Create(ctx, remoteSessionID, "principal-test", CreateInput{Goal: "change", Tasks: []TaskInput{{ID: "apply", Title: "Apply"}}})
 	if err != nil {
@@ -226,16 +222,10 @@ func TestServiceDeliveryBlocksDraftChangesetAndInvalidEvidence(t *testing.T) {
 	if blocked.Ready || blocked.Status != "blocked" || len(blocked.Blockers) == 0 {
 		t.Fatalf("blocked delivery = %+v", blocked)
 	}
-	if _, err := store.DB().Exec(`UPDATE changesets SET status = 'applied' WHERE id = 'chg_test'`); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := store.DB().Exec(`UPDATE plan_task_evidence SET metadata_json = '{"status":"passed"}' WHERE kind = 'verification'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.DB().Exec(`INSERT INTO changesets (id, remote_session_id, created_by, status, summary, digest, created_at, discarded_at) VALUES ('chg_discarded', ?, 'principal-test', 'draft', '', 'sha256:discarded', 2, 3)`, remoteSessionID); err != nil {
-		t.Fatal(err)
-	}
-	// The blocked plan is still deliverable after its external blockers clear.
+	// The blocked plan is deliverable after its verification evidence passes.
 	ready, err := service.Deliver(ctx, remoteSessionID, created.ID, "principal-test")
 	if err != nil {
 		t.Fatal(err)

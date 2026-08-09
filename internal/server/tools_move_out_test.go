@@ -34,6 +34,7 @@ func openMoveOutSession(t *testing.T, rt *Runtime) string {
 
 func moveOutCommitArguments(remoteID string, data map[string]any) map[string]any {
 	return map[string]any{
+		"action":            "submit",
 		"remote_session_id": remoteID,
 		"confirmation_uuid": data["confirmation_uuid"],
 	}
@@ -97,7 +98,8 @@ func TestMoveOutPrepareAndCommitAtomicallyMovesDirectoryWithoutScanningDescendan
 		t.Fatal(err)
 	}
 	remoteID := openMoveOutSession(t, rt)
-	prepared := callMoveOut(t, rt.toolWorkspaceMoveOutPrepare, map[string]any{
+	prepared := callMoveOut(t, rt.toolMoveOut, map[string]any{
+		"action":            "prepare",
 		"remote_session_id": remoteID,
 		"workspace":         "demo",
 		"purpose":           "将用户授权的压测目录安全移至隔离区",
@@ -123,15 +125,16 @@ func TestMoveOutPrepareAndCommitAtomicallyMovesDirectoryWithoutScanningDescendan
 		t.Fatalf("prepare returned directory descendants: %+v", data)
 	}
 	confirmationUUID := data["confirmation_uuid"].(string)
-	if len(confirmationUUID) != 36 || !strings.Contains(envelopeHumanSummary(envelope.Response{Status: envelope.StatusOK, Data: data}), "submit_move_out") {
+	if len(confirmationUUID) != 36 || !strings.Contains(envelopeHumanSummary(envelope.Response{Status: envelope.StatusOK, Data: data}), "move_out(action=submit)") {
 		t.Fatalf("prepare does not expose web confirmation credential: %+v", data)
 	}
 	if _, err := os.Stat(directory); err != nil {
 		t.Fatalf("prepare mutated source directory: %v", err)
 	}
-	submitArguments, _ := data["submit_move_out_arguments"].(map[string]any)
-	if len(submitArguments) != 2 || submitArguments["remote_session_id"] != remoteID || submitArguments["confirmation_uuid"] != confirmationUUID {
-		t.Fatalf("prepare must return only the two commit arguments: %+v", submitArguments)
+	nextAction, _ := data["next_action"].(map[string]any)
+	submitArguments, _ := nextAction["arguments"].(map[string]any)
+	if nextAction["tool"] != "move_out" || len(submitArguments) != 3 || submitArguments["action"] != "submit" || submitArguments["remote_session_id"] != remoteID || submitArguments["confirmation_uuid"] != confirmationUUID {
+		t.Fatalf("prepare must return the exact move_out submit action: %+v", nextAction)
 	}
 	purposeConflict := callMoveOut(t, rt.toolWorkspaceMoveOutPrepare, map[string]any{
 		"remote_session_id": remoteID,
@@ -146,10 +149,10 @@ func TestMoveOutPrepareAndCommitAtomicallyMovesDirectoryWithoutScanningDescendan
 
 	withoutConfirmation := moveOutCommitArguments(remoteID, data)
 	delete(withoutConfirmation, "confirmation_uuid")
-	if result := callMoveOut(t, rt.toolWorkspaceMoveOutCommit, withoutConfirmation); statusOK(result) || errorCode(result) != "confirmation_required" {
+	if result := callMoveOut(t, rt.toolMoveOut, withoutConfirmation); statusOK(result) || errorCode(result) != "confirmation_required" {
 		t.Fatalf("commit without confirmation=%+v", result)
 	}
-	committed := callMoveOut(t, rt.toolWorkspaceMoveOutCommit, moveOutCommitArguments(remoteID, data))
+	committed := callMoveOut(t, rt.toolMoveOut, moveOutCommitArguments(remoteID, data))
 	if !statusOK(committed) {
 		t.Fatalf("move-out commit failed: %+v", committed)
 	}
@@ -171,7 +174,7 @@ func TestMoveOutPrepareAndCommitAtomicallyMovesDirectoryWithoutScanningDescendan
 	if content, err := os.ReadFile(outside); err != nil || string(content) != "outside\n" {
 		t.Fatalf("move followed external symlink: %q %v", content, err)
 	}
-	replay := callMoveOut(t, rt.toolWorkspaceMoveOutCommit, moveOutCommitArguments(remoteID, data))
+	replay := callMoveOut(t, rt.toolMoveOut, moveOutCommitArguments(remoteID, data))
 	if !statusOK(replay) || replay["data"].(map[string]any)["idempotent_replay"] != true {
 		t.Fatalf("exact commit replay=%+v", replay)
 	}

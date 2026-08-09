@@ -85,6 +85,7 @@ func main() {
 	addr := flag.String("addr", "", "override listen addr host:port")
 	logLevel := flag.String("log-level", "", "debug|info|warn|error (or MCPX_LOG_LEVEL)")
 	logFormat := flag.String("log-format", "", "text|json (or MCPX_LOG_FORMAT)")
+	background := flag.Bool("d", false, "run server in background")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = printUsage
 	flag.Parse()
@@ -92,6 +93,15 @@ func main() {
 	if *showVersion {
 		fmt.Printf("mcpx %s (commit=%s date=%s)\n", build.Version, build.Commit, build.Date)
 		os.Exit(0)
+	}
+	if *background {
+		pid, logPath, err := startBackground(os.Args[1:])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "start background server: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("mcpx started in background (pid=%d, log=%s)\n", pid, logPath)
+		return
 	}
 
 	logging.Init(logging.Options{Level: *logLevel, Format: *logFormat})

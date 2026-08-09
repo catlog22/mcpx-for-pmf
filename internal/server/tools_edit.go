@@ -39,7 +39,7 @@ func (s storedEditError) applyError() *edit.ApplyError {
 	return &edit.ApplyError{Code: s.Code, Message: s.Message, Path: s.Path, Index: s.Index, Current: s.Current, ChangedLines: s.ChangedLines}
 }
 
-// toolEdit is the clean-core unified file edit entry (new engine, not changeset).
+// toolEdit is the clean-core unified file edit entry.
 func (r *Runtime) toolEdit(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, session, fail := r.changeRequest(ctx, req, true)
 	if fail != nil {
@@ -54,7 +54,7 @@ func (r *Runtime) toolEdit(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 		if item.Operation == edit.OpDelete {
 			return r.editToolError(envReq, session, &edit.ApplyError{
 				Code:    "MOVE_OUT_REQUIRED",
-				Message: "file removal requires move_out_prepare followed by submit_move_out",
+				Message: "file removal requires move_out(action=prepare), user confirmation, then move_out(action=submit)",
 				Path:    item.Path,
 				Index:   index,
 				Err:     edit.ErrUnsupportedOp,
@@ -239,6 +239,9 @@ func (r *Runtime) editToolError(envReq envelope.Request, session remotesession.S
 			"remote_session_id": session.ID,
 			"path":              ae.Path,
 		}
+		if action, ok := suggestedNext["action"].(string); ok && action != "" {
+			arguments["action"] = action
+		}
 		if maxLines, ok := suggestedNext["max_changed_lines"]; ok {
 			arguments["max_changed_lines"] = maxLines
 		}
@@ -270,7 +273,7 @@ func editRecovery(code string, ae *edit.ApplyError) any {
 	case "SYMLINK_NOT_ALLOWED", "DELETE_FILE_ONLY":
 		return "move out only an explicit regular file, directory or symlink entry; do not follow symlink paths"
 	case "MOVE_OUT_REQUIRED":
-		return "use move_out_prepare, ask the web user to confirm the frozen manifest, then submit_move_out with confirmation_uuid; edit never removes files"
+		return "use move_out(action=prepare), ask the web user to confirm the frozen manifest, then move_out(action=submit) with confirmation_uuid; edit never removes files"
 	case "FILE_DENIED", "POLICY_DENIED":
 		return "adjust the path or obtain policy approval"
 	default:
@@ -300,7 +303,8 @@ func editSuggestedNext(code, remoteSessionID string, ae *edit.ApplyError) map[st
 		next["max_changed_lines"] = edit.MaxChangedLines
 		next["note"] = "split edits so total +/- lines <= 1000"
 	case "MOVE_OUT_REQUIRED":
-		next["tool"] = "move_out_prepare"
+		next["tool"] = "move_out"
+		next["action"] = "prepare"
 		next["purpose"] = "prepare the user-requested workspace move to managed quarantine"
 	default:
 		next["tool"] = "edit"

@@ -9,28 +9,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func (r *Runtime) resourceChangesetDiff(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-	remoteSessionID, changesetID, err := parseDevelopmentResourceURI(req.Params.URI, "changesets", "diff")
-	if err != nil {
-		return nil, err
-	}
-	principal, err := r.principalFromContext(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("unauthorized")
-	}
-	if _, err := r.remote.Get(ctx, principal, remoteSessionID); err != nil {
-		return nil, err
-	}
-	changeset, err := r.changesets.Get(ctx, changesetID)
-	if err != nil || changeset.RemoteSessionID != remoteSessionID {
-		return nil, fmt.Errorf("changeset not found")
-	}
-	if len(changeset.UnifiedDiff) > 8<<20 {
-		return nil, fmt.Errorf("changeset diff exceeds resource limit")
-	}
-	return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: req.Params.URI, MIMEType: "text/x-diff", Text: changeset.UnifiedDiff}}}, nil
-}
-
 func (r *Runtime) resourceTaskLogs(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 	remoteSessionID, taskID, err := parseDevelopmentResourceURI(req.Params.URI, "tasks", "logs")
 	if err != nil {

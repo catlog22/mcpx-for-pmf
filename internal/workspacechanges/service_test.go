@@ -2,16 +2,14 @@ package workspacechanges
 
 import (
 	"context"
-	"crypto/sha256"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"mcpx/internal/auth"
-	"mcpx/internal/changeset"
 	"mcpx/internal/remotesession"
 	"mcpx/internal/state"
 )
@@ -46,16 +44,13 @@ func TestInspectAttributesRemoteSessionChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	original := []byte("base\n")
-	digest := sha256.Sum256(original)
-	changeService := changeset.NewService(store.DB())
-	prepared, err := changeService.Prepare(ctx, created.Session.ID, principal.ID, root, "MCPX edit", []changeset.Operation{{
-		Operation: "update", Path: "mcpx.txt", ExpectedSHA256: fmt.Sprintf("%x", digest), Content: "changed by mcpx\n",
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := changeService.Apply(ctx, prepared.ID, root); err != nil {
+	write(t, root, "mcpx.txt", "changed by mcpx\n")
+	now := time.Now().UTC().UnixMilli()
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO clean_edit_records
+		(id, remote_session_id, principal_id, state, result_json, created_at, updated_at, expires_at)
+		VALUES (?, ?, ?, 'succeeded', ?, ?, ?, ?)`,
+		"edit-test", created.Session.ID, principal.ID, `{"results":[{"path":"mcpx.txt"}]}`,
+		now, now, now+int64(time.Hour/time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
 	write(t, root, "external.txt", "outside edit\n")

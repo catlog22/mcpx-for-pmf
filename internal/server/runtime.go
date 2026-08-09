@@ -21,7 +21,6 @@ import (
 	"mcpx/internal/artifact"
 	"mcpx/internal/audit"
 	"mcpx/internal/auth"
-	"mcpx/internal/changeset"
 	"mcpx/internal/config"
 	"mcpx/internal/deletion"
 	"mcpx/internal/envelope"
@@ -66,7 +65,6 @@ type Runtime struct {
 	state           *state.Store
 	remote          *remotesession.Service
 	environment     *environment.Service
-	changesets      *changeset.Service
 	workspaceDiff   *workspacechanges.Service
 	fileSnapshots   *filesnapshot.Store
 	artifacts       *artifact.Service
@@ -87,10 +85,6 @@ type Runtime struct {
 	toolIndexMu  sync.RWMutex
 	toolHandlers map[string]mcp.ToolHandler
 	toolMeta     map[string]toolAnnotation
-	// changeExecuteRequests is only a short-lived lookup accelerator. The
-	// durable Changeset/idempotency record remains the source of truth.
-	changeExecuteRequests map[string]changeExecuteRequest
-	changeExecuteMu       sync.Mutex
 	// idempotency is shared by clean-core mutating tools and persists replay
 	// records in the Runtime state database.
 	idempotency     *idempotency.Store
@@ -99,13 +93,6 @@ type Runtime struct {
 	projectConfigMu sync.RWMutex
 	projectConfigs  map[string]projectConfigCacheEntry
 	build           BuildInfo
-}
-
-const changeExecuteRequestTTL = 24 * time.Hour
-
-type changeExecuteRequest struct {
-	changesetID string
-	createdAt   time.Time
 }
 
 type projectConfigCacheEntry struct {
@@ -200,11 +187,6 @@ func New(opts Options) (*Runtime, error) {
 		_ = stateStore.Close()
 		return nil, fmt.Errorf("initialize terminal tasks: %w", err)
 	}
-	changesetService := changeset.NewService(stateStore.DB())
-	if err := changesetService.Recover(context.Background()); err != nil {
-		_ = stateStore.Close()
-		return nil, fmt.Errorf("recover changesets: %w", err)
-	}
 	retentionService, err := state.NewRetentionService(stateStore.DB(), taskLogDir, cfg.State.Retention)
 	if err != nil {
 		_ = stateStore.Close()
@@ -212,33 +194,31 @@ func New(opts Options) (*Runtime, error) {
 	}
 
 	runtime := &Runtime{
-		opts:                  opts,
-		cfg:                   cfg,
-		reg:                   reg,
-		approvals:             approval.NewPersistentStore(stateStore.DB()),
-		audit:                 logger,
-		globalCfgPath:         globalPath,
-		tasks:                 taskManager,
-		secrets:               secrets.NewPersistentStore(stateStore.DB()),
-		oauth:                 oauthSrv,
-		state:                 stateStore,
-		remote:                remotesession.NewService(stateStore.DB()),
-		environment:           environmentService,
-		changesets:            changesetService,
-		workspaceDiff:         workspacechanges.NewService(stateStore.DB()),
-		fileSnapshots:         filesnapshot.NewStore(stateStore.DB()),
-		artifacts:             artifact.NewService(stateStore.DB()),
-		plans:                 plan.NewService(stateStore.DB()),
-		deletions:             deletion.NewStore(stateStore.DB()),
-		retention:             retentionService,
-		screenshot:            screenshot.NewService(),
-		toolIndex:             map[string]mcp.Tool{},
-		toolHandlers:          map[string]mcp.ToolHandler{},
-		toolMeta:              map[string]toolAnnotation{},
-		changeExecuteRequests: map[string]changeExecuteRequest{},
-		idempotency:           idempotency.NewStore(stateStore.DB()),
-		discoveries:           map[string]discoveryLease{},
-		projectConfigs:        map[string]projectConfigCacheEntry{},
+		opts:           opts,
+		cfg:            cfg,
+		reg:            reg,
+		approvals:      approval.NewPersistentStore(stateStore.DB()),
+		audit:          logger,
+		globalCfgPath:  globalPath,
+		tasks:          taskManager,
+		secrets:        secrets.NewPersistentStore(stateStore.DB()),
+		oauth:          oauthSrv,
+		state:          stateStore,
+		remote:         remotesession.NewService(stateStore.DB()),
+		environment:    environmentService,
+		workspaceDiff:  workspacechanges.NewService(stateStore.DB()),
+		fileSnapshots:  filesnapshot.NewStore(stateStore.DB()),
+		artifacts:      artifact.NewService(stateStore.DB()),
+		plans:          plan.NewService(stateStore.DB()),
+		deletions:      deletion.NewStore(stateStore.DB()),
+		retention:      retentionService,
+		screenshot:     screenshot.NewService(),
+		toolIndex:      map[string]mcp.Tool{},
+		toolHandlers:   map[string]mcp.ToolHandler{},
+		toolMeta:       map[string]toolAnnotation{},
+		idempotency:    idempotency.NewStore(stateStore.DB()),
+		discoveries:    map[string]discoveryLease{},
+		projectConfigs: map[string]projectConfigCacheEntry{},
 		build: BuildInfo{
 			Version: firstNonEmpty(opts.Version, buildversion.Current),
 			Commit:  firstNonEmpty(opts.Commit, "none"),
@@ -274,28 +254,6 @@ func New(opts Options) (*Runtime, error) {
 	catalog := mcp.NewServer(&mcp.Implementation{Name: "mcpx", Version: runtime.build.Version}, nil)
 	runtime.registerTools(catalog)
 	return runtime, nil
-}
-
-func (r *Runtime) findChangeExecuteRequest(key string) (string, bool) {
-	now := time.Now().UTC()
-	r.changeExecuteMu.Lock()
-	defer r.changeExecuteMu.Unlock()
-	for requestKey, request := range r.changeExecuteRequests {
-		if now.Sub(request.createdAt) >= changeExecuteRequestTTL {
-			delete(r.changeExecuteRequests, requestKey)
-		}
-	}
-	request, ok := r.changeExecuteRequests[key]
-	if !ok {
-		return "", false
-	}
-	return request.changesetID, true
-}
-
-func (r *Runtime) rememberChangeExecuteRequest(key, changesetID string) {
-	r.changeExecuteMu.Lock()
-	r.changeExecuteRequests[key] = changeExecuteRequest{changesetID: changesetID, createdAt: time.Now().UTC()}
-	r.changeExecuteMu.Unlock()
 }
 
 func firstNonEmpty(values ...string) string {
@@ -794,7 +752,7 @@ func envelopeHumanSummary(resp envelope.Response) string {
 	// so previews that truncate content still leave a usable retry key.
 	if label, credential := confirmationCredentialFromData(resp.Data); credential != "" {
 		if label == "confirmation_uuid" {
-			return "confirmation_uuid: `" + credential + "` · ask the web user, then call submit_move_out"
+			return "confirmation_uuid: `" + credential + "` · ask the web user, then call move_out(action=submit)"
 		}
 		return "confirmation_token: `" + credential + "`"
 	}
@@ -861,14 +819,23 @@ func confirmationCredentialFromData(data any) (string, string) {
 	return "", ""
 }
 
-func (r *Runtime) logAudit(event audit.Event) {
+func (r *Runtime) writeAudit(event audit.Event) error {
+	if r == nil || r.audit == nil {
+		return nil
+	}
 	if err := r.audit.Log(event); err != nil {
 		logging.With("component", "audit").Error("write failed",
 			"tool", event.Tool,
 			"request_id", event.RequestID,
 			"err", err,
 		)
+		return err
 	}
+	return nil
+}
+
+func (r *Runtime) logAudit(event audit.Event) {
+	_ = r.writeAudit(event)
 }
 
 func (r *Runtime) authAudience() (issuer, resource string) {

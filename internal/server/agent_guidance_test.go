@@ -133,7 +133,7 @@ func TestAgentGuidanceIncludesEditPayloadCheatSheet(t *testing.T) {
 		}
 	}
 	if strings.Contains(operation, "delete") {
-		t.Fatalf("edit guidance must route deletion to move_out_prepare/submit_move_out: %q", operation)
+		t.Fatalf("edit guidance must route deletion to move_out: %q", operation)
 	}
 	replacement, ok := item["replacement"].(string)
 	if !ok || !strings.Contains(replacement, "精确唯一") {
@@ -163,10 +163,12 @@ func TestAgentGuidanceIncludesEditPayloadCheatSheet(t *testing.T) {
 	if !strings.Contains(joined, "idempotency_key") || !strings.Contains(joined, "STALE_REVISION") || !strings.Contains(joined, "suggested_next") {
 		t.Fatalf("rules must carry edit retry guidance: %s", joined)
 	}
-	if !strings.Contains(joined, "安全移出语义必须在 prepare 前确定") ||
-		!strings.Contains(joined, "提交时不得重复传 purpose") ||
-		!strings.Contains(joined, "新的 idempotency_key") {
-		t.Fatalf("rules must prevent prepare/submit purpose drift: %s", joined)
+	if !strings.Contains(joined, "move_out(action=prepare)") || !strings.Contains(joined, "move_out(action=submit)") ||
+		!strings.Contains(joined, "安全移出语义必须在 move_out(action=prepare) 前确定") ||
+		!strings.Contains(joined, "submit 时不得重复传 purpose") ||
+		!strings.Contains(joined, "新的 idempotency_key") ||
+		strings.Contains(joined, "move_out_prepare") || strings.Contains(joined, "submit_move_out") {
+		t.Fatalf("rules must use the unified move_out action contract without legacy names: %s", joined)
 	}
 	instructions := agentGuidanceInstructions()
 	if !strings.Contains(instructions, "用户可见响应契约") || !strings.Contains(instructions, "edit") || !strings.Contains(instructions, "replacement") {

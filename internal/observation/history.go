@@ -19,7 +19,6 @@ type HistoryQuery struct {
 	OperationIDs     []string
 	PlanTaskIDs      []string
 	ExecutionTaskIDs []string
-	ChangesetIDs     []string
 	CreatedAfter     time.Time
 	CreatedBefore    time.Time
 	Keyword          string
@@ -63,7 +62,6 @@ func (s *Store) Query(ctx context.Context, query HistoryQuery) ([]Event, string,
 	appendStringFilter(&where, &args, "operation_id", query.OperationIDs)
 	appendStringFilter(&where, &args, "plan_task_id", query.PlanTaskIDs)
 	appendStringFilter(&where, &args, "execution_task_id", query.ExecutionTaskIDs)
-	appendStringFilter(&where, &args, "operation_id", query.ChangesetIDs)
 	appendKindFilter(&where, &args, query.Kinds)
 	appendStringFilter(&where, &args, "status", query.Statuses)
 	if !query.CreatedAfter.IsZero() {
@@ -152,9 +150,6 @@ func appendKindFilter(where *[]string, args *[]any, values []string) {
 			clauses = append(clauses, "status = 'waiting_confirmation' OR output_json LIKE '%CONFIRMATION%'")
 		case "error":
 			clauses = append(clauses, "status = 'failed'")
-		case "changeset.prepared", "changeset.applied", "changeset.reverted":
-			clauses = append(clauses, "(event_type = ? OR (event_type = 'observer.notice' AND (output_json LIKE ? OR summary LIKE ?)))")
-			*args = append(*args, value, `%"source_type":"`+value+`"%`, "%"+value+"%")
 		default:
 			clauses = append(clauses, "event_type = ?")
 			*args = append(*args, value)

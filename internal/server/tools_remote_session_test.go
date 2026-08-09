@@ -1,13 +1,9 @@
 package server
 
 import (
-	"bytes"
-
 	"mcpx/internal/mcpresult"
 
 	"context"
-	"crypto/sha256"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -154,154 +150,6 @@ func TestRemoteSessionMCPIsVendorAndTransportIndependent(t *testing.T) {
 	reused := call(t, runtime.toolRemoteSessionAttach, contextFor("token-b", "transport-b-2", "vendor-c"), map[string]any{"handoff_token": handoffToken})
 	if errorCode(reused) != "invalid_handoff_token" {
 		t.Fatalf("handoff token was not one-shot: %+v", reused)
-	}
-}
-
-func TestChangesetMCPDiffAndSemanticConfirmationSurviveTransportChange(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("MCPX_HOME", home)
-	workspacePath := filepath.Join(home, "project")
-	if err := os.MkdirAll(workspacePath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	original := []byte("package demo\n\nconst Value = 1\n")
-	if err := os.WriteFile(filepath.Join(workspacePath, "demo.go"), original, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg := config.DefaultConfig()
-	cfg.Auth.Mode = "open"
-	cfg.Workspaces = []config.WorkspaceEntry{{Name: "project", Path: workspacePath}}
-	cfg.Security.Files.Confirm = []string{`\.go$`}
-	cfg.Logging.Enabled = false
-	if err := config.WriteGlobal(filepath.Join(home, "config.yaml"), cfg); err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := New(Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = runtime.Close() })
-	contextFor := func(_ ...string) context.Context {
-		return context.Background()
-	}
-
-	created := callEnvelope(t, runtime.toolSessionOpen, contextFor(), map[string]any{"workspace": "project"})
-	remoteSessionID, _ := created["remote_session_id"].(string)
-	if remoteSessionID == "" {
-		t.Fatalf("session_open failed: %+v", created)
-	}
-	runtime.screenshot = fakeScreenCapturer{}
-	screenshotRequest := mcpresult.Request(map[string]any{
-		"intent":            "capture a screenshot",
-		"remote_session_id": remoteSessionID,
-		"mode":              "region",
-		"x":                 10,
-		"y":                 20,
-		"width":             300,
-		"height":            200,
-		"compression":       "small",
-	})
-
-	screenshotResult, err := runtime.toolScreenshotCapture(contextFor(), screenshotRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var imageContent *mcp.ImageContent
-	for _, c := range screenshotResult.Content {
-		if img, ok := c.(*mcp.ImageContent); ok {
-			imageContent = img
-			break
-		}
-	}
-	if imageContent == nil || imageContent.MIMEType != "image/jpeg" || !bytes.Equal(imageContent.Data, []byte{1, 2, 3, 4}) {
-		t.Fatalf("invalid MCP image content: len=%d content=%+v sc=%+v", len(screenshotResult.Content), screenshotResult.Content, screenshotResult.StructuredContent)
-	}
-	meta := structuredBusinessData(screenshotResult)
-	if meta == nil || meta["mime_type"] == "" && meta["format"] == "" && meta["sha256"] == "" {
-		// Metadata is JSON-normalized under wire data after remoteResult.
-		if meta == nil {
-			t.Fatalf("missing screenshot structured metadata: %T", screenshotResult.StructuredContent)
-		}
-	}
-	sum := sha256.Sum256(original)
-	prepareRequest := mcpresult.Request(map[string]any{
-		"intent":            "prepare a file change",
-		"remote_session_id": remoteSessionID,
-		"summary":           "update demo value",
-		"operations": []any{map[string]any{
-			"operation": "update", "path": "demo.go",
-			"base_sha256": fmt.Sprintf("sha256:%x", sum[:]),
-			"patch":       "@@ -1,3 +1,3 @@\n package demo\n \n-const Value = 1\n+const Value = 2\n",
-		}},
-	})
-
-	preparedResult, err := runtime.toolChangePrepare(contextFor(), prepareRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := preparedResult.Content[0].(*mcp.TextContent).Text
-	if !strings.Contains(text, "```diff") || !strings.Contains(text, "Value = 2") || !strings.Contains(text, "demo.go") {
-		t.Fatalf("content should include a Markdown diff with the changed file:\n%s", text)
-	}
-	preparedDTO := structuredBusinessData(preparedResult)
-	if preparedDTO == nil {
-		t.Fatalf("missing structured Changeset DTO: %T %+v", preparedResult.StructuredContent, preparedResult.StructuredContent)
-	}
-	changesetID, _ := preparedDTO["changeset_id"].(string)
-	digest, _ := preparedDTO["digest"].(string)
-	if changesetID == "" || digest == "" {
-		t.Fatalf("missing changeset id/digest: %+v", preparedDTO)
-	}
-	diffMeta, _ := preparedDTO["diff"].(map[string]any)
-	if mode, _ := diffMeta["mode"].(string); mode != "inline" && mode != "resource" {
-		t.Fatalf("diff mode missing: %+v", diffMeta)
-	}
-	resourceURI, _ := diffMeta["resource_uri"].(string)
-	if resourceURI == "" {
-		t.Fatalf("Changeset DTO missing Resource URI: %+v", preparedDTO)
-	}
-	if inline, _ := diffMeta["unified_diff"].(string); !strings.Contains(inline, "Value = 2") {
-		t.Fatalf("small diff must have one structured authoritative copy: %+v", diffMeta)
-	}
-	diffResources, err := runtime.resourceChangesetDiff(contextFor(), &mcp.ReadResourceRequest{Params: &mcp.ReadResourceParams{URI: resourceURI}})
-	if err != nil || diffResources == nil || len(diffResources.Contents) != 1 {
-		t.Fatalf("read Changeset resource: resources=%+v err=%v", diffResources, err)
-	}
-
-	pending := callEnvelope(t, runtime.toolChangeExecute, contextFor(), map[string]any{
-		"remote_session_id": remoteSessionID,
-		"changeset_id":      changesetID,
-		"expected_digest":   digest,
-	})
-	if pending["status"] != "waiting_confirmation" {
-		t.Fatalf("expected confirmation: %+v", pending)
-	}
-	pendingData := pending["data"].(map[string]any)
-	pendingFiles, _ := pendingData["files"].([]any)
-	if len(pendingFiles) != 1 {
-		t.Fatalf("confirmation response must include changed files: %+v", pendingData)
-	}
-	pendingFile, _ := pendingFiles[0].(map[string]any)
-	pendingDiff, _ := pendingFile["diff"].(string)
-	if !strings.Contains(pendingDiff, "-const Value = 1") || !strings.Contains(pendingDiff, "+const Value = 2") {
-		t.Fatalf("confirmation response must include concrete file diff: %+v", pendingFile)
-	}
-	missingSession := callEnvelope(t, runtime.toolChangeExecute, contextFor(), map[string]any{
-		"changeset_id": pendingData["changeset_id"], "expected_digest": pendingData["digest"], "confirmation_token": pendingData["confirmation_token"],
-	})
-	if missingSession["status"] != "failed" || missingSession["error"].(map[string]any)["code"] != "REMOTE_SESSION_REQUIRED" {
-		t.Fatalf("confirmation must require explicit Remote Session: %+v", missingSession)
-	}
-	confirmed := callEnvelope(t, runtime.toolChangeExecute, contextFor(), map[string]any{
-		"remote_session_id": remoteSessionID, "changeset_id": pendingData["changeset_id"],
-		"expected_digest": pendingData["digest"], "confirmation_token": pendingData["confirmation_token"],
-	})
-	if confirmed["status"] != "ok" {
-		t.Fatalf("confirmation failed after transport change: %+v", confirmed)
-	}
-	content, err := os.ReadFile(filepath.Join(workspacePath, "demo.go"))
-	if err != nil || !strings.Contains(string(content), "Value = 2") {
-		t.Fatalf("Changeset not applied: %q err=%v", content, err)
 	}
 }
 

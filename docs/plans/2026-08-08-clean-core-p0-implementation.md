@@ -14,7 +14,7 @@
 
 - `internal/edit` 已完成：精确唯一 replacement、重叠校验、base SHA、create/update/delete/rename、严格 Unified Diff 统计、999/1000/1001 边界、批量超限整批拒绝、BOM/UTF-8/UTF-16/混合换行/末尾换行保留、原子写入。
 - clean-core 公开面已切换为 `session`、`read`、`edit`、`observe`；旧 P0 工具名不出现在 `tools/list`，`session(attach)` 直接复用 `remote_session_id`，不再暴露 handoff 流程。
-- `read` 已支持 `items[]` 的 full/window 混合批量读取；`edit` 返回内联 `diff_summary`、累计变更行和结构化恢复字段；`observe(view=changes)` 返回最近 edit 变更；终端 workspace 观测默认 `-diff=full`。
+- `read` 已支持 `items[]` 的 full/window 混合批量读取；`edit` 返回内联 `diff_summary`、累计变更行和结构化恢复字段；`observe(view=changes)` 返回最近 edit 变更；终端 `observe` 默认 `-diff=full`。
 - clean core 的交互补强已完成：大 diff 有界预览与分页、UTF-16 模型侧解码、带指纹和重启恢复的持久化幂等均已接入，详见 [P1–P4 总实现计划](2026-08-08-clean-core-p1-p4-implementation.md) 的「P0 交互补强」章节。
 - 验证证据：`rtk go test ./... -count=1`（484 项通过）、`rtk go test -race ./... -count=1`（484 项通过）、`rtk go vet ./...`、`CGO_ENABLED=0 rtk go build -o bin/mcpx-server ./cmd/mcpx-server`、`test -z "$(gofmt -l ./cmd ./internal)"`、`rtk git diff --check` 均通过。
 - 本轮未执行 commit/push，等待用户明确确认。
@@ -114,7 +114,7 @@ rtk go test ./internal/edit -count=1
 
 **文件：**
 - `internal/server/tools_observe.go`（或等价）
-- `cmd/mcpx-server` workspace 观测默认 diff
+- `cmd/mcpx-server` observe 观测默认 diff
 - `internal/observation` 默认 DiffModeFull（确认 CLI 默认）
 
 - [x] `observe(view=changes)` 返回变更列表 + diff_summary

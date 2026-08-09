@@ -15,7 +15,7 @@ import (
 const retentionBatchSize = 500
 
 // RetentionService removes only bounded, reconstructable state. It never
-// deletes Remote Sessions, Changesets, Plans, or their source evidence.
+// deletes Remote Sessions, Plans, or their source evidence.
 type RetentionService struct {
 	db     *sql.DB
 	logDir string

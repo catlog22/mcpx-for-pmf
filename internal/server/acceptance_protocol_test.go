@@ -214,7 +214,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		}
 	}
 	expectedTools := []string{
-		"session", "read", "edit", "move_out_prepare", "submit_move_out", "observe",
+		"session", "read", "edit", "move_out", "observe",
 		"operation_batch", "operation_manage",
 		"execute", "plan", "artifact", "discover", "skill_call", "mcp_call",
 		"runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide",
@@ -264,29 +264,53 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	if !strings.Contains(schemaText, "update") || !strings.Contains(schemaText, "create") || !strings.Contains(schemaText, "rename") || strings.Contains(schemaText, "user_confirmed") || strings.Contains(schemaText, "\"delete\"") {
 		t.Fatalf("edit operation enum incomplete: %s", schemaText)
 	}
-	removeSchema, _ := json.Marshal(byName["move_out_prepare"].InputSchema)
-	for _, needle := range []string{"targets", "kind", "expected_sha256", "symlink"} {
-		if !strings.Contains(string(removeSchema), needle) {
-			t.Fatalf("move_out_prepare schema missing %q: %s", needle, removeSchema)
-		}
-	}
-	commitSchema, _ := json.Marshal(byName["submit_move_out"].InputSchema)
-	var commitSchemaMap map[string]any
-	if err := json.Unmarshal(commitSchema, &commitSchemaMap); err != nil {
+	moveSchema, _ := json.Marshal(byName["move_out"].InputSchema)
+	var moveSchemaMap map[string]any
+	if err := json.Unmarshal(moveSchema, &moveSchemaMap); err != nil {
 		t.Fatal(err)
 	}
-	commitProperties, _ := commitSchemaMap["properties"].(map[string]any)
-	if commitProperties["remote_session_id"] == nil || commitProperties["confirmation_uuid"] == nil {
-		t.Fatalf("submit_move_out schema missing the two submission parameters: %s", commitSchema)
-	}
-	for _, legacy := range []string{"workspace", "move_request_id", "manifest_sha256", "idempotency_key"} {
-		if commitProperties[legacy] != nil {
-			t.Fatalf("submit_move_out must bind %q server-side: %s", legacy, commitSchema)
+	for _, needle := range []string{"prepare", "submit", "targets", "kind", "expected_sha256", "symlink", "confirmation_uuid"} {
+		if !strings.Contains(string(moveSchema), needle) {
+			t.Fatalf("move_out schema missing %q: %s", needle, moveSchema)
 		}
 	}
-	requiredCommit, _ := commitSchemaMap["required"].([]any)
-	if len(requiredCommit) != 2 || requiredCommit[0] != "remote_session_id" || requiredCommit[1] != "confirmation_uuid" {
-		t.Fatalf("submit_move_out required fields=%+v", requiredCommit)
+	branches, _ := moveSchemaMap["oneOf"].([]any)
+	if len(branches) != 2 {
+		t.Fatalf("move_out must expose exactly prepare/submit branches: %s", moveSchema)
+	}
+	var prepareProperties, submitProperties map[string]any
+	var prepareRequired, submitRequired []any
+	for _, raw := range branches {
+		branch := raw.(map[string]any)
+		properties := branch["properties"].(map[string]any)
+		actionSchema := properties["action"].(map[string]any)
+		action, _ := actionSchema["const"].(string)
+		if action == "" {
+			t.Fatalf("move_out action branch is not discriminated: %+v", branch)
+		}
+		switch action {
+		case "prepare":
+			prepareProperties = properties
+			prepareRequired, _ = branch["required"].([]any)
+		case "submit":
+			submitProperties = properties
+			submitRequired, _ = branch["required"].([]any)
+		}
+	}
+	for _, field := range []string{"action", "remote_session_id", "workspace", "purpose", "targets", "idempotency_key"} {
+		if prepareProperties[field] == nil || !containsSchemaRequired(prepareRequired, field) {
+			t.Fatalf("move_out prepare branch missing required %q: %s", field, moveSchema)
+		}
+	}
+	for _, field := range []string{"action", "remote_session_id", "confirmation_uuid"} {
+		if submitProperties[field] == nil || !containsSchemaRequired(submitRequired, field) {
+			t.Fatalf("move_out submit branch missing required %q: %s", field, moveSchema)
+		}
+	}
+	for _, forbidden := range []string{"workspace", "purpose", "targets", "move_request_id", "manifest_sha256", "idempotency_key"} {
+		if submitProperties[forbidden] != nil {
+			t.Fatalf("move_out submit must bind %q server-side: %s", forbidden, moveSchema)
+		}
 	}
 	commandSchema, _ := json.Marshal(byName["execute"].InputSchema)
 	for _, required := range []string{"remote_session_id", "purpose"} {
@@ -458,40 +482,6 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		case "runtime_inspect":
 			name, args["view"] = "runtime_read", args["action"]
 			delete(args, "action")
-		case "change_execute":
-			name = "edit"
-			if _, exists := args["purpose"]; !exists {
-				if summary, ok := args["summary"].(string); ok && strings.TrimSpace(summary) != "" {
-					args["purpose"] = summary
-				}
-			}
-			if operations, ok := args["operations"].([]any); ok {
-				edits := make([]any, 0, len(operations))
-				for _, raw := range operations {
-					operation, _ := raw.(map[string]any)
-					if operation == nil {
-						continue
-					}
-					mapped := copyArgs(operation)
-					if mapped["operation"] == "replace_exact" {
-						mapped["operation"] = "update"
-						mapped["replacements"] = []any{map[string]any{
-							"match": mapped["match"], "replacement": mapped["replacement"],
-						}}
-						delete(mapped, "match")
-						delete(mapped, "replacement")
-						delete(mapped, "occurrence")
-					}
-					edits = append(edits, mapped)
-				}
-				args["edits"] = edits
-			}
-			delete(args, "operations")
-			delete(args, "summary")
-			delete(args, "changeset_id")
-			delete(args, "expected_digest")
-			delete(args, "revert_changeset_id")
-			delete(args, "confirmation_token")
 		}
 		return name, args
 	}
@@ -791,17 +781,13 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	// --- A10/A13 clean edit + inline diff summary ---
 	sum := sha256.Sum256([]byte(files["demo.go"]))
 	base := fmt.Sprintf("sha256:%x", sum[:])
-	executed := call("change_execute", map[string]any{
+	executed := call("edit", map[string]any{
 		"remote_session_id": remoteID,
-		"idempotency_key":   "change-idempotency-key",
-		"summary":           "bump Value",
-		"apply":             true,
-		"format":            true,
-		"verify":            []any{"related_tests"},
-		"operations": []any{map[string]any{
-			"operation": "replace_exact", "path": "demo.go",
-			"base_sha256": base, "match": "const Value = 1", "replacement": "const Value = 2",
-			"occurrence": "one",
+		"idempotency_key":   "edit-idempotency-key",
+		"purpose":           "bump Value",
+		"edits": []any{map[string]any{
+			"operation": "update", "path": "demo.go", "base_sha256": base,
+			"replacements": []any{map[string]any{"match": "const Value = 1", "replacement": "const Value = 2"}},
 		}},
 	})
 	execData, _ := executed["data"].(map[string]any)
@@ -825,23 +811,21 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	if err != nil || !strings.Contains(string(content), "Value = 2") {
 		t.Fatalf("file not updated: %q err=%v", content, err)
 	}
-	replayed := call("change_execute", map[string]any{
-		"remote_session_id": remoteID, "idempotency_key": "change-idempotency-key", "summary": "ignored on replay", "apply": true,
-		"operations": []any{map[string]any{"operation": "replace_exact", "path": "demo.go", "base_sha256": base, "match": "const Value = 1", "replacement": "const Value = 2", "occurrence": "one"}},
+	replayed := call("edit", map[string]any{
+		"remote_session_id": remoteID, "idempotency_key": "edit-idempotency-key", "purpose": "bump Value",
+		"edits": []any{map[string]any{"operation": "update", "path": "demo.go", "base_sha256": base,
+			"replacements": []any{map[string]any{"match": "const Value = 1", "replacement": "const Value = 2"}}}},
 	})
 	replayData, _ := replayed["data"].(map[string]any)
 	if replayData["idempotent_replay"] != true || replayData["diff_summary"] != execData["diff_summary"] {
 		t.Fatalf("edit retry must replay its original result: %+v", replayed)
 	}
 	// --- A12 stale revision ---
-	stale := call("change_execute", map[string]any{
-		"remote_session_id": remoteID,
-		"summary":           "stale",
-		"apply":             true,
-		"operations": []any{map[string]any{
-			"operation": "replace_exact", "path": "demo.go",
-			"base_sha256": base, // old hash
-			"match":       "const Value = 2", "replacement": "const Value = 3", "occurrence": "one",
+	stale := call("edit", map[string]any{
+		"remote_session_id": remoteID, "purpose": "stale",
+		"edits": []any{map[string]any{
+			"operation": "update", "path": "demo.go", "base_sha256": base, // old hash
+			"replacements": []any{map[string]any{"match": "const Value = 2", "replacement": "const Value = 3"}},
 		}},
 	})
 	if stale["status"] == "ok" {
@@ -861,13 +845,11 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	// --- A11 zero match fails ---
 	freshSum := sha256.Sum256(content)
 	freshBase := fmt.Sprintf("sha256:%x", freshSum[:])
-	nomatch := call("change_execute", map[string]any{
-		"remote_session_id": remoteID,
-		"summary":           "no match",
-		"apply":             false,
-		"operations": []any{map[string]any{
-			"operation": "replace_exact", "path": "demo.go",
-			"base_sha256": freshBase, "match": "DOES_NOT_EXIST_XYZ", "replacement": "x", "occurrence": "one",
+	nomatch := call("edit", map[string]any{
+		"remote_session_id": remoteID, "purpose": "no match", "apply": false,
+		"edits": []any{map[string]any{
+			"operation": "update", "path": "demo.go", "base_sha256": freshBase,
+			"replacements": []any{map[string]any{"match": "DOES_NOT_EXIST_XYZ", "replacement": "x"}},
 		}},
 	})
 	if nomatch["status"] == "ok" {

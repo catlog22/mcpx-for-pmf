@@ -46,28 +46,55 @@ func ParseDefault(s string) Decision {
 	}
 }
 
-// MatchCommand decides whether a command is allowed, needs confirmation, or must
-// be rejected. deny/allow rules match whole commands or individual && / ;
-// segments; pipes, redirections, background operators, and command substitution
-// are structurally rejected because they cannot be split safely.
-func MatchCommand(rules config.CommandRules, command string) Decision {
-	segments, unsafe := commandSegments(command)
-	if unsafe {
-		return Deny
+// CommandSegmentDecision is one independently reviewed shell segment. Operator
+// is the control operator that follows this segment (&&, ||, ;), or empty for
+// the final segment.
+type CommandSegmentDecision struct {
+	Command  string
+	Operator string
+	Decision Decision
+}
+
+// CommandAnalysis is the complete preflight result for one shell command.
+// Execution is allowed only after every segment has been reviewed.
+type CommandAnalysis struct {
+	Decision Decision
+	Segments []CommandSegmentDecision
+	Unsafe   bool
+}
+
+// AnalyzeCommand splits supported compound commands before evaluating policy.
+// &&, ||, and ; are safe control separators because each segment can be judged
+// independently before the original command is passed to the shell. Unsupported
+// shell features fail closed.
+func AnalyzeCommand(rules config.CommandRules, command string) CommandAnalysis {
+	parsed, unsafe := commandSegments(command)
+	analysis := CommandAnalysis{Decision: Deny, Unsafe: unsafe}
+	if unsafe || len(parsed) == 0 {
+		return analysis
 	}
-	needsConfirmation := false
-	for _, segment := range segments {
-		switch matchSegment(rules, segment) {
-		case Deny:
-			return Deny
-		case Confirm:
-			needsConfirmation = true
+	analysis.Decision = Allow
+	analysis.Segments = make([]CommandSegmentDecision, 0, len(parsed))
+	for _, segment := range parsed {
+		decision := matchSegment(rules, segment.Command)
+		analysis.Segments = append(analysis.Segments, CommandSegmentDecision{
+			Command: segment.Command, Operator: segment.Operator, Decision: decision,
+		})
+		if decision == Deny {
+			analysis.Decision = Deny
+			continue
+		}
+		if decision == Confirm && analysis.Decision == Allow {
+			analysis.Decision = Confirm
 		}
 	}
-	if needsConfirmation {
-		return Confirm
-	}
-	return Allow
+	return analysis
+}
+
+// MatchCommand returns the aggregate decision after every supported compound
+// command segment has been reviewed.
+func MatchCommand(rules config.CommandRules, command string) Decision {
+	return AnalyzeCommand(rules, command).Decision
 }
 
 // matchSegment evaluates a single command segment without control operators.
@@ -88,26 +115,35 @@ func matchSegment(rules config.CommandRules, segment string) Decision {
 	return decision
 }
 
-// HasUnsafeShellOperator reports active shell syntax that cannot be split into
-// independently judged segments: pipes, redirections, background operators,
-// newlines, and command substitution. Operators inside quotes or escaped with a
-// backslash are treated as literal argument content rather than shell control
-// syntax.
+// HasUnsafeShellOperator reports active shell syntax that cannot be safely
+// preflighted. &&, ||, and ; are supported separators; pipes, redirections,
+// background operators, newlines, and command substitution remain rejected.
+// Operators inside quotes or escaped with a backslash are literal content.
 func HasUnsafeShellOperator(command string) bool {
 	_, unsafe := commandSegments(command)
 	return unsafe
 }
 
+type commandSegment struct {
+	Command  string
+	Operator string
+}
+
 // commandSegments scans shell control syntax without trying to fully parse a
-// shell language. It only needs to distinguish active operators from literal
-// characters in quoted/escaped arguments, and split safe && / ; separators.
-func commandSegments(command string) ([]string, bool) {
-	segments := make([]string, 0, 2)
+// shell language. It distinguishes active operators from quoted/escaped
+// literals and preserves supported && / || / ; separators for auditing.
+func commandSegments(command string) ([]commandSegment, bool) {
+	segments := make([]commandSegment, 0, 2)
 	start := 0
 	var quote byte
 	escaped := false
-	appendSegment := func(end int) {
-		segments = append(segments, strings.TrimSpace(command[start:end]))
+	appendSegment := func(end int, operator string) bool {
+		segment := strings.TrimSpace(command[start:end])
+		if segment == "" {
+			return false
+		}
+		segments = append(segments, commandSegment{Command: segment, Operator: operator})
+		return true
 	}
 
 	for index := 0; index < len(command); index++ {
@@ -144,7 +180,17 @@ func commandSegments(command string) ([]string, bool) {
 			escaped = true
 		case '\'', '"':
 			quote = current
-		case '|', '<', '>', '`', '\n', '\r':
+		case '|':
+			if index+1 < len(command) && command[index+1] == '|' {
+				if !appendSegment(index, "||") {
+					return nil, true
+				}
+				index++
+				start = index + 1
+				continue
+			}
+			return nil, true
+		case '<', '>', '`', '\n', '\r':
 			return nil, true
 		case '$':
 			if index+1 < len(command) && command[index+1] == '(' {
@@ -152,18 +198,24 @@ func commandSegments(command string) ([]string, bool) {
 			}
 		case '&':
 			if index+1 < len(command) && command[index+1] == '&' {
-				appendSegment(index)
+				if !appendSegment(index, "&&") {
+					return nil, true
+				}
 				index++
 				start = index + 1
 				continue
 			}
 			return nil, true
 		case ';':
-			appendSegment(index)
+			if !appendSegment(index, ";") {
+				return nil, true
+			}
 			start = index + 1
 		}
 	}
-	appendSegment(len(command))
+	if quote != 0 || escaped || !appendSegment(len(command), "") {
+		return nil, true
+	}
 	return segments, false
 }
 
@@ -171,14 +223,16 @@ func autoAllowReadonlyEnabled(rules config.CommandRules) bool {
 	return rules.AutoAllowReadonly == nil || *rules.AutoAllowReadonly
 }
 
-// isReadonlyCommand reports whether every && / ; segment of the command is
+// isReadonlyCommand reports whether every supported compound segment is
 // read-only. A single non-read-only segment falls back to normal policy.
 func isReadonlyCommand(command string) bool {
-	for _, segment := range strings.Split(command, "&&") {
-		for _, part := range strings.Split(segment, ";") {
-			if !isReadonlySegment(part) {
-				return false
-			}
+	segments, unsafe := commandSegments(command)
+	if unsafe || len(segments) == 0 {
+		return false
+	}
+	for _, segment := range segments {
+		if !isReadonlySegment(segment.Command) {
+			return false
 		}
 	}
 	return true

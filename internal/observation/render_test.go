@@ -28,7 +28,7 @@ func TestActionColorUsesToolAndErrorOverride(t *testing.T) {
 }
 
 func TestEventStatusUsesSemanticMarkerAndColor(t *testing.T) {
-	confirmation := Event{Tool: "change_apply", Status: "waiting_confirmation"}
+	confirmation := Event{Tool: "execute", Status: "waiting_confirmation"}
 	if eventMarker(confirmation) != "?" || eventActionColor(confirmation, ansiGreen) != ansiYellow {
 		t.Fatalf("confirmation style marker=%q color=%q", eventMarker(confirmation), eventActionColor(confirmation, ansiGreen))
 	}
@@ -91,15 +91,15 @@ func TestHumanTextSummarizesErrorWithoutProtocolDiagnostics(t *testing.T) {
 func TestRenderTextShowsNestedFailureWithoutProtocolDiagnostics(t *testing.T) {
 	var output bytes.Buffer
 	if err := RenderText(&output, Event{
-		Tool:   "change_execute",
+		Tool:   "edit",
 		Type:   TypeToolCompleted,
-		Input:  []byte(`{"summary":"remove files"}`),
-		Output: []byte(`{"status":"ok","result":{"content":[{"type":"text","text":"{\"ok\":false,\"status\":\"error\",\"completed_at_ms\":0,\"remote_session_id\":\"rs_test\",\"request_id\":\"req_test\",\"error\":{\"code\":\"REVISION_REQUIRED\",\"message\":\"expected_sha256 required for delete\"}}"}]}}`),
+		Input:  []byte(`{"purpose":"update file"}`),
+		Output: []byte(`{"status":"ok","result":{"content":[{"type":"text","text":"{\"ok\":false,\"status\":\"error\",\"completed_at_ms\":0,\"remote_session_id\":\"rs_test\",\"request_id\":\"req_test\",\"error\":{\"code\":\"REVISION_REQUIRED\",\"message\":\"base_sha256 required for update\"}}"}]}}`),
 	}, false); err != nil {
 		t.Fatal(err)
 	}
 	text := output.String()
-	if !strings.Contains(text, "failed: REVISION_REQUIRED: expected_sha256 required for delete") {
+	if !strings.Contains(text, "failed: REVISION_REQUIRED: base_sha256 required for update") {
 		t.Fatalf("nested failure summary missing: %s", text)
 	}
 	for _, diagnostic := range []string{"completed_at_ms", "remote_session_id", "request_id"} {
@@ -456,7 +456,7 @@ func TestRenderTextShowsMarkdownFileDiff(t *testing.T) {
 	err := RenderText(&output, Event{
 		Type:    TypeFileChanged,
 		Summary: "update login flow",
-		Output:  []byte(`{"files":[{"path":"auth.go","operation":"update","diff":"--- a/auth.go\n+++ b/auth.go\n@@\n-old\n+new\n"}],"diff":{"resource_uri":"mcpx://changeset"}}`),
+		Output:  []byte(`{"results":[{"path":"auth.go","operation":"update","diff":"--- a/auth.go\n+++ b/auth.go\n@@\n-old\n+new\n"}]}`),
 	}, false)
 	if err != nil {
 		t.Fatal(err)
@@ -470,7 +470,7 @@ func TestRenderTextShowsMarkdownFileDiff(t *testing.T) {
 	if strings.Count(text, "auth.go") != 1 || strings.Contains(text, "--- a/auth.go") || strings.Contains(text, "@@") {
 		t.Fatalf("file diff should show one path without unified headers: %q", text)
 	}
-	if strings.Contains(text, "mcpx://changeset") || strings.Contains(text, "```diff") || strings.Contains(text, "status=") {
+	if strings.Contains(text, "```diff") || strings.Contains(text, "status=") {
 		t.Fatalf("file diff rendering=%q", text)
 	}
 }
@@ -480,18 +480,17 @@ func TestRenderTextShowsCleanEditResultsDiff(t *testing.T) {
 	err := RenderText(&output, Event{
 		Tool:    "edit",
 		Type:    TypeFileChanged,
-		Summary: "edit 3 files, 3 changed lines",
+		Summary: "edit 2 files, 2 changed lines",
 		Output: []byte(`{"edit_id":"edit_clean_1","results":[
 {"path":"created.txt","operation":"create","diff":"--- /dev/null\n+++ b/created.txt\n@@ -0,0 +1 @@\n+created\n"},
-{"path":"updated.txt","operation":"update","diff":"--- a/updated.txt\n+++ b/updated.txt\n@@ -1 +1 @@\n-old\n+new\n"},
-{"path":"deleted.txt","operation":"delete","diff":"--- a/deleted.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\n"}
+{"path":"updated.txt","operation":"update","diff":"--- a/updated.txt\n+++ b/updated.txt\n@@ -1 +1 @@\n-old\n+new\n"}
 ]}`),
 	}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"created.txt (create)", "updated.txt (update)", "deleted.txt (delete)", "  1 | +created", "  1 | -old", "  1 | -gone"} {
+	for _, want := range []string{"created.txt (create)", "updated.txt (update)", "  1 | +created", "  1 | -old"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("clean edit diff missing %q: %q", want, text)
 		}
@@ -508,7 +507,7 @@ func TestRenderTextTruncatesLargeFileDiff(t *testing.T) {
 	var output bytes.Buffer
 	if err := RenderText(&output, Event{
 		Type:   TypeFileChanged,
-		Output: []byte(`{"files":[{"path":"large.go","operation":"update","diff":"--- a/large.go\n+++ b/large.go\n@@\n-line-1\n+line-1\n-line-2\n+line-2\n-line-3\n+line-3\n-line-4\n+line-4\n-line-5\n+line-5\n"}]}`),
+		Output: []byte(`{"results":[{"path":"large.go","operation":"update","diff":"--- a/large.go\n+++ b/large.go\n@@\n-line-1\n+line-1\n-line-2\n+line-2\n-line-3\n+line-3\n-line-4\n+line-4\n-line-5\n+line-5\n"}]}`),
 	}, false); err != nil {
 		t.Fatal(err)
 	}
@@ -524,7 +523,7 @@ func TestRenderFileChangedKeepsFiveContextLinesAndDropsHeaders(t *testing.T) {
 		"-old\n+new\n" +
 		" after-1\n after-2\n after-3\n after-4\n after-5\n after-6\n"
 	var output bytes.Buffer
-	if err := RenderText(&output, Event{Type: TypeFileChanged, Output: []byte(`{"files":[{"path":"context.go","operation":"update","diff":` + strconv.Quote(diff) + `}]}`)}, false); err != nil {
+	if err := RenderText(&output, Event{Type: TypeFileChanged, Output: []byte(`{"results":[{"path":"context.go","operation":"update","diff":` + strconv.Quote(diff) + `}]}`)}, false); err != nil {
 		t.Fatal(err)
 	}
 	text := output.String()
@@ -539,7 +538,7 @@ func TestRenderFileChangedKeepsFiveContextLinesAndDropsHeaders(t *testing.T) {
 }
 
 func TestRenderFileChangedSupportsSummaryAndPreviewModes(t *testing.T) {
-	payload := []byte(`{"files":[{"path":"demo.go","operation":"update","diff":"--- a/demo.go\n+++ b/demo.go\n@@ -10 +20 @@\n-old\n+new\n"}]}`)
+	payload := []byte(`{"results":[{"path":"demo.go","operation":"update","diff":"--- a/demo.go\n+++ b/demo.go\n@@ -10 +20 @@\n-old\n+new\n"}]}`)
 	var summary bytes.Buffer
 	if err := renderFileChanged(&summary, Event{Type: TypeFileChanged, Output: payload}, renderOptions{diffMode: DiffModeSummary}); err != nil {
 		t.Fatal(err)
@@ -560,7 +559,7 @@ func TestRenderFileChangedSupportsSummaryAndPreviewModes(t *testing.T) {
 }
 
 func TestRenderFileChangedColorsCompactDiffStats(t *testing.T) {
-	payload := []byte(`{"files":[{"path":"demo.go","operation":"create","diff":"--- /dev/null\n+++ b/demo.go\n@@ -0,0 +1 @@\n+new\n"}]}`)
+	payload := []byte(`{"results":[{"path":"demo.go","operation":"create","diff":"--- /dev/null\n+++ b/demo.go\n@@ -0,0 +1 @@\n+new\n"}]}`)
 	var colored bytes.Buffer
 	if err := renderFileChanged(&colored, Event{Type: TypeFileChanged, Output: payload}, renderOptions{diffMode: DiffModeSummary, colorMode: ColorModeANSI16}); err != nil {
 		t.Fatal(err)

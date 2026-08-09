@@ -350,7 +350,6 @@ func renderSessionOpen(summary string, data map[string]any) (string, bool) {
 	}
 	appendSessionInventory(&builder, "Skills", data["skills"])
 	appendSessionInventory(&builder, "MCP servers", data["upstream_mcp"])
-	appendSessionInventory(&builder, "Active changesets", data["active_changesets"])
 	appendSessionInventory(&builder, "Pending confirmations", data["pending_confirmations"])
 	appendSessionInventory(&builder, "Tasks", data["tasks"])
 	appendSessionInventory(&builder, "Artifacts", data["artifacts"])
@@ -556,7 +555,7 @@ func renderArtifactRead(summary string, data map[string]any) (string, bool) {
 }
 
 func renderKnownCollection(summary string, data map[string]any) (string, bool) {
-	for _, key := range []string{"sessions", "artifacts", "changesets", "tasks", "confirmations", "events", "changes", "files", "tools", "documents", "capabilities", "skills", "upstream_mcp", "servers"} {
+	for _, key := range []string{"sessions", "artifacts", "tasks", "confirmations", "events", "changes", "files", "tools", "documents", "capabilities", "skills", "upstream_mcp", "servers"} {
 		value, exists := data[key]
 		if !exists {
 			continue
@@ -1095,7 +1094,6 @@ func humanCollectionTitle(key string) string {
 	return map[string]string{
 		"sessions":      "Remote sessions:",
 		"artifacts":     "Artifacts:",
-		"changesets":    "Changesets:",
 		"tasks":         "Tasks:",
 		"confirmations": "Confirmations:",
 		"events":        "Events:",
@@ -1112,7 +1110,7 @@ func humanCollectionTitle(key string) string {
 
 func humanCollectionItem(item map[string]any) string {
 	label := "item"
-	for _, key := range []string{"name", "id", "session_id", "plan_task_id", "execution_task_id", "artifact_id", "changeset_id", "path", "type", "summary"} {
+	for _, key := range []string{"name", "id", "session_id", "plan_task_id", "execution_task_id", "artifact_id", "path", "type", "summary"} {
 		if value := humanField(item, key); value != "" {
 			label = value
 			break

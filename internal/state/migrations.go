@@ -117,47 +117,8 @@ var migrations = []string{
     CREATE INDEX IF NOT EXISTS idx_remote_handoffs_expiry
         ON remote_session_handoffs(expires_at)
         WHERE consumed_at IS NULL AND revoked_at IS NULL;`,
-	`CREATE TABLE IF NOT EXISTS changesets (
-        id TEXT PRIMARY KEY,
-        remote_session_id TEXT NOT NULL,
-        created_by TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('draft','applied','reverted','failed')),
-        summary TEXT NOT NULL DEFAULT '',
-        digest TEXT NOT NULL,
-        source_changeset_id TEXT,
-        created_at INTEGER NOT NULL,
-        applied_at INTEGER,
-        FOREIGN KEY (remote_session_id) REFERENCES remote_sessions(id) ON DELETE CASCADE,
-        FOREIGN KEY (source_changeset_id) REFERENCES changesets(id)
-    );
-    CREATE TABLE IF NOT EXISTS changeset_files (
-        changeset_id TEXT NOT NULL,
-        ordinal INTEGER NOT NULL,
-        operation TEXT NOT NULL CHECK (operation IN ('update','create','rename','delete')),
-        path TEXT NOT NULL,
-        new_path TEXT NOT NULL DEFAULT '',
-        expected_sha256 TEXT NOT NULL DEFAULT '',
-        original_sha256 TEXT NOT NULL DEFAULT '',
-        proposed_sha256 TEXT NOT NULL DEFAULT '',
-        original_mode INTEGER NOT NULL DEFAULT 0,
-        original_content BLOB,
-        proposed_content BLOB,
-        PRIMARY KEY (changeset_id, ordinal),
-        FOREIGN KEY (changeset_id) REFERENCES changesets(id) ON DELETE CASCADE
-    );
-    CREATE TABLE IF NOT EXISTS change_journals (
-        id TEXT PRIMARY KEY,
-        changeset_id TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('applying','completed','rolled_back','failed')),
-        journal_json TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        FOREIGN KEY (changeset_id) REFERENCES changesets(id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_changesets_session_created
-        ON changesets(remote_session_id, created_at DESC, id DESC);`,
-	`CREATE UNIQUE INDEX IF NOT EXISTS idx_change_journals_once
-        ON change_journals(changeset_id);`,
+	`SELECT 1;`,
+	`SELECT 1;`,
 	`CREATE TABLE IF NOT EXISTS workspace_baselines (
         remote_session_id TEXT PRIMARY KEY,
         git_head TEXT NOT NULL DEFAULT '',
@@ -340,8 +301,7 @@ var migrations = []string{
 		ON file_snapshots(created_at, remote_session_id);
 	CREATE INDEX IF NOT EXISTS idx_environment_snapshots_retention
 		ON environment_snapshots(created_at, remote_session_id);`,
-	`ALTER TABLE changeset_files ADD COLUMN deleted_files INTEGER NOT NULL DEFAULT 0;
-	ALTER TABLE changeset_files ADD COLUMN deleted_directories INTEGER NOT NULL DEFAULT 0;`,
+	`SELECT 1;`,
 	`ALTER TABLE observation_events ADD COLUMN status TEXT NOT NULL DEFAULT '';
 	ALTER TABLE observation_events ADD COLUMN purpose TEXT NOT NULL DEFAULT '';
 	ALTER TABLE observation_events ADD COLUMN parent_operation_id TEXT NOT NULL DEFAULT '';
@@ -397,7 +357,7 @@ var migrations = []string{
 	CREATE INDEX IF NOT EXISTS idx_operations_retention
 		ON operations(state, expires_at, remote_session_id);`,
 	`ALTER TABLE observation_events ADD COLUMN step_id TEXT NOT NULL DEFAULT '';`,
-	`ALTER TABLE changesets ADD COLUMN discarded_at INTEGER;`,
+	`SELECT 1;`,
 	`CREATE TABLE IF NOT EXISTS clean_idempotency_records (
 		remote_session_id TEXT NOT NULL,
 		principal_id TEXT NOT NULL,
@@ -465,6 +425,9 @@ var migrations = []string{
 		ON delete_requests(remote_session_id, principal_id, idempotency_key);
 	CREATE INDEX IF NOT EXISTS idx_delete_requests_expiry
 		ON delete_requests(status, expires_at);`,
+	`DROP TABLE IF EXISTS change_journals;
+	DROP TABLE IF EXISTS changeset_files;
+	DROP TABLE IF EXISTS changesets;`,
 }
 
 func applyMigrations(ctx context.Context, db *sql.DB) error {

@@ -72,7 +72,7 @@ func TestMachineCapabilitiesPublishHardLimits(t *testing.T) {
 	if limits["edit"].(map[string]any)["max_changed_lines"] != edit.MaxChangedLines {
 		t.Fatalf("edit limits=%+v", limits["edit"])
 	}
-	moveOut := limits["move_out_prepare"].(map[string]any)
+	moveOut := limits["move_out"].(map[string]any)
 	if moveOut["max_targets"] != MaxMoveOutTargets || moveOut["max_response_preview_targets"] != MaxMoveOutResponsePreviewTargets || moveOut["max_manifest_entries"] != nil {
 		t.Fatalf("move-out limits=%+v", moveOut)
 	}

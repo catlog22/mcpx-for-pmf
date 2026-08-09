@@ -56,15 +56,14 @@ Runtime 边界内；所有有状态操作都绑定 `remote_session_id`，并通�
 ## 公开工具
 
 `tools/list` 是工具名称、描述、参数 Schema 和 Annotation 的唯一权威来源。
-当前公开工具共 19 个，分为 12 个 core tools 和 7 个 support tools：
+当前公开工具共 18 个，分为 11 个 core tools 和 7 个 support tools：
 
 | 领域 | 工具 | 主要用途 |
 | --- | --- | --- |
 | Core | `session` | open、attach、close Remote Session |
 | Core | `read` | 文件、搜索、列表、上下文和环境读取 |
 | Core | `edit` | 精确 replacement、批量编辑、原子写和格式保留；不提供删除 |
-| Core | `move_out_prepare` | 只读冻结明确文件/目录/symlink 的安全移出 manifest 与确认凭证 |
-| Core | `submit_move_out` | 提交用户已确认的冻结 manifest，将目标移入系统回收站（Windows Recycle Bin / macOS Trash / Linux Trash） |
+| Core | `move_out` | `action=prepare` 只读冻结安全移出 manifest；用户确认后 `action=submit` 将目标移入系统回收站 |
 | Core | `observe` | session、task、history、changes、logs、diff 观察 |
 | Core | `execute` | 命令或项目 Task 执行，以及 attach、stop、stdin |
 | Core | `plan` | create、read、advance、complete、block、replan、deliver |
@@ -382,10 +381,11 @@ curl -sS -m 5 \
 5. 后续 `session(action="open")` 或 `runtime_read` 传 `known_revisions`，已知版本未变化时
    直接复用本地缓存。
 
-每次重要调用都可以提供统一的语义上下文：`goal` 表示总体目标，`purpose` 表示本次
+每次重要调用通常可以提供统一的语义上下文：`goal` 表示总体目标，`purpose` 表示本次
 操作作用，`reasoning_summary` 表示可公开的简短判断依据，`progress_summary` 表示
 已验证进展，`next_step` 表示下一项具体计划；`plan_id`、`plan_task_id`、`execution_task_id`、`operation_id` 用于绑定执行上下文。
-`reasoning_summary` 不是隐藏思维链，不得写入私有推理过程。上述字段会原样进入 ARC
+例外是 `move_out(action="submit")`：其严格分支只接受 `action`、`remote_session_id`、`confirmation_uuid`，
+所有业务语义继续使用 prepare 时由服务端冻结的值。`reasoning_summary` 不是隐藏思维链，不得写入私有推理过程。上述字段会原样进入 ARC
 `structuredContent.context`、`_meta["mcpx.result"].mcpx.result.context` 和持久化观测事件。
 没有下一次工具调用、需要等待用户或发生阻塞时，直接在响应中说明状态和下一步。
 
@@ -445,7 +445,7 @@ read(view="file") → edit → observe(view="changes")
 ```
 
 `edit` 接收 `edits[]`，支持 create、update、rename；用户提出删除、移除或清理时必须使用专用的
-`move_out_prepare → submit_move_out` 流程，目标会安全移至操作系统回收站而非永久删除，update 优先使用
+`move_out(action="prepare") → 用户确认 → move_out(action="submit")` 流程，目标会安全移至操作系统回收站而非永久删除，update 优先使用
 精确唯一 `replacements`。同一请求带 `idempotency_key` 时，重试返回原终态，
 参数变化返回 `IDEMPOTENCY_CONFLICT`。默认只返回有界 diff 预览；需要完整内容时
 使用 `observe(view="diff", edit_id, offset, limit)` 分片读取。
@@ -455,20 +455,21 @@ read(view="file") → edit → observe(view="changes")
 32 步；`edit` 最多 1000 条真实变更行。`read(view="list", path=...)` 的 `path`
 是硬作用域。
 
-`edit` 只支持 create、update、rename；删除、移除或清理必须使用两阶段的
-`move_out_prepare → submit_move_out`，禁止通过 `execute`、shell、glob 或 symlink 绕过：
+`edit` 只支持 create、update、rename；删除、移除或清理必须使用同一个 `move_out` 工具的两阶段 action，
+禁止通过 `execute`、shell、glob 或 symlink 绕过：
 
-1. `move_out_prepare` 接收 Workspace 内明确的 `file`、`directory` 或 `symlink` 目标。它只校验
-   目录根路径，不扫描、哈希或返回目录子项；file 冻结 SHA，symlink 冻结链接文本摘要。响应只返回
+1. `move_out(action="prepare")` 接收 Workspace 内明确的 `file`、`directory` 或 `symlink` 目标。它严格只读，
+   只校验目录根路径，不扫描、哈希或返回目录子项；file 冻结 SHA，symlink 冻结链接文本摘要。响应只返回
    最多 20 个显式目标预览、总目标数和 manifest SHA，因此数万文件目录不会撑大模型上下文。
    `purpose` 必须先表达最终语义：仅检查就写“仅 prepare/仅预览”并停止；用户请求删除、移除或清理时
    则从 prepare 开始明确写“安全移至系统回收站”，不能在 submit 时临时改写语义。
 2. 服务端返回 `confirmation_uuid`、`move_request_id`、`manifest_sha256`、原始
-   `idempotency_key` 与 `expires_at` 供展示和审计；默认确认有效期为 30 分钟。
-   `submit_move_out_arguments` 只包含 `remote_session_id` 与 `confirmation_uuid` 两个提交参数。
-3. 网页端模型向用户展示冻结清单并询问；用户确认后，模型将
-   `submit_move_out_arguments` 原样提交给 `submit_move_out`。
-4. `submit_move_out` 按 UUID 从服务端取回并重新校验 Workspace 范围、manifest、文件 SHA、过期时间和
+   `idempotency_key` 与 `expires_at` 供展示和审计；默认确认有效期为 30 分钟。同时返回
+   `next_action.tool="move_out"`，其 arguments 只含 `action="submit"`、`remote_session_id` 和 `confirmation_uuid`。
+3. 网页端模型向用户展示冻结清单并询问；用户确认后，模型原样执行服务端返回的 `next_action`。
+   `move_out(action="submit")` 的 strict schema 不接受 `purpose`、`workspace`、`targets`、`idempotency_key`、
+   `manifest_sha256` 或其他 prepare 参数。
+4. `move_out(action="submit")` 按 UUID 从服务端取回并重新校验 Workspace 范围、manifest、文件 SHA、过期时间和
    purpose；客户端无法覆盖这些冻结值。明确的 `directory` 是整体移出根，不扫描其后代；`symlink`
    （包括目录确认后被替换的 symlink）只移动链接入口，绝不跟随目标。通过校验后目标进入当前操作系统的
    回收站：Windows 使用 Recycle Bin，macOS 使用 Finder Trash（必要时回退到用户 `~/.Trash`），Linux
@@ -478,9 +479,9 @@ read(view="file") → edit → observe(view="changes")
 
 安全移出能力支持明确指定的非空目录树和 symlink；目录内的 symlink、特殊文件不会阻断移动，也不会在
 prepare 时被逐项核验或回传，但
-absolute path、`..` 越界和中间 symlink 仍拒绝。`submit_move_out`
-在 MCP `tools/list` 中声明 `readOnlyHint=false`、`destructiveHint=true`、
-`idempotentHint=true` 和 `openWorldHint=false`。提交前仍执行注册 Workspace、显式目标、revision guard、
+absolute path、`..` 越界和中间 symlink 仍拒绝。`move_out` 在 MCP `tools/list` 中采用保守的顶层声明：
+`readOnlyHint=false`、`destructiveHint=true`、`idempotentHint=true`、`openWorldHint=false`；同时通过
+`mcpx/action_risk` 标明 `prepare` 为 read-only/non-destructive、`submit` 为 destructive。提交前仍执行注册 Workspace、显式目标、revision guard、
 目录不递归展开、symlink 不跟随、用户确认与持久化审计等安全约束；最终文件系统动作由平台回收站机制完成。
 
 示例：
@@ -518,6 +519,16 @@ absolute path、`..` 越界和中间 symlink 仍拒绝。`submit_move_out`
   "yield_time_ms": 10000
 }
 ```
+
+`execute` 支持用 `&&`、`||` 和 `;` 组合简单命令。服务端会在启动 shell **之前**解析全部 segment，逐段应用
+`deny` / `confirm` / `allow` 策略并记录结构化 `command_policy`；任一 segment 为 `deny` 时整条命令拒绝，
+任一 segment 为 `confirm` 时对整条冻结命令进行一次用户确认。只有全部 segment 通过，并且启用的
+preflight audit 成功写入后，原始 command 才会一次性交给 shell。管道、重定向、单个 `&`、换行、`$()`
+和反引号命令替换仍然拒绝。
+
+这里的“全部执行或拒绝”是**策略与审计入口的原子 gate**，不是文件系统事务或副作用回滚。shell 启动后仍保留
+原始条件语义：`a && b` 只在 `a` 成功后执行 `b`，`a || b` 只在 `a` 失败后执行 `b`；已经执行的 segment
+产生的副作用不会因后续 segment 失败而自动回滚。
 
 `execute(action="run")` 默认等待短命令完成；超过等待窗口时返回 `execution_task_id`。后续
 使用已知 ID：

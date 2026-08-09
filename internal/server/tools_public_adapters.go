@@ -69,26 +69,6 @@ func (r *Runtime) toolSession(ctx context.Context, req *mcp.CallToolRequest) (*m
 	}
 }
 
-// toolChange consolidates prepare/discard/apply/revert behind action.
-func (r *Runtime) toolChange(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	switch publicSelector(req, "action") {
-	case "prepare":
-		return r.toolChangePreparePublic(ctx, req)
-	case "discard":
-		return r.toolChangeDiscardPublic(ctx, req)
-	case "apply":
-		return r.toolChangeApply(ctx, req)
-	case "revert":
-		return r.toolChangeRevertPublic(ctx, req)
-	default:
-		envReq, _, remote, fail := r.changeRequest(ctx, req, false)
-		if fail != nil {
-			return fail, nil
-		}
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "bad_request", "action must be prepare, discard, apply, or revert")
-	}
-}
-
 // toolTask consolidates attach/stop/stdin behind action.
 func (r *Runtime) toolTask(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolTaskControl(ctx, publicDispatch(req, "operation", publicSelector(req, "action")))
@@ -145,7 +125,6 @@ func (r *Runtime) toolWorkspaceHistoryRead(ctx context.Context, req *mcp.CallToo
 		OperationIDs:     stringSlicePayload(envReq.Payload, "operation_ids"),
 		PlanTaskIDs:      append(stringSlicePayload(envReq.Payload, "plan_task_ids"), stringPayload(envReq.Payload, "plan_task_id")),
 		ExecutionTaskIDs: append(stringSlicePayload(envReq.Payload, "execution_task_ids"), stringPayload(envReq.Payload, "execution_task_id")),
-		ChangesetIDs:     stringSlicePayload(envReq.Payload, "changeset_ids"),
 		Keyword:          stringPayload(envReq.Payload, "keyword"),
 		Kinds:            stringSlicePayload(envReq.Payload, "kinds"),
 		Statuses:         stringSlicePayload(envReq.Payload, "statuses"),
@@ -280,37 +259,6 @@ func (r *Runtime) toolSourceRead(ctx context.Context, req *mcp.CallToolRequest) 
 		updates["mode"] = mode
 	}
 	return r.toolContextQueryUnified(ctx, forwardedRequest(req, updates))
-}
-
-func (r *Runtime) toolChangePreparePublic(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if apply, _ := mcpresult.Arguments(req)["apply"].(bool); apply {
-		return r.toolChangeExecute(ctx, req)
-	}
-	return r.toolChangeManage(ctx, publicDispatch(req, "action", "prepare"))
-}
-
-func (r *Runtime) toolChangeRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return r.toolChangeManage(ctx, publicDispatch(req, "action", publicSelector(req, "view")))
-}
-
-func (r *Runtime) toolChangeDiscardPublic(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return r.toolChangeManage(ctx, publicDispatch(req, "action", "discard"))
-}
-
-func (r *Runtime) toolChangeApply(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return r.toolChangeExecute(ctx, forwardedRequest(req, map[string]any{"apply": true}))
-}
-
-func (r *Runtime) toolChangeRevertPublic(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args := make(map[string]any, len(mcpresult.Arguments(req)))
-	for key, value := range mcpresult.Arguments(req) {
-		args[key] = value
-	}
-	changesetID, _ := args["changeset_id"].(string)
-	delete(args, "changeset_id")
-	args["revert_changeset_id"] = changesetID
-	args["apply"] = true
-	return r.toolChangeExecute(ctx, mcpresult.Request(args))
 }
 
 func (r *Runtime) toolCommandRun(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {

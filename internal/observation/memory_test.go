@@ -37,13 +37,13 @@ func TestQueryMemoryProjectsStableFieldsAndFiltersWorkspace(t *testing.T) {
 	secondAt := firstAt.Add(2 * time.Hour)
 	progressInput, _ := json.Marshal(map[string]any{
 		"summary": "完成项目初始化", "result_summary": "创建了核心模块",
-		"status": "completed", "next_step": "运行测试", "related_tool": "change_execute",
+		"status": "completed", "next_step": "运行测试", "related_tool": "edit",
 	})
 	progressOutput, _ := json.Marshal(map[string]any{
 		"status": "ok", "timing": map[string]any{"processing_ms": 999},
 		"result": map[string]any{
 			"summary": "完成项目初始化", "result_summary": "创建了核心模块",
-			"status": "completed", "next_step": "运行测试", "related_tool": "change_execute",
+			"status": "completed", "next_step": "运行测试", "related_tool": "edit",
 			"remote_session_id": "secret-session", "resource_uri": "mcpx://secret",
 		},
 	})
@@ -54,8 +54,8 @@ func TestQueryMemoryProjectsStableFieldsAndFiltersWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	fileOutput, _ := json.Marshal(map[string]any{
-		"changeset_id": "chg_1", "resource_uri": "mcpx://secret",
-		"files": []any{map[string]any{"path": "src/main.go", "operation": "create", "new_path": ""}},
+		"edit_id": "edit_1", "resource_uri": "mcpx://secret",
+		"results": []any{map[string]any{"path": "src/main.go", "operation": "create", "new_path": ""}},
 	})
 	if _, err := store.Append(context.Background(), Event{
 		Workspace: "demo", Type: TypeFileChanged, Output: fileOutput,

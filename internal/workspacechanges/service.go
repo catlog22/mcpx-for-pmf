@@ -3,6 +3,7 @@ package workspacechanges
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -85,7 +86,7 @@ func (s *Service) CaptureBaseline(ctx context.Context, remoteSessionID, workspac
 		return err
 	}
 	if len(roots) == 0 {
-		// File Changesets work independently of Git. A non-Git workspace simply
+		// MCPX edits work independently of Git. A non-Git workspace simply
 		// has no Git baseline to capture.
 		return nil
 	}
@@ -216,22 +217,34 @@ func (s *Service) baseline(ctx context.Context, remoteSessionID string) (string,
 }
 
 func (s *Service) mcpxPaths(ctx context.Context, remoteSessionID string) (map[string]bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT cf.path, cf.new_path FROM changeset_files cf
-        JOIN changesets c ON c.id = cf.changeset_id
-        WHERE c.remote_session_id = ? AND c.status IN ('applied','reverted')`, remoteSessionID)
+	rows, err := s.db.QueryContext(ctx, `SELECT result_json FROM clean_edit_records
+        WHERE remote_session_id = ? AND state = 'succeeded'`, remoteSessionID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	paths := map[string]bool{}
 	for rows.Next() {
-		var path, newPath string
-		if err := rows.Scan(&path, &newPath); err != nil {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
 			return nil, err
 		}
-		paths[path] = true
-		if newPath != "" {
-			paths[newPath] = true
+		var result struct {
+			Results []struct {
+				Path    string `json:"path"`
+				NewPath string `json:"new_path"`
+			} `json:"results"`
+		}
+		if err := json.Unmarshal([]byte(raw), &result); err != nil {
+			return nil, fmt.Errorf("decode clean edit record: %w", err)
+		}
+		for _, item := range result.Results {
+			if item.Path != "" {
+				paths[item.Path] = true
+			}
+			if item.NewPath != "" {
+				paths[item.NewPath] = true
+			}
 		}
 	}
 	return paths, rows.Err()

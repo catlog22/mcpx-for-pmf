@@ -261,10 +261,10 @@ func usesBooleanConfirmation(data any) bool {
 
 func classifyError(status Status, code string) (category string, retryable bool, retryHint string) {
 	if code == "CONFIRMATION_REQUIRED" {
-		return "confirmation", true, "Ask the user to confirm the frozen manifest in the web conversation, then retry submit_move_out with the confirmation_uuid returned by move_out_prepare."
+		return "confirmation", true, "Ask the user to confirm the frozen manifest in the web conversation, then call move_out(action=submit) with the confirmation_uuid returned by move_out(action=prepare)."
 	}
 	if code == "CONFIRMATION_MISMATCH" {
-		return "conflict", false, "Use the confirmation_uuid returned by move_out_prepare for this move-out request; do not create a new UUID."
+		return "conflict", false, "Use the confirmation_uuid returned by move_out(action=prepare) for this move-out request; do not create a new UUID."
 	}
 	if status == StatusNeedConfirmation || strings.Contains(code, "CONFIRMATION") {
 		return "confirmation", true, "Ask the user for explicit confirmation, then retry the original tool with the same business arguments and confirmation_token."
@@ -296,7 +296,7 @@ func classifyError(status Status, code string) (category string, retryable bool,
 		return "validation", false, "Reduce the request to the advertised limit and retry."
 	}
 	if code == "MOVE_OUT_IN_PROGRESS" {
-		return "runtime", true, "Wait for the current submit_move_out request, then retry with the same confirmation_uuid."
+		return "runtime", true, "Wait for the current move_out(action=submit) request, then retry with the same confirmation_uuid."
 	}
 	if code == "FILE_TOO_LARGE" {
 		return "capacity", false, "Use a bounded window read, or reduce the requested full-read source size."

@@ -9,7 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcpx/internal/auth"
 	"mcpx/internal/envelope"
+	"mcpx/internal/remotesession"
 )
 
 const (
@@ -169,4 +173,36 @@ func withOperationChild(ctx context.Context) context.Context {
 func isOperationChild(ctx context.Context) bool {
 	value, _ := ctx.Value(operationChildKey{}).(bool)
 	return value
+}
+
+// changeRequest resolves the authenticated remote session for tools that need
+// workspace-scoped access. The edit flag requires an explicit purpose and an
+// owner/editor role; read-only callers can pass false.
+func (r *Runtime) changeRequest(ctx context.Context, req *mcp.CallToolRequest, edit bool) (envelope.Request, auth.Principal, remotesession.Session, *mcp.CallToolResult) {
+	envReq, principal, fail := r.remoteRequest(ctx, req)
+	if fail != nil {
+		return envReq, principal, remotesession.Session{}, fail
+	}
+	if edit {
+		if err := validatePurpose(envReq.Intent); err != nil {
+			response := envelope.Fail(envelope.StatusError, envReq.RequestID, envReq.Workspace, nil, "PURPOSE_REQUIRED", err.Error())
+			result, _ := r.resultJSON(response)
+			return envReq, principal, remotesession.Session{}, result
+		}
+	}
+	remoteSessionID, err := requireRemoteSessionID(envReq)
+	if err != nil {
+		result, _ := r.remoteError(envReq, "", "", err)
+		return envReq, principal, remotesession.Session{}, result
+	}
+	session, err := r.remote.Get(ctx, principal, remoteSessionID)
+	if err != nil {
+		result, _ := r.remoteError(envReq, remoteSessionID, "", err)
+		return envReq, principal, remotesession.Session{}, result
+	}
+	if edit && session.Role != "owner" && session.Role != "editor" {
+		result, _ := r.remoteError(envReq, remoteSessionID, session.WorkspaceName, remotesession.ErrForbidden)
+		return envReq, principal, remotesession.Session{}, result
+	}
+	return envReq, principal, session, nil
 }

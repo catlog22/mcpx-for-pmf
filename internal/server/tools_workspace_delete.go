@@ -21,6 +21,7 @@ import (
 	"mcpx/internal/deletion"
 	"mcpx/internal/envelope"
 	"mcpx/internal/file"
+	"mcpx/internal/mcpresult"
 	"mcpx/internal/observation"
 	"mcpx/internal/remotesession"
 	"mcpx/internal/security"
@@ -50,14 +51,32 @@ var workspaceMoveOutSafetyMeta = mcp.Meta{
 	},
 }
 
-var workspaceMoveOutPrepareAnnotation = toolAnnotation{
-	ReadOnly: true, Destructive: false, Idempotent: true, OpenWorld: false,
-	Title: "冻结 Workspace 文件/目录安全移出清单（不执行移动）", Meta: workspaceMoveOutSafetyMeta,
+var workspaceMoveOutToolAnnotation = toolAnnotation{
+	ReadOnly: false, Destructive: true, Idempotent: true, OpenWorld: false,
+	Title: "Workspace 安全移出", Meta: mcp.Meta{
+		"mcpx/safety":                  workspaceMoveOutSafetyMeta["mcpx/safety"],
+		"mcpx/strict_action_arguments": []string{"submit"},
+		"mcpx/action_risk": map[string]any{
+			"prepare": riskDescriptor(true, false, true, false, "workspace_move_out_manifest_prepare"),
+			"submit":  riskDescriptor(false, true, true, false, "workspace_move_out_manifest_submit"),
+		},
+	},
 }
 
-var workspaceMoveOutCommitAnnotation = toolAnnotation{
-	ReadOnly: false, Destructive: true, Idempotent: true, OpenWorld: false,
-	Title: "提交用户已确认的 Workspace 文件/目录安全移出", Meta: workspaceMoveOutSafetyMeta,
+func (r *Runtime) toolMoveOut(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	action, _ := mcpresult.Arguments(req)["action"].(string)
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "prepare":
+		return r.toolWorkspaceMoveOutPrepare(ctx, req)
+	case "submit":
+		return r.toolWorkspaceMoveOutCommit(ctx, req)
+	default:
+		envReq, _, session, fail := r.changeRequest(ctx, req, false)
+		if fail != nil {
+			return fail, nil
+		}
+		return r.moveOutError(envReq, session, "INVALID_REQUEST", "action must be prepare or submit", map[string]any{"field": "action"})
+	}
 }
 
 func (r *Runtime) toolWorkspaceMoveOutPrepare(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -117,7 +136,7 @@ func (r *Runtime) toolWorkspaceMoveOutPrepare(ctx context.Context, req *mcp.Call
 	}
 	preview, truncated := moveOutTargetPreview(manifest.Targets)
 	_ = r.remote.AddEvent(ctx, principal, remotesession.Event{RemoteSessionID: session.ID, Type: "workspace.move_out.prepared", Summary: fmt.Sprintf("freeze %d explicit move-out target(s)", len(manifest.Targets)), Metadata: map[string]any{"manifest_sha256": manifestSHA, "target_count": len(manifest.Targets), "directory_contents_enumerated": false}})
-	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: session.ID, Workspace: session.WorkspaceName, Tool: "move_out_prepare", Status: "prepared", Detail: map[string]any{"move_request_id": item.ID, "manifest_sha256": manifestSHA, "target_count": len(manifest.Targets), "target_preview": preview, "target_preview_truncated": truncated, "directory_contents_enumerated": false, "purpose": envReq.Purpose}})
+	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: session.ID, Workspace: session.WorkspaceName, Tool: "move_out", Status: "prepared", Detail: map[string]any{"action": "prepare", "move_request_id": item.ID, "manifest_sha256": manifestSHA, "target_count": len(manifest.Targets), "target_preview": preview, "target_preview_truncated": truncated, "directory_contents_enumerated": false, "purpose": envReq.Purpose}})
 	return r.moveOutPrepareResult(envReq, session, item, false)
 }
 
@@ -131,7 +150,7 @@ func (r *Runtime) toolWorkspaceMoveOutCommit(ctx context.Context, req *mcp.CallT
 	}
 	confirmationUUID := strings.TrimSpace(stringPayload(envReq.Payload, "confirmation_uuid"))
 	if confirmationUUID == "" {
-		return r.moveOutError(envReq, session, "CONFIRMATION_REQUIRED", "confirmation_uuid from move_out_prepare is required after the web client obtains user confirmation", map[string]any{"field": "confirmation_uuid", "requires_user_confirmation": true})
+		return r.moveOutError(envReq, session, "CONFIRMATION_REQUIRED", "confirmation_uuid from move_out(action=prepare) is required after the web client obtains user confirmation", map[string]any{"field": "confirmation_uuid", "requires_user_confirmation": true})
 	}
 	item, err := r.deletions.Get(ctx, confirmationUUID)
 	if err != nil {
@@ -141,7 +160,7 @@ func (r *Runtime) toolWorkspaceMoveOutCommit(ctx context.Context, req *mcp.CallT
 		return r.moveOutError(envReq, session, "MOVE_OUT_MANIFEST_MISMATCH", "confirmation_uuid is not bound to this remote session and workspace", map[string]any{"move_request_id": item.ID})
 	}
 	if previewOnlyMoveOutPurpose(item.Purpose) {
-		return r.moveOutError(envReq, session, "MOVE_OUT_PURPOSE_MISMATCH", "a preview-only move_out_prepare purpose cannot be submitted for moving; prepare a new manifest with the actual move-out intent", map[string]any{"move_request_id": item.ID, "prepare_purpose": item.Purpose, "recovery": "prepare again with a purpose that describes the actual move-out"})
+		return r.moveOutError(envReq, session, "MOVE_OUT_PURPOSE_MISMATCH", "a preview-only move_out(action=prepare) purpose cannot be submitted for moving; prepare a new manifest with the actual move-out intent", map[string]any{"move_request_id": item.ID, "prepare_purpose": item.Purpose, "recovery": "prepare again with a purpose that describes the actual move-out"})
 	}
 	if confirmationUUID != item.ID || item.ConfirmationUUIDHash == "" || deletion.HashConfirmationUUID(confirmationUUID) != item.ConfirmationUUIDHash {
 		return r.moveOutError(envReq, session, "CONFIRMATION_MISMATCH", "confirmation_uuid is not the server-issued credential for this move-out request", map[string]any{"move_request_id": item.ID, "manifest_sha256": item.ManifestSHA256})
@@ -180,7 +199,7 @@ func (r *Runtime) toolWorkspaceMoveOutCommit(ctx context.Context, req *mcp.CallT
 		return r.moveOutError(envReq, session, "MOVE_OUT_STATE_IN_DOUBT", completeErr.Error(), map[string]any{"move_request_id": item.ID, "manifest_sha256": item.ManifestSHA256})
 	}
 	result.IdempotentReplay = false
-	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: session.ID, Workspace: session.WorkspaceName, Tool: "submit_move_out", Status: status, Detail: map[string]any{"move_request_id": item.ID, "manifest_sha256": item.ManifestSHA256, "confirmation_uuid_hash": item.ConfirmationUUIDHash, "idempotency_key": item.IdempotencyKey, "target_count": len(result.Targets), "target_preview": moveOutTargetResultPreviewData(result.Targets), "moved_count": result.MovedCount, "failed_count": result.FailedCount, "idempotent_replay": result.IdempotentReplay, "audit_event_id": result.AuditEventID}})
+	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: session.ID, Workspace: session.WorkspaceName, Tool: "move_out", Status: status, Detail: map[string]any{"action": "submit", "move_request_id": item.ID, "manifest_sha256": item.ManifestSHA256, "confirmation_uuid_hash": item.ConfirmationUUIDHash, "idempotency_key": item.IdempotencyKey, "target_count": len(result.Targets), "target_preview": moveOutTargetResultPreviewData(result.Targets), "moved_count": result.MovedCount, "failed_count": result.FailedCount, "idempotent_replay": result.IdempotentReplay, "audit_event_id": result.AuditEventID}})
 	return r.remoteResult(envReq, session.ID, session.WorkspaceName, moveOutCommitResponseData(result))
 }
 
@@ -438,16 +457,20 @@ func (r *Runtime) observeWorkspaceMoveOut(ctx context.Context, envReq envelope.R
 		return
 	}
 	payload, _ := json.Marshal(moveOutCommitResponseData(result))
-	_ = r.observation.Record(ctx, observation.Event{Workspace: session.WorkspaceName, RemoteSessionID: session.ID, RequestID: envReq.RequestID, CallID: observationCallID(envReq), Tool: "submit_move_out", Type: observation.TypeFileChanged, Status: result.Status, Purpose: envReq.Purpose, Intent: envReq.Intent, Output: payload, Summary: fmt.Sprintf("moved %d explicit target(s) to managed quarantine", result.MovedCount)})
+	_ = r.observation.Record(ctx, observation.Event{Workspace: session.WorkspaceName, RemoteSessionID: session.ID, RequestID: envReq.RequestID, CallID: observationCallID(envReq), Tool: "move_out", Type: observation.TypeFileChanged, Status: result.Status, Purpose: envReq.Purpose, Intent: envReq.Intent, Output: payload, Summary: fmt.Sprintf("moved %d explicit target(s) to managed quarantine", result.MovedCount)})
 }
 
 func (r *Runtime) moveOutPrepareResult(envReq envelope.Request, session remotesession.Session, item deletion.Request, replay bool) (*mcp.CallToolResult, error) {
-	submitArguments := map[string]any{
-		"remote_session_id": session.ID,
-		"confirmation_uuid": item.ID,
+	nextAction := map[string]any{
+		"tool": "move_out",
+		"arguments": map[string]any{
+			"action":            "submit",
+			"remote_session_id": session.ID,
+			"confirmation_uuid": item.ID,
+		},
 	}
 	data := map[string]any{
-		"summary":                       "安全移出清单已冻结；网页端模型向用户确认后仅提交 remote_session_id 与 confirmation_uuid",
+		"summary":                       "安全移出清单已冻结；网页端模型向用户确认后调用 move_out(action=submit)",
 		"move_request_id":               item.ID,
 		"confirmation_uuid":             item.ID,
 		"manifest_sha256":               item.ManifestSHA256,
@@ -466,7 +489,7 @@ func (r *Runtime) moveOutPrepareResult(envReq envelope.Request, session remotese
 		"expires_at":                    item.ExpiresAt.Format(time.RFC3339Nano),
 		"requires_user_confirmation":    true,
 		"approval_surface":              "web_model_user_question",
-		"submit_move_out_arguments":     submitArguments,
+		"next_action":                   nextAction,
 		"filesystem_mutated":            false,
 	}
 	if replay {

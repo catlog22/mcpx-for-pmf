@@ -11,10 +11,10 @@ func TestQueryPrioritizesImplementationFilesForImplementationIntent(t *testing.T
 	root := t.TempDir()
 	files := map[string]string{
 		"internal/server/tools_command_execute.go":      "command_execute default wait 10 seconds and task implementation\n",
-		"internal/server/tools_change_execute.go":       "change_execute atomic apply and verify implementation\n",
+		"internal/server/tools_edit.go":                 "edit atomic apply implementation\n",
 		"internal/server/tools_command_execute_test.go": "command_execute implementation test\n",
-		"README.md":                       "command_execute change_execute default wait atomic implementation\n",
-		"docs/plans/command-execution.md": "command_execute change_execute default wait atomic implementation\n",
+		"README.md":                       "command_execute edit default wait atomic implementation\n",
+		"docs/plans/command-execution.md": "command_execute edit default wait atomic implementation\n",
 	}
 	for name, content := range files {
 		path := filepath.Join(root, filepath.FromSlash(name))
@@ -26,7 +26,7 @@ func TestQueryPrioritizesImplementationFilesForImplementationIntent(t *testing.T
 		}
 	}
 
-	result, err := QueryPage(root, "检查 command_execute 默认等待 10 秒和 change_execute 原子实现", nil, 3, 0, 0, 1<<20, "", nil)
+	result, err := QueryPage(root, "检查 command_execute 默认等待 10 秒和 edit 原子实现", nil, 3, 0, 0, 1<<20, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +34,7 @@ func TestQueryPrioritizesImplementationFilesForImplementationIntent(t *testing.T
 	if !ok || len(filesResult) != 3 {
 		t.Fatalf("unexpected query result: %+v", result)
 	}
-	if filesResult[0]["path"] != "internal/server/tools_change_execute.go" || filesResult[1]["path"] != "internal/server/tools_command_execute.go" {
+	if filesResult[0]["path"] != "internal/server/tools_command_execute.go" || filesResult[1]["path"] != "internal/server/tools_edit.go" {
 		t.Fatalf("implementation files were not prioritized: %+v", filesResult)
 	}
 	for _, item := range filesResult {
@@ -43,7 +43,7 @@ func TestQueryPrioritizesImplementationFilesForImplementationIntent(t *testing.T
 		}
 	}
 
-	scoped, err := QueryPage(root, "command_execute implementation", []string{"internal/server"}, 10, 0, 0, 1<<20, "", nil)
+	scoped, err := QueryPage(root, "implementation", []string{"internal/server"}, 10, 0, 0, 1<<20, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestQueryPrioritizesImplementationFilesForImplementationIntent(t *testing.T
 		}
 	}
 
-	goScoped, err := QueryPage(root, "command_execute implementation", []string{"internal/server"}, 10, 0, 0, 1<<20, "", func(path string) bool {
+	goScoped, err := QueryPage(root, "implementation", []string{"internal/server"}, 10, 0, 0, 1<<20, "", func(path string) bool {
 		matched, matchErr := MatchGlob("**/*.go", path)
 		return matchErr == nil && matched
 	})

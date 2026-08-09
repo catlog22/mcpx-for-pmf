@@ -346,7 +346,7 @@ func memoryFileChanges(result map[string]any) []MemoryFileChange {
 	if result == nil {
 		return nil
 	}
-	values, _ := result["files"].([]any)
+	values, _ := result["results"].([]any)
 	files := make([]MemoryFileChange, 0, len(values))
 	for _, value := range values {
 		object, _ := value.(map[string]any)

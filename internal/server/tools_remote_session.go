@@ -206,9 +206,6 @@ func (r *Runtime) toolRemoteSessionGet(ctx context.Context, req *mcp.CallToolReq
 	if tasks, taskErr := r.tasks.List(session.ID, 20); taskErr == nil {
 		data["tasks"] = tasks
 	}
-	if history, historyErr := r.changesets.History(ctx, session.ID, 10); historyErr == nil {
-		data["recent_changesets"] = history
-	}
 	if session.Role == "owner" || session.Role == "approver" {
 		data["pending_confirmations"] = pendingConfirmationItems(r.approvals.ListRemoteSession(session.ID))
 	}

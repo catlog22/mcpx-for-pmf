@@ -63,21 +63,6 @@ func (r *Runtime) toolSessionManage(ctx context.Context, req *mcp.CallToolReques
 	}
 }
 
-func (r *Runtime) toolChangeManage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	switch toolAction(req) {
-	case "prepare":
-		return r.toolChangePrepare(ctx, req)
-	case "diff":
-		return r.toolChangeDiff(ctx, req)
-	case "history":
-		return r.toolChangeHistory(ctx, req)
-	case "discard":
-		return r.toolChangeDiscard(ctx, req)
-	default:
-		return r.invalidAction(ctx, req, "change_manage", toolAction(req))
-	}
-}
-
 func (r *Runtime) toolRuntimeInspect(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	switch toolAction(req) {
 	case "capabilities":

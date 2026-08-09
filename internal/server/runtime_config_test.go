@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"mcpx/internal/config"
 )
@@ -54,23 +53,6 @@ func TestEffectiveConfigRecoversAfterCachedProjectParseError(t *testing.T) {
 	}
 	if got := runtime.effectiveConfig(workspace); !got.Terminal.Enabled {
 		t.Fatal("fixed project config did not invalidate cached parse error")
-	}
-}
-
-func TestFindChangeExecuteRequestPrunesExpiredEntries(t *testing.T) {
-	runtime := &Runtime{changeExecuteRequests: map[string]changeExecuteRequest{
-		"expired": {changesetID: "old", createdAt: time.Now().UTC().Add(-changeExecuteRequestTTL - time.Minute)},
-		"live":    {changesetID: "new", createdAt: time.Now().UTC()},
-	}}
-
-	if got, ok := runtime.findChangeExecuteRequest("expired"); ok || got != "" {
-		t.Fatalf("expired request returned got=%q ok=%v", got, ok)
-	}
-	if got, ok := runtime.findChangeExecuteRequest("live"); !ok || got != "new" {
-		t.Fatalf("live request missing got=%q ok=%v", got, ok)
-	}
-	if _, ok := runtime.changeExecuteRequests["expired"]; ok {
-		t.Fatal("expired request was not pruned")
 	}
 }
 

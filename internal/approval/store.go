@@ -26,8 +26,6 @@ type Pending struct {
 	Workspace         string
 	RemoteSessionID   string
 	PrincipalID       string
-	ChangesetID       string
-	ChangesetDigest   string
 	ConfirmationToken string
 	ContentKey        string
 	DeleteFiles       []DeleteFile `json:"delete_files,omitempty"`
@@ -72,11 +70,6 @@ func contentKey(p Pending) string {
 		// command itself. Binding to purpose alone turns a user confirmation
 		// into an unrecoverable token-mismatch loop.
 		return strings.Join([]string{p.PrincipalID, p.Command, p.Scope}, "\x00")
-	case "change_execute", "change_apply":
-		if p.ChangesetID == "" || p.ChangesetDigest == "" {
-			return ""
-		}
-		return strings.Join([]string{p.PrincipalID, p.ChangesetID, p.ChangesetDigest}, "\x00")
 	case "edit_delete":
 		return p.ContentKey
 	default:

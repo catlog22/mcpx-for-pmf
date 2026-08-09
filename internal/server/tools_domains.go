@@ -8,7 +8,7 @@ package server
 // --------------------|--------------------------------------|---------------------------
 // session             | session                              | tools_public_adapters.go, tools_session_open.go, tools_remote_session.go
 // source              | read                                 | tools_read.go, tools_source_unified.go
-// edit                | edit, move_out_prepare, submit_move_out | tools_edit.go, tools_workspace_delete.go
+// edit                | edit, move_out                       | tools_edit.go, tools_workspace_delete.go
 // command / task      | execute, observe                     | tools_execute.go, tools_command_execute.go, tools_observe.go
 // plan                | plan                                 | tools_plan_clean.go, tools_plan.go
 // operation           | operation_batch, operation_manage    | tools_operation.go, operation_runtime.go

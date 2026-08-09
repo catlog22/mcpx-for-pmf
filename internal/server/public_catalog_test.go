@@ -17,7 +17,7 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	runtime.registerTools(protocol)
 
 	want := []string{
-		"session", "read", "edit", "move_out_prepare", "submit_move_out", "observe",
+		"session", "read", "edit", "move_out", "observe",
 		"operation_batch", "operation_manage",
 		"execute", "plan", "artifact", "discover", "skill_call", "mcp_call",
 		"runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide",
@@ -31,7 +31,7 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("public tool catalog = %v, want %v", got, want)
 	}
-	for _, legacy := range []string{"change", "change_read", "command_run", "command_execute", "task_read", "task", "plan_read", "extension_discover", "artifact_read"} {
+	for _, legacy := range []string{"change", "change_read", "change_prepare", "change_execute", "change_manage", "move_out_prepare", "submit_move_out", "command_run", "command_execute", "task_read", "task", "plan_read", "extension_discover", "artifact_read"} {
 		if runtime.toolHandlers[legacy] != nil {
 			t.Fatalf("legacy handler %q must not be dispatchable", legacy)
 		}
@@ -91,7 +91,7 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	if safety["scope"] != "registered_workspace_root" || safety["approval"] == "host_user_approval_required" {
 		t.Fatalf("edit safety metadata is incomplete: %+v", safety)
 	}
-	if !strings.Contains(editTool.Description, "不提供文件删除") || !strings.Contains(editTool.Description, "move_out_prepare") {
+	if !strings.Contains(editTool.Description, "不提供文件删除") || !strings.Contains(editTool.Description, "move_out") {
 		t.Fatalf("edit description must explain the removal boundary: %s", editTool.Description)
 	}
 	var editSchema map[string]any
@@ -110,12 +110,21 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 			t.Fatalf("edit item missing %q: %s", field, mcpresult.ToolSchemaJSON(editTool))
 		}
 	}
-	moveOutTool := runtime.listedToolMap()["submit_move_out"]
+	moveOutTool := runtime.listedToolMap()["move_out"]
 	if moveOutTool.Annotations == nil || moveOutTool.Annotations.ReadOnlyHint || moveOutTool.Annotations.DestructiveHint == nil || !*moveOutTool.Annotations.DestructiveHint || !moveOutTool.Annotations.IdempotentHint || moveOutTool.Annotations.OpenWorldHint == nil || *moveOutTool.Annotations.OpenWorldHint {
-		t.Fatalf("submit_move_out annotations=%+v", moveOutTool.Annotations)
+		t.Fatalf("move_out annotations=%+v", moveOutTool.Annotations)
 	}
 	if safety := toolSafetyMetadata(map[string]any{"_meta": moveOutTool.Meta}); safety["approval"] != "web_model_user_confirmation_required" || safety["filesystem_only"] != true || safety["registered_workspace"] != true || safety["confirmation_credential"] != "server_generated_confirmation_uuid" || safety["no_symlink_following"] != true || safety["symlink_entry_move"] != true || safety["reversible"] != true {
-		t.Fatalf("submit_move_out safety metadata=%+v", safety)
+		t.Fatalf("move_out safety metadata=%+v", safety)
+	}
+	moveOutRisk, _ := moveOutTool.Meta["mcpx/action_risk"].(map[string]any)
+	prepareRisk, _ := moveOutRisk["prepare"].(map[string]any)
+	submitRisk, _ := moveOutRisk["submit"].(map[string]any)
+	if prepareRisk["read_only"] != true || prepareRisk["destructive"] != false || prepareRisk["open_world"] != false {
+		t.Fatalf("move_out prepare risk=%+v", prepareRisk)
+	}
+	if submitRisk["read_only"] != false || submitRisk["destructive"] != true || submitRisk["open_world"] != false {
+		t.Fatalf("move_out submit risk=%+v", submitRisk)
 	}
 	for toolName, actions := range map[string][]string{
 		"plan":     {"create", "read", "advance", "complete", "block", "replan", "deliver"},
@@ -144,12 +153,12 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	observeProperties, _ := observeSchema["properties"].(map[string]any)
-	for _, field := range []string{"workspace", "view", "event_ids", "request_ids", "operation_ids", "plan_task_ids", "execution_task_ids", "plan_task_id", "execution_task_id", "changeset_ids", "keyword", "kinds", "statuses", "created_after", "created_before"} {
+	for _, field := range []string{"workspace", "view", "event_ids", "request_ids", "operation_ids", "plan_task_ids", "execution_task_ids", "plan_task_id", "execution_task_id", "edit_id", "keyword", "kinds", "statuses", "created_after", "created_before"} {
 		if observeProperties[field] == nil {
 			t.Fatalf("observe history schema missing %q: %s", field, mcpresult.ToolSchemaJSON(observeTool))
 		}
 	}
-	if observeProperties["room_id"] != nil || observeProperties["task_id"] != nil || observeProperties["task_ids"] != nil {
+	if observeProperties["room_id"] != nil || observeProperties["task_id"] != nil || observeProperties["task_ids"] != nil || observeProperties["changeset_ids"] != nil {
 		t.Fatalf("observe schema exposes removed fields: %s", mcpresult.ToolSchemaJSON(observeTool))
 	}
 	for _, toolName := range []string{"plan", "execute"} {

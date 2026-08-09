@@ -54,11 +54,11 @@ func actionColor(tool string, failed bool) string {
 		return ansiCyan
 	case "file_read":
 		return ansiBlue
-	case "edit", "change_execute", "change_apply", "change_revert", "file.changed":
+	case "edit", "file.changed":
 		return ansiGreen
-	case "observe", "change_read", "runtime_read":
+	case "observe", "runtime_read":
 		return ansiCyan
-	case "plan", "change_prepare":
+	case "plan":
 		return ansiYellow
 	case "session", "session_open", "workspace_list", "session.lifecycle", "mcp_call":
 		return ansiMagenta

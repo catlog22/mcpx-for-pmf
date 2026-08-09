@@ -165,7 +165,7 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"additionalProperties": false,
 		"properties": map[string]any{
 			"path":        path,
-			"operation":   enumSchema("文件操作；用户提出删除、移除或清理时请使用 move_out_prepare/submit_move_out", "create", "update", "rename"),
+			"operation":   enumSchema("文件操作；用户提出删除、移除或清理时请使用 move_out(action=prepare)，确认后再 move_out(action=submit)", "create", "update", "rename"),
 			"base_sha256": stringSchema("读取时获得的文件 sha256"),
 			"content":     stringSchema("新文件的完整内容"),
 			"new_path":    stringSchema("rename 的目标路径"),
@@ -202,17 +202,29 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 	moveOutTargets := arraySchema(moveOutTarget, "明确的文件、目录或 symlink 安全移出清单；directory 原子移出当前目录树，symlink 只移出链接入口且不跟随目标")
 	moveOutTargets["minItems"] = 1
 	moveOutTargets["maxItems"] = moveOutRequestMaxTargets
-	r.addTool(s, cleanCoreTool("move_out_prepare", "冻结已注册 Workspace 内的明确文件、目录或 symlink 安全移出清单；只读，不执行移动，返回不可变 manifest_sha256 和服务端生成的 confirmation_uuid。directory 是显式移出根：prepare 只校验根路径，不扫描、哈希或返回子树；提交时通过受 Root 约束的原子 rename 移至 Workspace 同级服务端隔离区。symlink 只移动链接入口，绝不跟随目标。响应最多返回 20 个显式目标预览。网页端模型必须先向用户展示清单并询问，确认后再提交。禁止 shell、glob 和中间 symlink 越界。", map[string]any{
+	moveOutCommon := map[string]any{
 		"remote_session_id": remoteSession,
-		"workspace":         workspace,
-		"purpose":           stringSchema("向用户展示的安全移出目的；删除/移除/清理请求也必须准确描述为移至隔离区"),
-		"targets":           moveOutTargets,
-		"idempotency_key":   stringSchema("同一安全移出准备请求重试时复用；不同清单必须使用新 key"),
-	}, []string{"remote_session_id", "workspace", "purpose", "targets", "idempotency_key"}, workspaceMoveOutPrepareAnnotation), r.toolWorkspaceMoveOutPrepare)
-	r.addTool(s, cleanCoreTool("submit_move_out", "提交网页端模型已向用户询问并确认的、已冻结 manifest 中的 Workspace 文件、目录或 symlink 安全移出；只接受 remote_session_id 和 move_out_prepare 返回的 confirmation_uuid。冻结 manifest、purpose、idempotency_key 和 Workspace 均由服务端按 UUID 绑定并重新校验，客户端不能覆盖它们，也不接受自由路径、glob、shell 或 ARC/Host metadata。提交使用受 Workspace 同级 Root 约束的原子 rename 移至服务端隔离区，不做永久删除且可恢复；symlink 只移动链接入口且不跟随目标。", map[string]any{
-		"remote_session_id": remoteSession,
-		"confirmation_uuid": stringSchema("move_out_prepare 返回的服务端生成 UUID；网页端模型向用户展示冻结清单并获得明确确认后原样带回"),
-	}, []string{"remote_session_id", "confirmation_uuid"}, workspaceMoveOutCommitAnnotation), r.toolWorkspaceMoveOutCommit)
+	}
+	moveOutBranches := map[string]actionSchemaBranch{
+		"prepare": {
+			Description: "只读冻结明确的 Workspace 文件、目录或 symlink 安全移出清单；不执行文件系统移动。",
+			Properties: map[string]any{
+				"workspace":       workspace,
+				"purpose":         stringSchema("向用户展示的安全移出目的；删除/移除/清理请求必须准确描述最终移出意图"),
+				"targets":         moveOutTargets,
+				"idempotency_key": stringSchema("同一安全移出准备请求重试时复用；不同清单必须使用新 key"),
+			},
+			Required: []string{"remote_session_id", "workspace", "purpose", "targets", "idempotency_key"},
+		},
+		"submit": {
+			Description: "提交网页端模型已向用户询问并确认的冻结 manifest；客户端只能带回服务端签发的 confirmation_uuid。",
+			Properties: map[string]any{
+				"confirmation_uuid": stringSchema("move_out(action=prepare) 返回的服务端生成 UUID；用户确认后原样带回"),
+			},
+			Required: []string{"remote_session_id", "confirmation_uuid"},
+		},
+	}
+	r.addTool(s, cleanActionTool("move_out", desc["move_out"], moveOutCommon, moveOutBranches, workspaceMoveOutToolAnnotation), r.toolMoveOut)
 
 	r.addTool(s, cleanCoreTool("observe", desc["observe"], map[string]any{
 		"remote_session_id":  remoteSession,
@@ -228,7 +240,6 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"operation_ids":      arraySchema(map[string]any{"type": "string"}, "按 Operation ID 过滤 history"),
 		"plan_task_ids":      arraySchema(map[string]any{"type": "string"}, "按 Plan Task ID 过滤 history"),
 		"execution_task_ids": arraySchema(map[string]any{"type": "string"}, "按执行 Task ID 过滤 history"),
-		"changeset_ids":      arraySchema(map[string]any{"type": "string"}, "按 Changeset ID 过滤 history"),
 		"keyword":            stringSchema("在摘要、用途、工具、命令、路径和输入输出中搜索 history"),
 		"kinds":              arraySchema(map[string]any{"type": "string"}, "事件类型过滤，如 tool、command、skill、mcp、file_change、session、error"),
 		"statuses":           arraySchema(map[string]any{"type": "string"}, "按事件状态过滤 history"),

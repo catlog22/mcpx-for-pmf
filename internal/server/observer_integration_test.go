@@ -5,9 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -16,10 +13,10 @@ import (
 
 	"mcpx/internal/mcpresult"
 
-	"mcpx/internal/changeset"
 	"mcpx/internal/envelope"
 	"mcpx/internal/observation"
 	"mcpx/internal/remotesession"
+	"mcpx/internal/security"
 )
 
 func TestObservationRecordsToolLifecycleAndRedacts(t *testing.T) {
@@ -154,7 +151,7 @@ func TestObservationAggregatesRemoteSessionLifecycleByWorkspace(t *testing.T) {
 	}
 }
 
-func TestObservationRecordsAppliedChangesetWithFileDiff(t *testing.T) {
+func TestObservationRecordsCleanEditWithFileDiff(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	principal, err := rt.principalFromContext(context.Background())
 	if err != nil {
@@ -170,21 +167,17 @@ func TestObservationRecordsAppliedChangesetWithFileDiff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	item, err := rt.changesets.Prepare(context.Background(), created.Session.ID, principal.ID, registered.Path, "create observed file", []changeset.Operation{{
-		Operation: "create", Path: "observed.txt", Content: "visible change\n",
-	}})
-	if err != nil {
-		t.Fatal(err)
+	intent := "apply the observed file change"
+	edited := callEnvelope(t, rt.toolEdit, context.Background(), map[string]any{
+		"intent": intent, "remote_session_id": created.Session.ID, "purpose": intent,
+		"edits": []any{map[string]any{"operation": "create", "path": "observed.txt", "content": "visible change\n"}},
+	})
+	if !statusOK(edited) {
+		t.Fatalf("edit failed: %+v", edited)
 	}
-	envReq := envelope.Request{
-		RequestID:       "req_observed_change",
-		Intent:          "apply the observed file change",
-		RemoteSessionID: created.Session.ID,
-		Workspace:       "demo",
-		Payload:         map[string]any{},
-	}
-	if _, err := rt.applyChangeset(context.Background(), envReq, principal.ID, created.Session, item); err != nil {
-		t.Fatal(err)
+	editID, _ := edited["data"].(map[string]any)["edit_id"].(string)
+	if editID == "" {
+		t.Fatalf("edit id missing: %+v", edited)
 	}
 	events, err := rt.observation.store.History(context.Background(), "demo", 0, 100)
 	if err != nil {
@@ -192,16 +185,20 @@ func TestObservationRecordsAppliedChangesetWithFileDiff(t *testing.T) {
 	}
 	var changed *observationEventView
 	for _, event := range events {
-		if event.Type == "file.changed" && event.OperationID == item.ID {
-			view := observationEventView{Intent: event.Intent, Output: string(event.Output)}
-			changed = &view
+		if event.Type != observation.TypeFileChanged || event.Tool != "edit" {
+			continue
 		}
+		if !strings.Contains(string(event.Output), editID) {
+			continue
+		}
+		view := observationEventView{Intent: event.Intent, Output: string(event.Output)}
+		changed = &view
 	}
-	if changed == nil || changed.Intent != envReq.Intent {
+	if changed == nil || changed.Intent != intent {
 		t.Fatalf("file change event missing: %+v", changed)
 	}
-	if !strings.Contains(changed.Output, "observed.txt") || !strings.Contains(changed.Output, "visible change") {
-		t.Fatalf("file change event lacks concrete content: %s", changed.Output)
+	if !strings.Contains(changed.Output, "observed.txt") || !strings.Contains(changed.Output, "+visible change") {
+		t.Fatalf("file change event lacks concrete diff: %s", changed.Output)
 	}
 }
 
@@ -302,7 +299,11 @@ func TestObservationRecordsCommandTaskRequestIdentity(t *testing.T) {
 		Workspace:       "demo",
 		Payload:         map[string]any{},
 	}
-	if _, err := rt.executeCommandTask(context.Background(), envReq, principal, created.Session, "printf 'command-out'", time.Second, "test", "workspace", "sha256:test"); err != nil {
+	analysis := security.CommandAnalysis{
+		Decision: security.Allow,
+		Segments: []security.CommandSegmentDecision{{Command: "printf 'command-out'", Decision: security.Allow}},
+	}
+	if _, err := rt.executeCommandTask(context.Background(), envReq, principal, created.Session, "printf 'command-out'", time.Second, "test", "workspace", "sha256:test", analysis); err != nil {
 		t.Fatal(err)
 	}
 
@@ -329,66 +330,6 @@ func TestObservationRecordsCommandTaskRequestIdentity(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("command output event missing")
-	}
-}
-
-func TestObservationRecordsChangeVerificationRequestIdentity(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("make-based verification fixture is not portable to windows")
-	}
-	rt := newWorkspaceRuntime(t, "demo")
-	principal, err := rt.principalFromContext(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	registered, ok := rt.reg.Get("demo")
-	if !ok {
-		t.Fatal("workspace was not registered")
-	}
-	if err := os.WriteFile(filepath.Join(registered.Path, "Makefile"), []byte("verify:\n\tprintf 'verify-out'\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
-		WorkspaceName: "demo", WorkspacePath: registered.Path,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	envReq := envelope.Request{
-		RequestID:       "req_change_verify",
-		Intent:          "verify observed change",
-		RemoteSessionID: created.Session.ID,
-		Workspace:       "demo",
-		Payload:         map[string]any{},
-	}
-	results := rt.runVerifySteps(context.Background(), envReq, created.Session, []string{"verify"})
-	if len(results) != 1 || fmt.Sprint(results[0]["status"]) != "exited" {
-		t.Fatalf("verification did not run: %+v", results)
-	}
-
-	events, err := rt.observation.store.History(context.Background(), "demo", 0, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, event := range events {
-		if event.Type != observation.TypeCommandOutput {
-			continue
-		}
-		var output map[string]any
-		if err := json.Unmarshal(event.Output, &output); err != nil {
-			t.Fatal(err)
-		}
-		if output["text"] != "verify-out" {
-			continue
-		}
-		found = true
-		if event.RequestID != envReq.RequestID || event.Tool != "change_execute" {
-			t.Fatalf("verification output identity=%+v, want request=%q tool=%q", event, envReq.RequestID, "change_execute")
-		}
-	}
-	if !found {
-		t.Fatal("verification output event missing")
 	}
 }
 

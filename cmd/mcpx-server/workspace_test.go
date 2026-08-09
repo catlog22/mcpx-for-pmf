@@ -9,11 +9,11 @@ import (
 )
 
 func TestParseWorkspaceObserverArgs(t *testing.T) {
-	options, err := parseWorkspaceObserverArgs([]string{"-history", "999", "-format", "JSON", "-diff", "summary", "-tool", "change_read", "-status", "succeeded", "-operation", "op_1", "-path", "src/demo.go", "demo"})
+	options, err := parseWorkspaceObserverArgs([]string{"-history", "999", "-format", "JSON", "-diff", "summary", "-tool", "read", "-status", "succeeded", "-operation", "op_1", "-path", "src/demo.go", "demo"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.Workspace != "demo" || options.History != observation.MaxObserverHistory || options.Format != "json" || options.Diff != "summary" || options.Tool != "change_read" || options.Status != "succeeded" || options.Operation != "op_1" || options.Path != "src/demo.go" {
+	if options.Workspace != "demo" || options.History != observation.MaxObserverHistory || options.Format != "json" || options.Diff != "summary" || options.Tool != "read" || options.Status != "succeeded" || options.Operation != "op_1" || options.Path != "src/demo.go" {
 		t.Fatalf("options=%+v", options)
 	}
 	if _, err := parseWorkspaceObserverArgs(nil); err == nil {

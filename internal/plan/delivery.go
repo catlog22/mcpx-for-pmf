@@ -61,17 +61,6 @@ func deliveryChecks(ctx context.Context, tx *sql.Tx, remoteSessionID string, ite
 		blockers = append(blockers, "verification_failed")
 	}
 
-	changeBlockers, err := queryUnappliedChangesets(ctx, tx, remoteSessionID)
-	if err != nil {
-		return nil, nil, err
-	}
-	changeBlockers = uniqueStrings(changeBlockers)
-	checks = append(checks, DeliveryCheck{Code: "changesets_applied", Passed: len(changeBlockers) == 0, Message: "all Changesets are applied"})
-	if len(changeBlockers) != 0 {
-		checks[len(checks)-1].Details = map[string]any{"changesets": changeBlockers}
-		blockers = append(blockers, changeBlockers...)
-	}
-
 	tasks, err := queryTaskOutcomes(ctx, tx, remoteSessionID, executionTaskIDs)
 	if err != nil {
 		return nil, nil, err
@@ -173,53 +162,6 @@ func evidenceFailed(evidence Evidence) bool {
 		return true
 	}
 	return false
-}
-
-func queryUnappliedChangesets(ctx context.Context, tx *sql.Tx, remoteSessionID string) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM changesets WHERE remote_session_id = ? AND status = 'draft' AND discarded_at IS NULL ORDER BY id`, remoteSessionID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	result := make([]string, 0)
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		result = append(result, "changeset_not_applied:"+id)
-	}
-	return result, rows.Err()
-}
-
-func queryStatuses(ctx context.Context, tx *sql.Tx, table, remoteSessionID string, ids []string) (map[string]string, error) {
-	result := make(map[string]string)
-	ids = uniqueStrings(ids)
-	if len(ids) == 0 {
-		return result, nil
-	}
-	if table != "changesets" {
-		return nil, fmt.Errorf("unsupported status table %s", table)
-	}
-	query := `SELECT id, status FROM changesets WHERE remote_session_id = ? AND id IN (` + placeholders(len(ids)) + `)`
-	args := make([]any, 0, len(ids)+1)
-	args = append(args, remoteSessionID)
-	for _, id := range ids {
-		args = append(args, id)
-	}
-	rows, err := tx.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, status string
-		if err := rows.Scan(&id, &status); err != nil {
-			return nil, err
-		}
-		result[id] = status
-	}
-	return result, rows.Err()
 }
 
 func queryTaskOutcomes(ctx context.Context, tx *sql.Tx, remoteSessionID string, ids []string) (map[string]taskOutcome, error) {

@@ -101,11 +101,11 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 	editCapabilityFound := false
 	moveOutCapabilityFound := false
 	for _, item := range asMapSlice(capabilityData["tools"]) {
-		if item["name"] == "submit_move_out" {
+		if item["name"] == "move_out" {
 			moveOutCapabilityFound = true
 			safety, _ := item["safety"].(map[string]any)
 			if safety["approval"] != "web_model_user_confirmation_required" || safety["registered_workspace"] != true || safety["confirmation_credential"] != "server_generated_confirmation_uuid" || safety["no_symlink_following"] != true || safety["symlink_entry_move"] != true || safety["reversible"] != true {
-				t.Fatalf("runtime_read must publish submit_move_out safety metadata: %+v", item)
+				t.Fatalf("runtime_read must publish move_out safety metadata: %+v", item)
 			}
 			continue
 		}
@@ -122,7 +122,7 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 		t.Fatal("runtime_read did not publish the edit capability")
 	}
 	if !moveOutCapabilityFound {
-		t.Fatal("runtime_read did not publish the submit_move_out capability")
+		t.Fatal("runtime_read did not publish the move_out capability")
 	}
 	for _, item := range asMapSlice(capabilityData["tool_manifest"]) {
 		if _, exists := item["inputSchema"]; exists {

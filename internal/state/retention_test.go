@@ -200,7 +200,7 @@ func TestRetentionDeletesExpiredEphemeralRecords(t *testing.T) {
 	insertRetentionSession(t, db, "closed", "demo", "closed", "principal")
 	old := now.Add(-time.Hour).UnixMilli()
 	_, err := db.Exec(`INSERT INTO approvals(id, remote_session_id, principal_id, tool, summary, payload_json, status, created_at, expires_at)
-        VALUES ('approval', 'closed', 'principal', 'change_execute', 'old', '{}', 'expired', ?, ?)`, old, old)
+        VALUES ('approval', 'closed', 'principal', 'execute', 'old', '{}', 'expired', ?, ?)`, old, old)
 	if err != nil {
 		t.Fatal(err)
 	}

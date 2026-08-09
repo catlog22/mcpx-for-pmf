@@ -274,8 +274,8 @@ func detectFormat(content []byte) Format {
 }
 
 // DetectFormat classifies source bytes without reading from the workspace.
-// Changeset preparation uses the same classifier as file.read so clients see
-// one consistent charset and line-ending contract across read and edit tools.
+// Edit validation uses the same classifier as reads so clients see one
+// consistent charset and line-ending contract across read and edit tools.
 func DetectFormat(content []byte) Format { return detectFormat(content) }
 
 // DecodeText decodes a supported source file into model-facing Unicode text

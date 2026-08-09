@@ -56,13 +56,14 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolReque
 	if !effective.Terminal.Enabled {
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "disabled", "terminal tools are disabled")
 	}
-	decision := security.MatchCommand(effective.Security.Commands, command)
+	analysis := security.AnalyzeCommand(effective.Security.Commands, command)
+	decision := analysis.Decision
 	switch decision {
 	case security.Deny:
-		r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "command_execute", Command: command, Status: "denied", Detail: commandExecutionDetail(purpose, scope, commandDigest)})
-		message := "command denied by policy"
+		r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "command_execute", Command: command, Status: "denied", Detail: commandExecutionDetail(purpose, scope, commandDigest, analysis)})
+		message := "command denied by policy after auditing all command segments"
 		if containsUnsafeShellFeature(command) {
-			message += "；命令包含 $()、管道、重定向、后台符或换行等 shell 特性，被安全策略拒绝。请拆成简单命令逐条执行（例如先 git fetch，再 git rev-parse，最后 git status），不要组合或使用命令替换。"
+			message += "；命令包含不支持的 shell 特性。&&、|| 和 ; 可以组合并会先分段审计；管道、重定向、单个 &、换行、$() 和反引号命令替换仍会被拒绝。对于这些不支持的特性，请改用可独立审计的简单命令，例如 git fetch && git rev-parse HEAD && git status。"
 		}
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "denied", message)
 	case security.Confirm:
@@ -89,8 +90,9 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolReque
 				confirmationData := map[string]any{
 					"command": command, "purpose": purpose, "scope": scope,
 					"command_digest": commandDigest, "pending_digest": commandDigest,
+					"command_policy":        commandPolicyData(analysis),
 					"confirmation_required": true, "user_confirmed_required": true,
-					"summary": "命令已进入服务端待确认状态；请向用户展示命令及用途，获得明确确认后将 user_confirmed=true 原样重试。",
+					"summary": "组合命令的全部 segment 已完成策略预检；请向用户展示整条命令及用途，确认后将 user_confirmed=true 原样重试。",
 				}
 				response := envelope.Fail(envelope.StatusNeedConfirmation, envReq.RequestID, remote.WorkspaceName,
 					confirmationData, "USER_CONFIRMATION_REQUIRED", "命令执行等待用户语义确认")
@@ -101,7 +103,7 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolReque
 				})
 				return r.resultJSON(response)
 			}
-			result, executeErr := r.executeCommandTask(ctx, envReq, principal, remote, command, yield, purpose, scope, commandDigest)
+			result, executeErr := r.executeApprovedCommandTask(ctx, envReq, principal, remote, command, yield, purpose, scope, commandDigest, analysis)
 			if executeErr == nil {
 				if _, consumed := r.approvals.Consume(pending.ID); !consumed {
 					return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "confirmation_state_error", "confirmed command approval could not be consumed")
@@ -133,6 +135,7 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolReque
 				Purpose:              purpose,
 				Scope:                scope,
 				CommandDigest:        commandDigest,
+				CommandPolicy:        commandPolicyData(analysis),
 				ConfirmationRequired: true,
 				ConfirmationMessage:  confirmationMessage,
 			}
@@ -141,29 +144,41 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolReque
 			response.RemoteSessionID = remote.ID
 			return r.resultJSON(response)
 		}
-		result, executeErr := r.executeCommandTask(ctx, envReq, principal, remote, command, yield, purpose, scope, commandDigest)
+		result, executeErr := r.executeApprovedCommandTask(ctx, envReq, principal, remote, command, yield, purpose, scope, commandDigest, analysis)
 		if executeErr == nil {
 			r.consumePendingCommandConfirmation(remote.ID, principal.ID, command, purpose, scope, confirmationToken)
 		}
 		return result, executeErr
 	}
 
-	return r.executeCommandTask(ctx, envReq, principal, remote, command, commandYield(envReq.Payload), purpose, scope, commandDigest)
+	return r.executeApprovedCommandTask(ctx, envReq, principal, remote, command, commandYield(envReq.Payload), purpose, scope, commandDigest, analysis)
 }
 
 // commandConfirmationData keeps confirmation_token first in the serialized
 // JSON payload so truncated host previews cannot hide it.
 type commandConfirmationData struct {
-	ConfirmationToken    string `json:"confirmation_token"`
-	Command              string `json:"command"`
-	Purpose              string `json:"purpose"`
-	Scope                string `json:"scope"`
-	CommandDigest        string `json:"command_digest"`
-	ConfirmationRequired bool   `json:"confirmation_required"`
-	ConfirmationMessage  string `json:"confirmation_message"`
+	ConfirmationToken    string         `json:"confirmation_token"`
+	Command              string         `json:"command"`
+	Purpose              string         `json:"purpose"`
+	Scope                string         `json:"scope"`
+	CommandDigest        string         `json:"command_digest"`
+	CommandPolicy        map[string]any `json:"command_policy,omitempty"`
+	ConfirmationRequired bool           `json:"confirmation_required"`
+	ConfirmationMessage  string         `json:"confirmation_message"`
 }
 
-func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Request, principal auth.Principal, remote remotesession.Session, command string, yield time.Duration, purpose, scope, commandDigest string) (*mcp.CallToolResult, error) {
+func (r *Runtime) executeApprovedCommandTask(ctx context.Context, envReq envelope.Request, principal auth.Principal, remote remotesession.Session, command string, yield time.Duration, purpose, scope, commandDigest string, analysis security.CommandAnalysis) (*mcp.CallToolResult, error) {
+	detail := commandExecutionDetail(purpose, scope, commandDigest, analysis)
+	if err := r.writeAudit(audit.Event{
+		RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName,
+		Tool: "command_execute", Command: command, Status: "preflight_approved", Detail: detail,
+	}); err != nil {
+		return r.terminalErrorForContext(ctx, envReq, remote.ID, remote.WorkspaceName, "audit_write_failed", "command preflight audit could not be persisted; no command segment was executed")
+	}
+	return r.executeCommandTask(ctx, envReq, principal, remote, command, yield, purpose, scope, commandDigest, analysis)
+}
+
+func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Request, principal auth.Principal, remote remotesession.Session, command string, yield time.Duration, purpose, scope, commandDigest string, analysis security.CommandAnalysis) (*mcp.CallToolResult, error) {
 	originTool := toolInvocationName(ctx)
 	if originTool == "" {
 		originTool = "command_execute"
@@ -172,7 +187,7 @@ func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Reques
 	if err != nil {
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "start_error", err.Error())
 	}
-	_ = r.remote.AddEvent(ctx, principal, remotesession.Event{RemoteSessionID: remote.ID, Type: "command.started", OperationID: task.ID, Summary: command, Metadata: commandExecutionDetail(purpose, scope, commandDigest)})
+	_ = r.remote.AddEvent(ctx, principal, remotesession.Event{RemoteSessionID: remote.ID, Type: "command.started", OperationID: task.ID, Summary: command, Metadata: commandExecutionDetail(purpose, scope, commandDigest, analysis)})
 	waitCtx, cancel := context.WithTimeout(ctx, yield)
 	completed := task.Wait(waitCtx)
 	cancel()
@@ -180,6 +195,7 @@ func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Reques
 	data["purpose"] = purpose
 	data["scope"] = scope
 	data["command_digest"] = commandDigest
+	data["command_policy"] = commandPolicyData(analysis)
 	data["command"] = command
 	data["working_directory"] = remote.WorkspacePath
 	data["workspace_scoped"] = scope == "workspace"
@@ -187,7 +203,7 @@ func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Reques
 	if completed {
 		data["completed_in_call"] = true
 		delete(data, "execution_task_id")
-		detail := commandExecutionDetail(purpose, scope, commandDigest)
+		detail := commandExecutionDetail(purpose, scope, commandDigest, analysis)
 		detail["exit_code"] = data["exit_code"]
 		if exitCode, ok := data["exit_code"].(int); ok && exitCode != 0 {
 			stderr, _ := data["stderr"].(string)
@@ -211,7 +227,7 @@ func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Reques
 		"yield_time_ms": int(yield / time.Millisecond),
 	})
 	data["summary"] = fmt.Sprintf("Command is running as Task %s.", task.ID)
-	detail := commandExecutionDetail(purpose, scope, commandDigest)
+	detail := commandExecutionDetail(purpose, scope, commandDigest, analysis)
 	detail["execution_task_id"] = task.ID
 	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "command_execute", Command: command, Status: "running", Detail: detail})
 	response := envelope.Accepted(envReq.RequestID, remote.WorkspaceName, data)
@@ -314,8 +330,30 @@ func commandRequestDigest(requestID, remoteSessionID, workspace, command, purpos
 	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
-func commandExecutionDetail(purpose, scope, commandDigest string) map[string]any {
-	return map[string]any{"purpose": purpose, "scope": scope, "command_digest": commandDigest, "workspace_scoped": scope == "workspace"}
+func commandPolicyData(analysis security.CommandAnalysis) map[string]any {
+	segments := make([]map[string]any, 0, len(analysis.Segments))
+	for index, segment := range analysis.Segments {
+		item := map[string]any{
+			"index": index + 1, "command": segment.Command, "decision": segment.Decision.String(),
+		}
+		if segment.Operator != "" {
+			item["operator_after"] = segment.Operator
+		}
+		segments = append(segments, item)
+	}
+	return map[string]any{
+		"decision": analysis.Decision.String(), "segments": segments, "unsafe": analysis.Unsafe,
+		"all_segments_preflighted": !analysis.Unsafe && len(segments) > 0,
+		"atomic_policy_gate":       true,
+		"execute_original_once":    true,
+	}
+}
+
+func commandExecutionDetail(purpose, scope, commandDigest string, analysis security.CommandAnalysis) map[string]any {
+	return map[string]any{
+		"purpose": purpose, "scope": scope, "command_digest": commandDigest,
+		"workspace_scoped": scope == "workspace", "command_policy": commandPolicyData(analysis),
+	}
 }
 
 func commandYield(payload map[string]any) time.Duration {

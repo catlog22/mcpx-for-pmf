@@ -84,7 +84,7 @@ func TestWrapToolResultRendersSessionBootstrapAsMarkdown(t *testing.T) {
 	raw := mcpresult.NewStructured(map[string]any{
 		"remote_session": map[string]any{"id": "rs_demo", "role": "owner", "status": "active"},
 		"workspace":      map[string]any{"name": "fyy", "path": "/workspaces/fyy", "git_head": "abc123"},
-		"tools":          []map[string]any{{"name": "file_read"}, {"name": "change_execute"}},
+		"tools":          []map[string]any{{"name": "read"}, {"name": "edit"}},
 		"agent_guidance": map[string]any{
 			"summary": "Use dedicated tools.",
 			"rules":   []string{"Read before editing."},
@@ -92,7 +92,7 @@ func TestWrapToolResultRendersSessionBootstrapAsMarkdown(t *testing.T) {
 	}, "Session rs_demo opened for workspace fyy.")
 	written := WrapToolResult("session_open", ResultContext{}, raw)
 	text := written.Content[0].(*mcp.TextContent).Text
-	for _, want := range []string{"- Remote session: `rs_demo`", "`/workspaces/fyy`", "`file_read`", "Agent guidance", "Read before editing."} {
+	for _, want := range []string{"- Remote session: `rs_demo`", "`/workspaces/fyy`", "`read`", "`edit`", "Agent guidance", "Read before editing."} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("session bootstrap text missing %q: %q", want, text)
 		}
@@ -292,38 +292,6 @@ func TestWrapToolResultRendersCommandAsShellBlock(t *testing.T) {
 	}
 }
 
-func TestWrapToolResultRendersSemanticConfirmationCodeChangeDiff(t *testing.T) {
-	raw := mcpresult.NewText(`{"ok":false,"status":"need_confirmation","data":{"confirmation_required":true,"changeset_id":"chg_confirmation","files":[{"path":"demo.go","operation":"update","diff":"--- a/demo.go\n+++ b/demo.go\n@@ -1 +1 @@\n-const Value = 1\n+const Value = 2\n"}],"diff":{"mode":"inline"}},"error":{"code":"USER_CONFIRMATION_REQUIRED","message":"文件变更等待用户语义确认"}}`)
-	written := WrapToolResult("change_execute", ResultContext{}, raw)
-	result := decodeEnvelope(t, written)["mcpx"].(map[string]any)["result"].(map[string]any)
-	if result["type"] != "code_change" || result["schema"] != SchemaCodeChange {
-		t.Fatalf("result = %+v", result)
-	}
-	if result["hints"].(map[string]any)["preferred_behavior"] != "ask_confirm" {
-		t.Fatalf("hints = %+v", result["hints"])
-	}
-	text := written.Content[0].(*mcp.TextContent).Text
-	for _, want := range []string{"需要确认后才能应用", "```diff", "-const Value = 1", "+const Value = 2"} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("confirmation diff missing %q: %s", want, text)
-		}
-	}
-}
-
-func TestWrapToolResultShowsChangeConfirmationToken(t *testing.T) {
-	raw := mcpresult.NewText(`{"status":"waiting_confirmation","data":{"changeset_id":"chg_token","expected_digest":"sha256:abc123","confirmation_required":true,"confirmation_token":"ct_change_token","files":[{"path":"a.txt","operation":"update","diff":"--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n"}]},"error":{"code":"USER_CONFIRMATION_REQUIRED","message":"文件变更等待用户语义确认"}}`)
-	wrapped := WrapToolResult("change_apply", ResultContext{
-		RequestID: "req_change_token", TraceID: "tr_change_token", SpanID: "sp_change_token",
-		Timing: Timing{ServerElapsedMs: 4},
-	}, raw)
-	text := wrapped.Content[0].(*mcp.TextContent).Text
-	for _, want := range []string{"`confirmation_token`: `ct_change_token`", "同一 changeset_id、expected_digest 和上述 confirmation_token"} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("change confirmation display missing %q: %s", want, text)
-		}
-	}
-}
-
 func TestWrapToolResultShowsOperationConfirmationToken(t *testing.T) {
 	raw := mcpresult.NewText(`{"status":"waiting_confirmation","data":{"operation_id":"op_wait","steps":[{"id":"main","tool":"command_run","state":"waiting_confirmation","confirmation_token":"ct_op_token"}],"confirmation_required":true},"error":{"code":"USER_CONFIRMATION_REQUIRED","message":"操作等待语义确认"}}`)
 	wrapped := WrapToolResult("operation_manage", ResultContext{
@@ -405,9 +373,14 @@ func TestOutputSchemaAndRegistry(t *testing.T) {
 	codeChangeProperties, _ := codeChangeSchema["properties"].(map[string]any)
 	dataSchema, _ := codeChangeProperties["data"].(map[string]any)
 	codeChangeProperties, _ = dataSchema["properties"].(map[string]any)
-	for _, field := range []string{"digest", "expected_digest"} {
+	for _, field := range []string{"edit_id", "status", "results", "total_changed_lines", "diff_summary"} {
 		if codeChangeProperties[field] == nil {
 			t.Fatalf("code change schema missing %s: %+v", field, codeChangeSchema)
+		}
+	}
+	for _, legacy := range []string{"changeset_id", "digest", "expected_digest", "files"} {
+		if codeChangeProperties[legacy] != nil {
+			t.Fatalf("code change schema still exposes legacy field %s: %+v", legacy, codeChangeSchema)
 		}
 	}
 	registry[SchemaText][0] = 'x'
@@ -481,8 +454,6 @@ func TestWrapToolResultUsesStableToolSemantics(t *testing.T) {
 		wantView string
 	}{
 		{name: "context query", tool: "context_query", data: map[string]any{"content": "plain source"}, wantType: "search_result", wantView: "table"},
-		{name: "change execute", tool: "change_execute", data: map[string]any{"status": "prepared"}, wantType: "code_change", wantView: "diff"},
-		{name: "change manage", tool: "change_manage", data: map[string]any{"status": "applied"}, wantType: "code_change", wantView: "diff"},
 		{name: "clean edit", tool: "edit", data: map[string]any{"edit_id": "edit_1", "results": []any{}}, wantType: "code_change", wantView: "diff"},
 		{name: "task manage", tool: "task_manage", data: map[string]any{"status": "running"}, wantType: "log", wantView: "log"},
 	}

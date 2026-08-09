@@ -57,7 +57,8 @@ func TestRemoteSessionApprovalSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	approvalID, err := NewPersistentStore(store.DB()).Put(Pending{
-		RemoteSessionID: created.Session.ID, PrincipalID: principal.ID, Tool: "change_apply", Summary: "apply durable change",
+		RemoteSessionID: created.Session.ID, PrincipalID: principal.ID, Tool: "command_execute", Summary: "run durable command",
+		Command: "go test ./...", Purpose: "verify workspace", Scope: "workspace",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +78,7 @@ func TestRemoteSessionApprovalSurvivesRestart(t *testing.T) {
 		t.Fatalf("listed=%+v", listed)
 	}
 	pending, ok := persistent.Take(approvalID)
-	if !ok || pending.Summary != "apply durable change" {
+	if !ok || pending.Summary != "run durable command" {
 		t.Fatalf("take ok=%v pending=%+v", ok, pending)
 	}
 	if _, ok := persistent.Take(approvalID); ok {
@@ -131,18 +132,6 @@ func TestPutDeduplicatesPendingContent(t *testing.T) {
 	}
 	if id5 == id1 {
 		t.Fatal("consumed approval must allow a fresh one")
-	}
-	// 无 ChangesetID 的 change 审批不聚合
-	id6, err := s.Put(Pending{Tool: "change_execute", RemoteSessionID: "rs1", PrincipalID: "p1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	id7, err := s.Put(Pending{Tool: "change_execute", RemoteSessionID: "rs1", PrincipalID: "p1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id6 == id7 {
-		t.Fatal("change approval without changeset id must not deduplicate")
 	}
 }
 
@@ -211,7 +200,7 @@ func TestPutDeduplicationExpiresWithTTL(t *testing.T) {
 	}
 }
 
-func TestPersistentDeduplicationConsumeAndChange(t *testing.T) {
+func TestPersistentDeduplicationConsume(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "mcpx.db")
 	store, err := state.Open(databasePath)
 	if err != nil {
@@ -252,24 +241,8 @@ func TestPersistentDeduplicationConsumeAndChange(t *testing.T) {
 		t.Fatal("consumed approval must allow a fresh one")
 	}
 
-	// 同 ChangesetID+Digest 的 change_execute 两次 Put 同 ID（正向去重）
-	change := Pending{Tool: "change_execute", ChangesetID: "cs1", ChangesetDigest: "d1",
-		RemoteSessionID: created.Session.ID, PrincipalID: principal.ID}
-	changeID1, err := persistent.Put(change)
-	if err != nil {
-		t.Fatal(err)
-	}
-	changeID2, err := persistent.Put(change)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if changeID1 != changeID2 {
-		t.Fatalf("same changeset must reuse approval_id: %s != %s", changeID1, changeID2)
-	}
-
-	// pending 数量为 2（command 1 条 + change 1 条）
 	pending := persistent.ListRemoteSession(created.Session.ID)
-	if len(pending) != 2 {
-		t.Fatalf("pending count = %d, want 2 (%+v)", len(pending), pending)
+	if len(pending) != 1 || pending[0].ID != cmdID3 {
+		t.Fatalf("pending approvals = %+v, want only the fresh command approval", pending)
 	}
 }

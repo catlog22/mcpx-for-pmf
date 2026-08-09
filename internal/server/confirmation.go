@@ -30,10 +30,6 @@ func pendingConfirmationItems(pending []approval.Pending) []map[string]any {
 			"created_at":         item.CreatedAt,
 			"confirmation_token": item.ConfirmationToken,
 		}
-		if item.ChangesetID != "" {
-			view["changeset_id"] = item.ChangesetID
-			view["expected_digest"] = item.ChangesetDigest
-		}
 		if item.Command != "" {
 			view["command"] = item.Command
 			view["purpose"] = item.Purpose

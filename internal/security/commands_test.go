@@ -96,6 +96,7 @@ func TestMatchCommandTreatsQuotedAndEscapedOperatorsAsLiterals(t *testing.T) {
 		`printf foo \| bar`,
 		`printf "text; rm -rf ignored"`,
 		`printf "text && rm -rf ignored"`,
+		`printf "text || rm -rf ignored"`,
 	} {
 		if got := MatchCommand(rules, command); got != Allow {
 			t.Errorf("literal operator command %q: got %s, want allow", command, got)
@@ -108,14 +109,46 @@ func TestMatchCommandTreatsQuotedAndEscapedOperatorsAsLiterals(t *testing.T) {
 
 func TestMatchCommandSegmentsRespectDenyAndAllowLists(t *testing.T) {
 	rules := config.CommandRules{Allow: []string{`^go\b`}, Deny: []string{`^rm\b`}}
-	if got := MatchCommand(rules, "go test && rm -rf x"); got != Deny {
-		t.Fatalf("deny segment must reject the whole command, got %s", got)
+	for _, command := range []string{"go test && rm -rf x", "go test || rm -rf x"} {
+		if got := MatchCommand(rules, command); got != Deny {
+			t.Fatalf("deny segment must reject whole command %q, got %s", command, got)
+		}
 	}
-	if got := MatchCommand(rules, "go build && go vet"); got != Allow {
-		t.Fatalf("allowed segments must run, got %s", got)
+	for _, command := range []string{"go build && go vet", "go build || go vet"} {
+		if got := MatchCommand(rules, command); got != Allow {
+			t.Fatalf("allowed segments must pass preflight for %q, got %s", command, got)
+		}
 	}
 	if got := MatchCommand(rules, "go build"); got != Allow {
 		t.Fatalf("allow list got %s", got)
+	}
+}
+
+func TestAnalyzeCommandPreservesConditionalOperatorsAndDecisions(t *testing.T) {
+	rules := config.CommandRules{
+		Allow:   []string{`^go\b`},
+		Confirm: []string{`^docker\b`},
+		Deny:    []string{`^rm\b`},
+	}
+	analysis := AnalyzeCommand(rules, "go test && docker build . || rm -rf x")
+	if analysis.Unsafe || analysis.Decision != Deny || len(analysis.Segments) != 3 {
+		t.Fatalf("analysis=%+v", analysis)
+	}
+	wantOperators := []string{"&&", "||", ""}
+	wantDecisions := []Decision{Allow, Confirm, Deny}
+	for index, segment := range analysis.Segments {
+		if segment.Operator != wantOperators[index] || segment.Decision != wantDecisions[index] {
+			t.Fatalf("segment %d=%+v", index, segment)
+		}
+	}
+}
+
+func TestMatchCommandRejectsMalformedConditionalChains(t *testing.T) {
+	rules := config.DefaultConfig().Security.Commands
+	for _, command := range []string{"echo ok ||", "|| echo ok", "echo ok &&", "echo ok || || echo no"} {
+		if got := MatchCommand(rules, command); got != Deny {
+			t.Errorf("malformed conditional %q: got %s, want deny", command, got)
+		}
 	}
 }
 
@@ -187,6 +220,7 @@ func TestMatchCommandAutoAllowReadonly(t *testing.T) {
 	for _, command := range []string{
 		"git status",
 		"git -C fanyi-cloud status --short && git -C fanyi-cloud-ui status --short",
+		"git status || git diff",
 		"git status; git diff",
 		"git log --oneline",
 		"git show HEAD",

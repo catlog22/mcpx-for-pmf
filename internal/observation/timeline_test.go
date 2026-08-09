@@ -207,10 +207,10 @@ func TestTextRendererFoldsRepeatedReadEvents(t *testing.T) {
 	input := []byte(`{"path":"src/demo.go"}`)
 	result := []byte(`{"status":"succeeded","result":{"content":[{"type":"text","text":"Read 1 source item(s)."}]}}`)
 	events := []Event{
-		{Sequence: 1, RequestID: "req_read_1", Tool: "change_read", Type: TypeToolStarted, Input: input},
-		{Sequence: 2, RequestID: "req_read_1", Tool: "change_read", Type: TypeToolCompleted, Status: "succeeded", Input: input, Output: result},
-		{Sequence: 3, RequestID: "req_read_2", Tool: "change_read", Type: TypeToolStarted, Input: input},
-		{Sequence: 4, RequestID: "req_read_2", Tool: "change_read", Type: TypeToolCompleted, Status: "succeeded", Input: input, Output: result},
+		{Sequence: 1, RequestID: "req_read_1", Tool: "read", Type: TypeToolStarted, Input: input},
+		{Sequence: 2, RequestID: "req_read_1", Tool: "read", Type: TypeToolCompleted, Status: "succeeded", Input: input, Output: result},
+		{Sequence: 3, RequestID: "req_read_2", Tool: "read", Type: TypeToolStarted, Input: input},
+		{Sequence: 4, RequestID: "req_read_2", Tool: "read", Type: TypeToolCompleted, Status: "succeeded", Input: input, Output: result},
 		{Sequence: 5, RequestID: "req_other", Tool: "file_read", Type: TypeToolCompleted, Input: []byte(`{"path":"src/other.go"}`), Output: []byte(`{"status":"succeeded"}`)},
 	}
 	for _, event := range events {
@@ -256,18 +256,18 @@ func TestTextRendererShowsProgressBeforeCompletionOnce(t *testing.T) {
 
 func TestTextRendererAppliesSemanticFilters(t *testing.T) {
 	renderer := NewTextRenderer(false)
-	renderer.SetFilter(EventFilter{Tool: "change_read", Path: "demo.go"})
+	renderer.SetFilter(EventFilter{Tool: "read", Path: "demo.go"})
 	var output bytes.Buffer
 	for _, event := range []Event{
 		{Sequence: 1, Tool: "file_read", Type: TypeToolCompleted, Path: "src/demo.go", Output: []byte(`{"status":"succeeded"}`)},
-		{Sequence: 2, Tool: "change_read", Type: TypeToolCompleted, Path: "src/other.go", Output: []byte(`{"status":"succeeded"}`)},
-		{Sequence: 3, Tool: "change_read", Type: TypeToolCompleted, Path: "src/demo.go", Output: []byte(`{"status":"succeeded"}`)},
+		{Sequence: 2, Tool: "read", Type: TypeToolCompleted, Path: "src/other.go", Output: []byte(`{"status":"succeeded"}`)},
+		{Sequence: 3, Tool: "read", Type: TypeToolCompleted, Path: "src/demo.go", Output: []byte(`{"status":"succeeded"}`)},
 	} {
 		if err := renderer.RenderEvent(&output, event); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if text := output.String(); !strings.Contains(text, "change read") || strings.Contains(text, "file_read") || strings.Contains(text, "other.go") {
+	if text := output.String(); !strings.Contains(strings.ToLower(text), "read") || strings.Contains(text, "file_read") || strings.Contains(text, "other.go") {
 		t.Fatalf("semantic filter output=%q", text)
 	}
 }

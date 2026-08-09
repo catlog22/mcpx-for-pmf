@@ -222,19 +222,12 @@ func renderCommandOutput(w io.Writer, event Event, options renderOptions) error 
 
 func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 	var payload struct {
-		DeleteSummary *struct {
-			Display string `json:"display"`
-		} `json:"delete_summary"`
-		Files   []fileChangeView `json:"files"`
 		Results []fileChangeView `json:"results"`
 	}
 	if err := json.Unmarshal(event.Output, &payload); err != nil {
-		payload.Files = nil
+		payload.Results = nil
 	}
-	files := payload.Files
-	if len(files) == 0 {
-		files = payload.Results
-	}
+	files := payload.Results
 	if len(files) == 0 {
 		label := compactLine(event.Summary)
 		if label == "" {
@@ -265,11 +258,6 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 	}
 	if err := writeEventActionWithDiffStats(w, event, fileChangeVerb(files), label, actionColor(event.toolOrType(), false), added, removed, options.colorMode); err != nil {
 		return err
-	}
-	if payload.DeleteSummary != nil && strings.TrimSpace(payload.DeleteSummary.Display) != "" {
-		if err := writeChild(w, payload.DeleteSummary.Display, options.colorMode != ColorModeNone); err != nil {
-			return err
-		}
 	}
 	for index, file := range files {
 		if index >= maxChangedFiles {
@@ -560,7 +548,7 @@ func summaryEventOutput(event Event, value map[string]any) string {
 		return ""
 	}
 	parts := make([]string, 0, 3)
-	for _, key := range []string{"changeset_id", "plan_task_id", "execution_task_id", "status", "exit_code"} {
+	for _, key := range []string{"plan_task_id", "execution_task_id", "status", "exit_code"} {
 		if text := strings.TrimSpace(formatNumber(metadata[key])); text != "" {
 			parts = append(parts, key+"="+text)
 		}
@@ -631,8 +619,6 @@ func toolAction(tool string, raw []byte) (string, string) {
 		} else {
 			label = contextQueryCommand(map[string]any{"action": input["view"], "query": input["query"], "paths": input["paths"], "include_glob": input["include_glob"], "exclude_glob": input["exclude_glob"]})
 		}
-	case "change_execute", "change_apply", "change_revert":
-		label = changeLabel(input)
 	case "progress_report":
 		label, _ = input["summary"].(string)
 		if strings.TrimSpace(label) == "" {
@@ -666,7 +652,7 @@ func toolAction(tool string, raw []byte) (string, string) {
 			label += "/" + toolName
 		}
 	default:
-		for _, key := range []string{"workspace", "path", "changeset_id", "plan_task_id", "execution_task_id", "artifact_id", "remote_session_id"} {
+		for _, key := range []string{"workspace", "path", "plan_task_id", "execution_task_id", "artifact_id", "remote_session_id"} {
 			if value, ok := input[key].(string); ok && strings.TrimSpace(value) != "" {
 				label = value
 				break
@@ -751,13 +737,9 @@ func actionVerb(tool, action string) string {
 		return "Ran"
 	case "context_query":
 		return "Searched"
-	case "file_read":
+	case "read", "file_read":
 		return "Read"
-	case "change_execute":
-		return "Edited"
-	case "change_prepare":
-		return "Prepared"
-	case "change_apply", "change_revert", "artifact_register":
+	case "artifact_register":
 		return "Edited"
 	case "session_open":
 		return "Opened"
@@ -776,7 +758,7 @@ func actionVerb(tool, action string) string {
 			return "Created"
 		}
 		return "Read"
-	case "workspace_observe", "workspace_history_read", "session_read", "source_read", "change_read", "task_read", "plan_read", "runtime_read", "environment_read", "artifact_read", "extension_discover":
+	case "workspace_observe", "workspace_history_read", "session_read", "source_read", "task_read", "plan_read", "runtime_read", "environment_read", "artifact_read", "extension_discover":
 		return "Read"
 	case "task_control":
 		return "Controlled"
@@ -968,26 +950,6 @@ func fileReadResultLabel(result map[string]any) string {
 	return ""
 }
 
-func changeLabel(input map[string]any) string {
-	if summary, ok := input["summary"].(string); ok && strings.TrimSpace(summary) != "" {
-		return summary
-	}
-	if id, ok := input["changeset_id"].(string); ok && strings.TrimSpace(id) != "" {
-		return "changeset " + id
-	}
-	operations, _ := input["operations"].([]any)
-	if len(operations) == 1 {
-		operation, _ := operations[0].(map[string]any)
-		if path, ok := operation["path"].(string); ok && path != "" {
-			return path
-		}
-	}
-	if len(operations) > 1 {
-		return fmt.Sprintf("%d files", len(operations))
-	}
-	return "files"
-}
-
 func minInt(left, right int) int {
 	if left < right {
 		return left
@@ -1034,7 +996,7 @@ func failureActionVerb(tool, fallback string) string {
 	switch strings.ToLower(strings.TrimSpace(tool)) {
 	case "execute", "command_execute", "command_run":
 		return "Command failed"
-	case "edit", "change_execute", "change_apply", "change_revert", "change_prepare":
+	case "edit":
 		return "Edit failed"
 	case "read", "file_read", "source_read", "context_query":
 		return "Read failed"

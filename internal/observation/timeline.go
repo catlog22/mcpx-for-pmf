@@ -316,7 +316,7 @@ func semanticEventFingerprint(event Event) string {
 
 func deduplicableTool(tool string) bool {
 	switch strings.ToLower(strings.TrimSpace(tool)) {
-	case "change_read", "change_prepare", "source_read", "file_read", "context_query", "workspace_state", "runtime_read":
+	case "read", "source_read", "file_read", "context_query", "workspace_state", "runtime_read":
 		return true
 	default:
 		return false
@@ -390,7 +390,7 @@ func eventPath(event Event) string {
 		return path
 	}
 	paths := make([]string, 0, 4)
-	for _, key := range []string{"items", "operations"} {
+	for _, key := range []string{"items", "edits"} {
 		values, _ := input[key].([]any)
 		for _, raw := range values {
 			item, _ := raw.(map[string]any)
@@ -418,16 +418,16 @@ func eventPath(event Event) string {
 		return ""
 	}
 	var payload struct {
-		Files []struct {
+		Results []struct {
 			Path    string `json:"path"`
 			NewPath string `json:"new_path"`
-		} `json:"files"`
+		} `json:"results"`
 	}
 	if json.Unmarshal(event.Output, &payload) != nil {
 		return ""
 	}
-	paths = make([]string, 0, len(payload.Files)*2)
-	for _, file := range payload.Files {
+	paths = make([]string, 0, len(payload.Results)*2)
+	for _, file := range payload.Results {
 		paths = append(paths, file.Path, file.NewPath)
 	}
 	return strings.Join(paths, " ")

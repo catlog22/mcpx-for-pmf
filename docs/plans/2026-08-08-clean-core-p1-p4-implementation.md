@@ -1,10 +1,32 @@
 # MCPX 干净核心 P1–P4 总实现计划
 
-> 状态：已完成（含 P0 交互补强前置门槛）。前置：[P0 实现计划](2026-08-08-clean-core-p0-implementation.md) 主线与交互补强均已完成；本文件记录 P1–P4 的实现、验收和收口证据，不自动 commit/push。
+> 状态：主线已完成，压力稳定性补丁已实现并进入回归收口。前置：[P0 实现计划](2026-08-08-clean-core-p0-implementation.md) 主线与交互补强均已完成；本文件记录 P1–P4 的实现、验收和后续稳定性证据，不自动 commit/push。
 
 > 测试收缩：删除了与行为验收重复的 2 个纯单元测试（目的字段指纹快照、最终 catalog 快照）；保留真实 edit/幂等边界、HTTP acceptance、fake Skill/stdio MCP 和 plan/artifact 工作流作为证据，避免用测试数量替代覆盖质量。
 
+## 生产级文件操作契约补充
+
+- `read(view=file, mode=full)` 对源文件施加 `4194304` bytes 上限；超限返回 `FILE_TOO_LARGE/capacity`，window 读取走流式路径，不因源文件总大小失败。
+- `read.items` 最多 `20` 项，超限返回 `LIMIT_EXCEEDED/validation`；`read(view=list, path=...)` 的 `path` 是硬作用域，`include_glob` 只能继续收窄。
+- `STALE_REVISION` 重新读取并更新 `base_sha256` 后必须使用新的 `idempotency_key`；旧 key 继续绑定原始请求，避免幂等结果与新 revision 混淆。
+- `edit(operation=delete)` 是 MCPX 封装的受审计文件删除能力：服务端先生成带 SHA 的待删快照并返回 `waiting_confirmation` 与 `confirmation_digest`，由客户端向用户展示范围并完成语义确认，再以相同业务参数设置 `user_confirmed=true` 重试。regular file 之外的目标和 symlink 均拒绝，删除由 `os.Root` 限定在 workspace 内。
+- 删除请求不会绕过 Host 安全层：`edit` 的 MCP annotations 保留 `readOnlyHint=false`、`destructiveHint=true`、`idempotentHint=true`、`openWorldHint=false`，并在 `_meta["mcpx/safety"]` 与 `runtime_read` 能力摘要中发布审批所需的约束证据（Workspace 根目录、regular file、SHA、symlink 拒绝、幂等、审计和禁止 shell 绕过）。Host 应据此展示受约束的破坏性动作并要求用户批准；服务端仍独立执行语义确认和最终校验。
+- 已发布机器可读限制：`read.max_source_bytes=4194304`、`read.max_items=20`、`operation_batch.max_steps=32`、`edit.max_changed_lines=1000`。
+
 > 最终验证（2026-08-08）：`rtk go test ./... -count=1` 与 `rtk go test -race ./... -count=1` 均为 484 项通过；`rtk go vet ./...`、`CGO_ENABLED=0 rtk go build -o bin/mcpx-server ./cmd/mcpx-server`、格式检查和 `rtk git diff --check` 均通过。可复现场景命令见 [Evaluation](../evaluations/clean-core-p1-p4.md)。
+
+## 压力稳定性补丁（2026-08-08）
+
+压力评估发现 `operation_batch` 的 schema 校验在缺失 `type` 时执行空接口断言，导致 panic 穿透 MCP 请求 goroutine；同时需要保证任务输出观测和异步观测 recorder 的异常不会污染服务进程。
+
+- [x] `validateOperationSchemaValue` 对 type-less / null schema 安全处理；`validateOperationToolArguments` 增加 schema 兜底，错误回到结构化 `bad_request`。
+- [x] MCP tool handler / async submit 增加 panic 隔离，统一返回 `EXECUTION_RUNTIME_ERROR`，不向模型暴露堆栈。
+- [x] operation worker 对单步 executor panic 做失败步骤收敛，保留无关步骤和后续 operation 的执行能力。
+- [x] Task output sink、异步 observation recorder 增加 fail-soft 边界；补充 1 MiB stdout 排空回归。
+- [x] source 缺失路径返回 `FILE_NOT_FOUND` / `not_found`，并消除 `statat` 原始错误文本泄漏。
+- [x] 已通过 `go test ./... -count=1`、受影响包 race 回归、`go vet ./...`、`CGO_ENABLED=0 go build -o bin/mcpx-server ./cmd/mcpx-server`、gofmt 和 `git diff --check`；服务级高负载复测仍需重启服务后单独执行。
+
+未宣称高负载外部复测已完成：需要重新启动服务后复跑阻塞 execute、高 stdout、cancel/resume，以及异常后的 observe、session attach、新 session open；demo 工作区中的 `mcpx-stress4/` 夹具仍需用户确认后再清理。
 
 ## 目标与冻结决策
 
@@ -100,21 +122,23 @@ P4 Evaluation + capabilities + docs + final catalog audit
 
 ### 目标
 
-把现有 `command_run`、`task_read`、`task` 合并为一个执行入口和一个观察入口：短命令直接返回结果，长命令返回 `task_id`，后续只通过 `observe` 获取状态和日志。
+把现有 `command_run`、`task_read`、`task` 合并为一个执行入口和一个观察入口：短命令直接返回结果，长命令返回 `execution_task_id`，后续只通过 `observe` 获取状态和日志。
 
 ### `execute` 契约
 
-- `action=run`：`command` 与 `task` 二选一；返回 `exit_code`、stdout/stderr、duration；未结束时返回 `task_id`。
-- `action=attach`：必填 `task_id`，按 offset 继续等待并读取输出。
-- `action=stop`：必填 `task_id`，执行权限和确认策略重新校验。
-- `action=stdin`：必填 `task_id`、`input`，只允许交互式任务。
+- `action=run`：`command` 与项目 `task` 二选一；返回 `exit_code`、stdout/stderr、duration；未结束时返回 `execution_task_id`。
+- `action=attach`：必填 `execution_task_id`，按 offset 继续等待并读取输出。
+- `action=stop`：必填 `execution_task_id`，执行权限和确认策略重新校验。
+- `action=stdin`：必填 `execution_task_id`、`input`，只允许交互式执行任务。
 - 公共字段：`remote_session_id`、`purpose`、`idempotency_key`、`execution_mode`、`yield_time_ms`、`scope`、`user_confirmed`。
+- `execution_mode=async` 只表示工具调用进入异步 Operation；是否返回持久化 `execution_task_id` 由命令是否超过 `yield_time_ms` 决定。短命令可能在 Operation 内直接完成并返回 `completed_in_call=true`。
 - `run` 必须限制为 Workspace scope；命令策略仍由服务端强制，禁止通过 shell 组合语法绕过策略。
 - 首次命中 confirm 策略时返回 `waiting_confirmation`，只返回命令摘要和同一业务参数重试提示，不暴露 confirmation token。
+- 命令执行失败使用 `COMMAND_NOT_FOUND`、`PROCESS_EXIT` 或 `EXECUTION_FAILED`；统一 `category=execution`，并在 `error.details.exit_code` 提供退出码。
 
 ### `observe` 扩展
 
-- `view=status`：有 `task_id` 时返回 Task 状态；无 `task_id` 时返回 session 状态。
+- `view=status`：有 `execution_task_id` 时返回执行 Task 状态；无执行 Task ID 时返回 session 状态。
 - `view=logs`：返回 stdout/stderr 分片、offset、next offset、EOF/truncated 和下一次调用模板。
 - `view=history`：纳入 `execute.started`、`execute.completed`、`task.stopped` 等事件。
 - 保持 P0 的 `view=changes`、`view=diff` 行为不变。
@@ -132,7 +156,7 @@ P4 Evaluation + capabilities + docs + final catalog audit
 ### P1 验收
 
 - [x] `execute(command)` 短命令同步返回 stdout/stderr/exit_code。
-- [x] 长命令返回 task_id，`observe(status|logs)` 可跨请求、跨客户端继续读取。
+- [x] 长命令返回 `execution_task_id`，`observe(status|logs)` 可跨请求、跨客户端继续读取。
 - [x] stop/stdin 权限、确认、任务归属校验有效。
 - [x] 重试、确认、命令拒绝、任务不存在、offset 越界均有结构化恢复动作。
 - [x] `tools/list` 不再包含 `command_run`、`task`、`task_read`，且包含 `execute`。
@@ -152,9 +176,9 @@ P4 Evaluation + capabilities + docs + final catalog audit
 
 `create | read | advance | complete | block | replan | deliver`
 
-- `create`：返回服务端签发的 `plan_id` 和每个正式 `task_id`；输入中的局部 task id 只用于依赖解析。
+- `create`：返回服务端签发的 `plan_id` 和每个正式 `plan_task_id`；输入中的 `local_id` 只用于本次创建的依赖解析。
 - `read`：按 `plan_id` 返回当前计划、任务状态、依赖、evidence 摘要。
-- `advance`：启动一个可执行任务；只能引用返回的正式 `task_id`。
+- `advance`：启动一个可执行任务；只能引用返回的正式 `plan_task_id`。
 - `complete`：必填 evidence；无验证证据不得完成任务。
 - `block`：必填 reason，可附带已获得 evidence。
 - `replan`：保留已完成任务和 evidence，只对未完成任务执行 add/update/remove。
@@ -184,10 +208,10 @@ Evidence 允许 `read`、`edit`、`execute`、`artifact`、`verification`、`obs
 ### P2 验收
 
 - [x] create → advance → edit/execute → complete → deliver 全链路可用。
-- [x] 缺失 evidence、错误 task_id、循环依赖、非法状态都有可恢复错误。
+- [x] 缺失 evidence、错误 `plan_task_id`、循环依赖、非法状态都有可恢复错误。
 - [x] artifact register/list/read 支持文本、二进制和分片续读，策略拒绝不泄漏内容。
 - [x] `tools/list` 不再包含 `plan_read`、`artifact_read`。
-- [x] plan evidence 与 observe/history 中的事件 ID、task ID、artifact ID 可相互追溯。
+- [x] plan evidence 与 observe/history 中的 event ID、`plan_task_id`、`execution_task_id`、artifact ID 可相互追溯。
 
 ---
 

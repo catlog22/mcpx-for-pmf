@@ -26,3 +26,16 @@ func TestResolveBuildProvenanceFallsBackToVCSRevision(t *testing.T) {
 		t.Fatalf("unexpected VCS fallback provenance: %+v", got)
 	}
 }
+
+func TestBackgroundChildArgsRemovesDaemonFlag(t *testing.T) {
+	got := backgroundChildArgs([]string{"-addr", "127.0.0.1:9999", "-d", "-log-level", "debug"})
+	want := []string{"-addr", "127.0.0.1:9999", "-log-level", "debug"}
+	if len(got) != len(want) {
+		t.Fatalf("unexpected args length: got=%v want=%v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected arg at %d: got=%q want=%q", i, got[i], want[i])
+		}
+	}
+}
