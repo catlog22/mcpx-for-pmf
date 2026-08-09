@@ -132,7 +132,7 @@ func EnsureGlobalLayout() (EnsureResult, error) {
 const workspacesExampleYAML = `# 复制下列 workspaces 段到 config.yaml（路径改成你的真实目录）
 #
 # 也可用命令注册（会写回 config.yaml）：
-#   mcpx-server workspace register /Users/you/code/my-app
+#   mcpx workspace register /Users/you/code/my-app
 #
 # 字段：
 #   name         逻辑名，创建 Remote Session 时通过 workspace 使用

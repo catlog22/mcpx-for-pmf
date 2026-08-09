@@ -30,7 +30,7 @@ Download the archive for your platform from [Releases](https://github.com/opento
 ```bash
 git clone https://github.com/opentokenz/mcpx.git
 cd mcpx
-go build -o bin/mcpx-server ./cmd/mcpx-server
+go build -o bin/mcpx ./cmd/mcpx-server
 ```
 
 MCPX requires **Go 1.26.1 or later**; the exact development version is defined by `go.mod`.
@@ -38,9 +38,9 @@ MCPX requires **Go 1.26.1 or later**; the exact development version is defined b
 ### 2. Start
 
 ```bash
-./bin/mcpx-server
+./bin/mcpx
 # Or register a project while starting:
-./bin/mcpx-server --workspace /path/to/your/project
+./bin/mcpx --workspace /path/to/your/project
 ```
 
 The first start creates runtime data under **`~/.mcpx/`**. Set `MCPX_HOME` to use another location. The default endpoint is:
@@ -54,7 +54,7 @@ MCPX provides Streamable HTTP only; legacy HTTP+SSE endpoints are not supported.
 Check the version with:
 
 ```bash
-./bin/mcpx-server -version
+./bin/mcpx -version
 ```
 
 ## Configuration overview
@@ -99,7 +99,7 @@ The default command policy is `allow`. A command matched by a `confirm` rule sti
 Projects can also be registered with:
 
 ```bash
-./bin/mcpx-server --workspace /path/to/your/project
+./bin/mcpx --workspace /path/to/your/project
 ```
 
 ## Client integration
@@ -168,7 +168,7 @@ go test ./... -count=1
 go test -race ./... -count=1
 go vet ./...
 test -z "$(gofmt -l ./cmd ./internal)"
-go build -o bin/mcpx-server ./cmd/mcpx-server
+go build -o bin/mcpx ./cmd/mcpx-server
 ```
 
 The `v0.1.0` release is built from the verified `main` commit. Future releases are created from `main` after the pull request and CI checks have passed.

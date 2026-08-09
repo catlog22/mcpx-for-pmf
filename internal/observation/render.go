@@ -93,6 +93,9 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 	}
 	status, _ := payload["status"].(string)
 	failed, failureMessage := toolFailure(payload)
+	if failed {
+		verb = failureActionVerb(event.Tool, verb)
+	}
 	if err := writeEventAction(w, event, verb, label, actionColor(event.Tool, failed), options.colorMode != ColorModeNone); err != nil {
 		return err
 	}
@@ -1008,19 +1011,48 @@ func errorSummary(payload map[string]any) string {
 }
 
 func toolFailure(payload map[string]any) (bool, string) {
-	if status, _ := payload["status"].(string); status == "error" {
+	status := strings.ToLower(strings.TrimSpace(stringValue(payload["status"])))
+	failedStatus := isErrorStatus(status) || status == "denied" || status == "unauthorized"
+	if failedStatus {
+		if summary := compactLine(stringValue(payload["summary"])); summary != "" && !strings.EqualFold(summary, status) {
+			return true, summary
+		}
 		return true, errorSummary(payload)
 	}
 	result, _ := payload["result"].(map[string]any)
 	if result == nil {
 		return false, ""
 	}
-	status, _ := payload["status"].(string)
 	isError, _ := payload["is_error"].(bool)
-	if message := nestedErrorSummary(result, status == "error" || isError); message != "" {
+	if message := nestedErrorSummary(result, isError); message != "" {
 		return true, message
 	}
 	return false, ""
+}
+
+func failureActionVerb(tool, fallback string) string {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "execute", "command_execute", "command_run":
+		return "Command failed"
+	case "edit", "change_execute", "change_apply", "change_revert", "change_prepare":
+		return "Edit failed"
+	case "read", "file_read", "source_read", "context_query":
+		return "Read failed"
+	case "session", "session_open", "session_manage", "session_read", "session_transition":
+		return "Session failed"
+	case "plan", "plan_create", "plan_manage", "plan_read", "plan_transition":
+		return "Plan failed"
+	case "artifact", "artifact_manage", "artifact_read", "artifact_register":
+		return "Artifact failed"
+	}
+	if value := strings.TrimSpace(tool); value != "" {
+		value = strings.ReplaceAll(value, "_", " ")
+		return strings.ToUpper(value[:1]) + value[1:] + " failed"
+	}
+	if fallback = strings.TrimSpace(fallback); fallback != "" && fallback != "Observed" {
+		return fallback + " failed"
+	}
+	return "Operation failed"
 }
 
 func nestedErrorSummary(result map[string]any, allowPlainText bool) string {

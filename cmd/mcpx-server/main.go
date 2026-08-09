@@ -90,12 +90,12 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("mcpx-server %s (commit=%s date=%s)\n", build.Version, build.Commit, build.Date)
+		fmt.Printf("mcpx %s (commit=%s date=%s)\n", build.Version, build.Commit, build.Date)
 		os.Exit(0)
 	}
 
 	logging.Init(logging.Options{Level: *logLevel, Format: *logFormat})
-	logging.Info("mcpx-server", "version", build.Version, "commit", build.Commit)
+	logging.Info("mcpx", "version", build.Version, "commit", build.Commit)
 
 	rt, err := server.New(server.Options{
 		AddrOverride: *addr,
@@ -114,19 +114,19 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintf(os.Stderr, `mcpx-server — MCPX Runtime
+	fmt.Fprintf(os.Stderr, `mcpx — MCPX Runtime
 
 Usage:
-  mcpx-server [flags]                     启动 Streamable HTTP 服务
-  mcpx-server observe [flags] <name>      终端只读观测 Workspace 事件
-  mcpx-server workspace register <path>  注册或更新 Workspace（不启动服务）
-  mcpx-server oauth-register [url]        动态注册 OAuth 客户端（粘贴 ChatGPT 回调 URL）
-  mcpx-server -version
+  mcpx [flags]                     启动 Streamable HTTP 服务
+  mcpx observe [flags] <name>      终端只读观测 Workspace 事件
+  mcpx workspace register <path>  注册或更新 Workspace（不启动服务）
+  mcpx oauth-register [url]        动态注册 OAuth 客户端（粘贴 ChatGPT 回调 URL）
+  mcpx -version
 
 oauth-register:
-  mcpx-server oauth-register 'https://chatgpt.com/connector/oauth/…'
-  mcpx-server oauth-register          # 交互粘贴回调
-  mcpx-server oauth-register -base https://mcp.example.com 'https://…'
+  mcpx oauth-register 'https://chatgpt.com/connector/oauth/…'
+  mcpx oauth-register          # 交互粘贴回调
+  mcpx oauth-register -base https://mcp.example.com 'https://…'
 
 Flags (server):
 `)

@@ -137,6 +137,26 @@ func TestRenderTextPreservesPlainMCPErrorMessage(t *testing.T) {
 	}
 }
 
+func TestRenderTextShowsFailedToolAndSnapshotReason(t *testing.T) {
+	var output bytes.Buffer
+	if err := RenderText(&output, Event{
+		Tool:   "session",
+		Type:   TypeToolCompleted,
+		Status: "failed",
+		Input:  []byte(`{"action":"attach","remote_session_id":"c897d261-7b53-4a24-9a8b-d7c2ed78cde2"}`),
+		Output: []byte(`{"available":true,"status":"failed","summary":"SESSION_NOT_FOUND: remote session does not exist"}`),
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	if !strings.Contains(got, "! Session failed c897d261-7b53-4a24-9a8b-d7c2ed78cde2") {
+		t.Fatalf("failed tool identity missing: %q", got)
+	}
+	if !strings.Contains(got, "failed: SESSION_NOT_FOUND: remote session does not exist") {
+		t.Fatalf("failed tool reason missing: %q", got)
+	}
+}
+
 func TestRenderTextHidesToolStartAndShowsHumanReadAction(t *testing.T) {
 	var output bytes.Buffer
 	err := RenderText(&output, Event{

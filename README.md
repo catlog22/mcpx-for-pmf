@@ -113,35 +113,35 @@ MCPX 只提供 Streamable HTTP 的 `/mcp` 端点，不提供旧版 HTTP+SSE 的 
 ```bash
 git clone https://github.com/opentokenz/mcpx.git
 cd mcpx
-go build -o bin/mcpx-server ./cmd/mcpx-server
+go build -o bin/mcpx ./cmd/mcpx-server
 ```
 
 本地静态构建可以关闭 CGO：
 
 ```bash
-CGO_ENABLED=0 go build -o bin/mcpx-server ./cmd/mcpx-server
+CGO_ENABLED=0 go build -o bin/mcpx ./cmd/mcpx-server
 ```
 
 普通 VCS 构建会从 Go build info 回填当前 Git revision（工作树有未提交变更时带 `-dirty`）；
 正式发布仍以 GoReleaser 的 linker flags 为权威来源，同时注入版本、commit 和真实 build time。
-CI 会构建带 provenance 的二进制并通过 `mcpx-server -version` 校验 commit/date 未丢失。
+CI 会构建带 provenance 的二进制并通过 `mcpx -version` 校验 commit/date 未丢失。
 
 ### 启动服务
 
 ```bash
-./bin/mcpx-server
+./bin/mcpx
 ```
 
 注册或更新一个 Workspace：
 
 ```bash
-./bin/mcpx-server workspace register /path/to/your/project
+./bin/mcpx workspace register /path/to/your/project
 ```
 
 然后启动服务：
 
 ```bash
-./bin/mcpx-server
+./bin/mcpx
 ```
 
 默认监听地址和 MCP 端点：
@@ -165,17 +165,17 @@ http://127.0.0.1:9090/mcp
 查看版本和命令帮助：
 
 ```bash
-./bin/mcpx-server -version
-./bin/mcpx-server -h
+./bin/mcpx -version
+./bin/mcpx -h
 ```
 
 服务端命令包括：
 
 ```text
-mcpx-server [flags]                   启动 Streamable HTTP 服务
-mcpx-server observe [flags] <name>    终端只读观测 Workspace 事件
-mcpx-server workspace register <path> 注册或更新 Workspace
-mcpx-server oauth-register [url]      动态注册 OAuth 客户端
+mcpx [flags]                   启动 Streamable HTTP 服务
+mcpx observe [flags] <name>    终端只读观测 Workspace 事件
+mcpx workspace register <path> 注册或更新 Workspace
+mcpx oauth-register [url]      动态注册 OAuth 客户端
 ```
 
 ## 配置
@@ -338,9 +338,9 @@ ChatGPT 使用 **CIMD**（`client_id` 为 `https://chatgpt.com/oauth/...` 文档
 仍可用手动 DCR 预注册：
 
 ```bash
-./bin/mcpx-server oauth-register 'https://chatgpt.com/connector/oauth/...'
+./bin/mcpx oauth-register 'https://chatgpt.com/connector/oauth/...'
 # 或交互输入回调地址：
-./bin/mcpx-server oauth-register
+./bin/mcpx oauth-register
 ```
 
 OAuth 发现与授权端点包括：
@@ -635,7 +635,7 @@ ARC 的机器结果固定包含 `context`：
 服务运行期间，可以在另一个终端只读观察指定 Workspace：
 
 ```bash
-./bin/mcpx-server observe my-app
+./bin/mcpx observe my-app
 ```
 
 命令使用本机 Socket 订阅服务端事件，不启动第二个 HTTP 服务，不执行工具、命令
@@ -657,8 +657,8 @@ ARC 的机器结果固定包含 `context`：
 示例：
 
 ```bash
-./bin/mcpx-server observe -format json -history 100 my-app
-./bin/mcpx-server observe -detail -diff full -tool edit my-app
+./bin/mcpx observe -format json -history 100 my-app
+./bin/mcpx observe -detail -diff full -tool edit my-app
 ```
 
 文本模式使用紧凑的行式 CLI 输出：先显示 `Read`、`Edited`、`Ran`、`Searched`
@@ -721,7 +721,7 @@ test -z "$(gofmt -l ./cmd ./internal)"
 go test ./... -count=1
 go test -race ./... -count=1
 go vet ./...
-CGO_ENABLED=0 go build -o bin/mcpx-server ./cmd/mcpx-server
+CGO_ENABLED=0 go build -o bin/mcpx ./cmd/mcpx-server
 git diff --check
 ```
 

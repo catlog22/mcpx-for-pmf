@@ -251,7 +251,7 @@ func renderWorkspaceFrameWithRenderer(w io.Writer, frame observation.Frame, form
 
 func printObserveUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  mcpx-server observe [flags] <workspace name>")
+	fmt.Fprintln(w, "  mcpx observe [flags] <workspace name>")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Observe persisted Workspace events and terminal output.")
 	fmt.Fprintln(w, "")
@@ -268,17 +268,17 @@ func printObserveUsage(w io.Writer) {
 
 func printWorkspaceCommandUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  mcpx-server workspace register <path>")
+	fmt.Fprintln(w, "  mcpx workspace register <path>")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Register or update a Workspace in the global config without starting the Runtime.")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "For terminal observation, use:")
-	fmt.Fprintln(w, "  mcpx-server observe [flags] <workspace name>")
+	fmt.Fprintln(w, "  mcpx observe [flags] <workspace name>")
 }
 
 func printWorkspaceRegisterUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  mcpx-server workspace register <path>")
+	fmt.Fprintln(w, "  mcpx workspace register <path>")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Register or update a Workspace in the global config without starting the Runtime.")
 }

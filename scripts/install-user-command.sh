@@ -10,9 +10,9 @@ Usage:
 Install the MCPX binary as a user-level command without sudo.
 
 Defaults:
-  binary    <repo>/bin/mcpx-server
+  binary    <repo>/bin/mcpx
   bin dir   $XDG_BIN_HOME, or $HOME/.local/bin
-  name      mcpx-server
+  name      mcpx
 
 Options:
   --bin-dir DIR  Override the user command directory.
@@ -35,7 +35,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
 
 INSTALL_DIR=${XDG_BIN_HOME:-"$HOME/.local/bin"}
-COMMAND_NAME=mcpx-server
+COMMAND_NAME=mcpx
 UPDATE_PATH=1
 SOURCE=
 
@@ -79,7 +79,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -z "$SOURCE" ]; then
-  SOURCE="$REPO_ROOT/bin/mcpx-server"
+  SOURCE="$REPO_ROOT/bin/mcpx"
 fi
 
 case "$COMMAND_NAME" in

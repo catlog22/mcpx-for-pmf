@@ -17,8 +17,8 @@ import (
 
 // runOAuthRegister implements:
 //
-//	mcpx-server oauth-register [callback-url]
-//	mcpx-server oauth-register -base https://mcp.example.com [callback-url]
+//	mcpx oauth-register [callback-url]
+//	mcpx oauth-register -base https://mcp.example.com [callback-url]
 //
 // Registers a public OAuth client (RFC7591 DCR) and prints client_id for ChatGPT.
 func runOAuthRegister(args []string) int {
@@ -40,7 +40,7 @@ func runOAuthRegister(args []string) int {
 	cb = strings.TrimSpace(cb)
 	if cb == "" || !strings.HasPrefix(cb, "https://") {
 		fmt.Fprintln(os.Stderr, "错误: 回调 URL 必须以 https:// 开头")
-		fmt.Fprintln(os.Stderr, "用法: mcpx-server oauth-register 'https://chatgpt.com/connector/oauth/…'")
+		fmt.Fprintln(os.Stderr, "用法: mcpx oauth-register 'https://chatgpt.com/connector/oauth/…'")
 		return 1
 	}
 

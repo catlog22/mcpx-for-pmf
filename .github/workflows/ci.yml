@@ -29,7 +29,7 @@ jobs:
         run: |
           BUILD_COMMIT="$(git rev-parse HEAD)"
           BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          CGO_ENABLED=0 go build -ldflags "-X main.commit=${BUILD_COMMIT} -X main.date=${BUILD_DATE}" -o bin/mcpx-server ./cmd/mcpx-server
-          VERSION_OUTPUT="$(./bin/mcpx-server -version)"
+          CGO_ENABLED=0 go build -ldflags "-X main.commit=${BUILD_COMMIT} -X main.date=${BUILD_DATE}" -o bin/mcpx ./cmd/mcpx-server
+          VERSION_OUTPUT="$(./bin/mcpx -version)"
           [[ "${VERSION_OUTPUT}" == *"commit=${BUILD_COMMIT}"* ]]
           [[ "${VERSION_OUTPUT}" != *"date=unknown"* ]]

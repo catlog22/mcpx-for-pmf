@@ -44,7 +44,7 @@ import (
 	"mcpx/internal/workspacechanges"
 )
 
-// Options configures mcpx-server startup.
+// Options configures mcpx runtime startup.
 type Options struct {
 	AddrOverride string
 	Version      string
