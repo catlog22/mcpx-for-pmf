@@ -11,11 +11,26 @@ import (
 	"mcpx/internal/config"
 )
 
-const daemonStateFilename = "mcpx-daemon.json"
+const (
+	daemonStateFilename       = "mcpx-daemon.json"
+	backgroundChildSubcommand = "__background-child"
+)
 
 type daemonState struct {
 	PID        int    `json:"pid"`
 	Executable string `json:"executable"`
+}
+
+func stopExistingBackground() ([]int, error) {
+	layout, err := config.EnsureGlobalLayout()
+	if err != nil {
+		return nil, fmt.Errorf("prepare mcpx home: %w", err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve executable: %w", err)
+	}
+	return stopPreviousBackground(filepath.Join(layout.HomeDir, daemonStateFilename), executable)
 }
 
 func startBackground(args []string) (int, string, []int, error) {
@@ -39,7 +54,7 @@ func startBackground(args []string) (int, string, []int, error) {
 	}
 	defer logFile.Close()
 
-	cmd := exec.Command(executable, backgroundChildArgs(args)...)
+	cmd := exec.Command(executable, append([]string{backgroundChildSubcommand}, backgroundChildArgs(args)...)...)
 	cmd.Stdin = nil
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile

@@ -28,6 +28,12 @@ func TestResolveBuildProvenanceFallsBackToVCSRevision(t *testing.T) {
 	}
 }
 
+func TestBackgroundChildSubcommandIsInternal(t *testing.T) {
+	if backgroundChildSubcommand != "__background-child" {
+		t.Fatalf("unexpected internal background child subcommand %q", backgroundChildSubcommand)
+	}
+}
+
 func TestBackgroundChildArgsRemovesDaemonFlag(t *testing.T) {
 	got := backgroundChildArgs([]string{"-addr", "127.0.0.1:9999", "-d", "-log-level", "debug"})
 	want := []string{"-addr", "127.0.0.1:9999", "-log-level", "debug"}
@@ -70,6 +76,18 @@ func TestStopPreviousBackgroundRemovesInvalidState(t *testing.T) {
 	}
 	if _, err := readDaemonState(path); err == nil {
 		t.Fatal("daemon state should be removed")
+	}
+}
+
+func TestBackgroundStopMessageShowsStoppedDaemons(t *testing.T) {
+	got := backgroundStopMessage([]int{35421, 35422})
+	want := "mcpx stopped previous background daemon (pid=35421)\n" +
+		"mcpx stopped previous background daemon (pid=35422)\n"
+	if got != want {
+		t.Fatalf("background stop message=%q, want %q", got, want)
+	}
+	if got := backgroundStopMessage(nil); got != "" {
+		t.Fatalf("empty background stop message=%q", got)
 	}
 }
 

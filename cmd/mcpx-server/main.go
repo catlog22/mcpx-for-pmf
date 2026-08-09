@@ -67,6 +67,11 @@ func currentBuildProvenance() buildProvenance {
 
 func main() {
 	build := currentBuildProvenance()
+	backgroundChild := false
+	if len(os.Args) >= 2 && os.Args[1] == backgroundChildSubcommand {
+		backgroundChild = true
+		os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
+	}
 	// Subcommands (before flag.Parse so they own their flags).
 	if len(os.Args) >= 2 {
 		switch os.Args[1] {
@@ -106,6 +111,15 @@ func main() {
 		return
 	}
 
+	if !backgroundChild {
+		stoppedPIDs, err := stopExistingBackground()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "stop previous background daemon: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(backgroundStopMessage(stoppedPIDs))
+	}
+
 	logging.Init(logging.Options{Level: *logLevel, Format: *logFormat})
 	logging.Info("mcpx", "version", build.Version, "commit", build.Commit)
 
@@ -125,11 +139,17 @@ func main() {
 	}
 }
 
-func backgroundStartMessage(pid int, logPath string, stoppedPIDs []int) string {
+func backgroundStopMessage(stoppedPIDs []int) string {
 	var output strings.Builder
 	for _, stoppedPID := range stoppedPIDs {
 		fmt.Fprintf(&output, "mcpx stopped previous background daemon (pid=%d)\n", stoppedPID)
 	}
+	return output.String()
+}
+
+func backgroundStartMessage(pid int, logPath string, stoppedPIDs []int) string {
+	var output strings.Builder
+	output.WriteString(backgroundStopMessage(stoppedPIDs))
 	fmt.Fprintf(&output, "mcpx started in background (pid=%d, log=%s)\n", pid, logPath)
 	return output.String()
 }
