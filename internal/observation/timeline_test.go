@@ -100,22 +100,28 @@ func TestTextRendererSeparatesAdjacentOperationsWithToolAndStatus(t *testing.T) 
 	}
 }
 
-func TestTextRendererDefaultHidesOperationAndDurationTelemetry(t *testing.T) {
+func TestTextRendererDefaultShowsTranscriptContextActionSeparatorAndRunDuration(t *testing.T) {
 	renderer := NewTextRenderer(false)
 	var output bytes.Buffer
+	exitCode := 0
 	for _, event := range []Event{
-		{Sequence: 1, RequestID: "req_1", Tool: "read", Type: TypeToolCompleted, Status: "succeeded", Input: []byte(`{"view":"file","path":"a.go"}`), Output: []byte(`{"status":"succeeded"}`)},
-		{Sequence: 2, RequestID: "req_2", OperationID: "op_secret", Tool: "execute", Type: TypeToolCompleted, Status: "succeeded", DurationMs: 27, Command: "go test ./...", Input: []byte(`{"command":"go test ./..."}`), Output: []byte(`{"status":"succeeded"}`)},
+		{Sequence: 1, Workspace: "demo", RemoteSessionID: "rs_demo", RequestID: "req_1", Tool: "read", Type: TypeToolCompleted, Status: "succeeded", Input: []byte(`{"view":"file","path":"a.go"}`), Output: []byte(`{"status":"succeeded"}`)},
+		{Sequence: 2, Workspace: "demo", RemoteSessionID: "rs_demo", RequestID: "req_2", OperationID: "op_secret", Tool: "execute", Type: TypeToolCompleted, Status: "succeeded", DurationMs: 2100, ExitCode: &exitCode, Command: "go test ./...", Input: []byte(`{"command":"go test ./..."}`), Output: []byte(`{"status":"succeeded"}`)},
 	} {
 		if err := renderer.RenderEvent(&output, event); err != nil {
 			t.Fatal(err)
 		}
 	}
 	text := output.String()
-	if !strings.Contains(text, "• Ran go test ./...") {
-		t.Fatalf("real command missing: %q", text)
+	for _, want := range []string{"Workspace demo · Session rs_demo", "• Read a.go (full)", "────────────────────────", "• Ran go test ./...", "↳ exit 0 · 2.1s"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("default transcript context/action fact missing %q: %q", want, text)
+		}
 	}
-	for _, forbidden := range []string{"operation=op_secret", "duration=27ms", "── execute"} {
+	if strings.Count(text, "Workspace demo") != 1 || strings.Count(text, "Session rs_demo") != 1 {
+		t.Fatalf("transcript context repeated: %q", text)
+	}
+	for _, forbidden := range []string{"operation=op_secret", "duration=2100ms", "── execute"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("default telemetry leaked %q: %q", forbidden, text)
 		}
@@ -269,8 +275,8 @@ func TestTextRendererShowsProgressBeforeCompletionOnce(t *testing.T) {
 			t.Fatalf("semantic context missing %q: %q", want, text)
 		}
 	}
-	if !strings.Contains(text, "goal: 验证变更 · purpose: 运行测试") || !strings.Contains(text, "plan: pl_progress · plan task: pt_progress · execution task: task_progress") || !strings.Contains(text, "• Ran go test ./...") {
-		t.Fatalf("semantic context or command was not grouped: %q", text)
+	if !strings.Contains(text, "goal: 验证变更 · purpose: 运行测试") || !strings.Contains(text, "plan: pl_progress · plan task: pt_progress · execution task: task_progress") || !strings.Contains(text, "• Ran go test ./...") || !strings.Contains(text, "↳ 27ms") {
+		t.Fatalf("semantic context, command, or run duration was not grouped: %q", text)
 	}
 	for _, forbidden := range []string{"operation=op_progress", "duration=27ms", "↳ operation: op_progress"} {
 		if strings.Contains(text, forbidden) {

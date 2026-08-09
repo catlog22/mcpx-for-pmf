@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // RenderText writes a terminal-style timeline item. Tool-start events are
@@ -241,7 +242,7 @@ func renderCommandOutput(w io.Writer, event Event, options renderOptions) error 
 			lineNumber = i + 1
 		}
 		prefixed := fmt.Sprintf("%3d | %s", lineNumber, line)
-		if err := writeCodeChild(w, prefixed, options, options.terminalWidth-8); err != nil {
+		if err := writeCommandOutputLine(w, prefixed, stream, options); err != nil {
 			return err
 		}
 	}
@@ -644,6 +645,27 @@ func writeChildWithDiffStats(w io.Writer, value string, added, removed int, mode
 	return err
 }
 
+func writeCommandOutputLine(w io.Writer, value, stream string, options renderOptions) error {
+	value = compactCodeLine(sanitizeTerminalText(value))
+	if width := options.terminalWidth - 8; width > 0 {
+		value = truncateRenderedLine(value, width)
+	}
+	if options.colorMode != ColorModeNone {
+		switch strings.ToLower(strings.TrimSpace(stream)) {
+		case "stdout":
+			// Match diff context: low-emphasis output that stays readable without
+			// competing with the RUN action itself.
+			value = ansiDim + value + ansiReset
+		case "stderr":
+			value = ansiYellow + value + ansiReset
+		default:
+			value = paint(value, commandStreamColor(stream), true)
+		}
+	}
+	_, err := fmt.Fprintf(w, "    %s\n", value)
+	return err
+}
+
 func writeCodeChild(w io.Writer, value string, options renderOptions, width int) error {
 	value = compactCodeLine(sanitizeTerminalText(value))
 	if width > 0 {
@@ -815,6 +837,7 @@ func publicView(raw []byte) string {
 
 func eventFactLine(event Event, detail, suppressDuration bool) string {
 	parts := make([]string, 0, 9)
+	command := isCommandTool(event.Tool)
 	if detail && event.Command != "" {
 		parts = append(parts, "command="+compactCommand(event.Command))
 	}
@@ -822,10 +845,19 @@ func eventFactLine(event Event, detail, suppressDuration bool) string {
 		parts = append(parts, "cwd="+compactLine(event.WorkingDirectory))
 	}
 	if event.ExitCode != nil {
-		parts = append(parts, fmt.Sprintf("exit=%d", *event.ExitCode))
+		if command && !detail {
+			parts = append(parts, fmt.Sprintf("exit %d", *event.ExitCode))
+		} else {
+			parts = append(parts, fmt.Sprintf("exit=%d", *event.ExitCode))
+		}
 	}
-	if detail && event.DurationMs > 0 && !suppressDuration {
-		parts = append(parts, fmt.Sprintf("duration=%dms", event.DurationMs))
+	if event.DurationMs > 0 {
+		switch {
+		case command && !detail:
+			parts = append(parts, (time.Duration(event.DurationMs) * time.Millisecond).String())
+		case detail && !suppressDuration:
+			parts = append(parts, fmt.Sprintf("duration=%dms", event.DurationMs))
+		}
 	}
 	if event.SkillName != "" {
 		parts = append(parts, "skill="+event.SkillName)

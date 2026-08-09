@@ -475,6 +475,7 @@ func TestRenderTextColorsCommandAndStreams(t *testing.T) {
 		ansiAmber + "Ran" + ansiReset,
 		ansiAmber + "go test ./..." + ansiReset,
 		ansiGray + "stdout:" + ansiReset,
+		ansiDim + "  1 | ok" + ansiReset,
 	} {
 		if !strings.Contains(stdoutText, want) {
 			t.Fatalf("stdout command color missing %q: %q", want, stdoutText)
@@ -491,8 +492,14 @@ func TestRenderTextColorsCommandAndStreams(t *testing.T) {
 	}, true); err != nil {
 		t.Fatal(err)
 	}
-	if want := ansiYellow + "stderr:" + ansiReset; !strings.Contains(stderr.String(), want) {
-		t.Fatalf("stderr command color missing %q: %q", want, stderr.String())
+	stderrText := stderr.String()
+	for _, want := range []string{
+		ansiYellow + "stderr:" + ansiReset,
+		ansiYellow + "  1 | failed" + ansiReset,
+	} {
+		if !strings.Contains(stderrText, want) {
+			t.Fatalf("stderr command color missing %q: %q", want, stderrText)
+		}
 	}
 
 	var failed bytes.Buffer

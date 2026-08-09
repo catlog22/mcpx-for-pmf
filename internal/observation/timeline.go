@@ -26,6 +26,8 @@ type TextRenderer struct {
 	lastClosedKey           string
 	duplicateCount          int
 	detail                  bool
+	lastWorkspace           string
+	lastRemoteSessionID     string
 }
 
 type interactionBlock struct {
@@ -142,6 +144,9 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 	}
 	if !r.detail && isCompactObservationNoise(event) {
 		return nil
+	}
+	if err := r.writeTranscriptContext(w, event); err != nil {
+		return err
 	}
 	if event.Tool == "progress_report" && event.Type == TypeToolCompleted {
 		fingerprint := progressFingerprint(event)
@@ -447,8 +452,12 @@ func (r *TextRenderer) activate(w io.Writer, block *interactionBlock, event Even
 			}
 		}
 	}
-	if r.detail && !block.opened && r.lastClosedKey != "" && r.lastClosedKey != block.key {
-		if err := r.writeOperationSeparator(w, event); err != nil {
+	if !block.opened && r.lastClosedKey != "" && r.lastClosedKey != block.key {
+		if r.detail {
+			if err := r.writeOperationSeparator(w, event); err != nil {
+				return err
+			}
+		} else if err := r.writeActionSeparator(w); err != nil {
 			return err
 		}
 	}
@@ -543,6 +552,36 @@ func (r *TextRenderer) close(w io.Writer, block *interactionBlock) error {
 		r.activeKey = ""
 	}
 	return nil
+}
+
+func (r *TextRenderer) writeTranscriptContext(w io.Writer, event Event) error {
+	workspace := strings.TrimSpace(event.Workspace)
+	sessionID := strings.TrimSpace(event.RemoteSessionID)
+	parts := make([]string, 0, 2)
+	if workspace != "" && workspace != r.lastWorkspace {
+		parts = append(parts, "Workspace "+workspace)
+		r.lastWorkspace = workspace
+	}
+	if sessionID != "" && sessionID != r.lastRemoteSessionID {
+		parts = append(parts, "Session "+sessionID)
+		r.lastRemoteSessionID = sessionID
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	line := "  " + strings.Join(parts, " · ")
+	return writeSeparatorLine(w, line, ansiGray, r.colorMode)
+}
+
+func (r *TextRenderer) writeActionSeparator(w io.Writer) error {
+	width := 24
+	if r.width > 2 && r.width-2 < width {
+		width = r.width - 2
+	}
+	if width < 2 {
+		width = 2
+	}
+	return writeSeparatorLine(w, "  "+strings.Repeat("─", width), ansiGray, r.colorMode)
 }
 
 func (r *TextRenderer) writeOperationSeparator(w io.Writer, event Event) error {
