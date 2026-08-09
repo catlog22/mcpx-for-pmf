@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"runtime/debug"
 	"testing"
 
@@ -37,5 +38,55 @@ func TestBackgroundChildArgsRemovesDaemonFlag(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("unexpected arg at %d: got=%q want=%q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestDaemonStateRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), daemonStateFilename)
+	want := daemonState{PID: 4321, Executable: "/opt/mcpx/bin/mcpx"}
+	if err := writeDaemonState(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readDaemonState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("daemon state mismatch: got=%+v want=%+v", got, want)
+	}
+}
+
+func TestStopPreviousBackgroundRemovesInvalidState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), daemonStateFilename)
+	if err := writeDaemonState(path, daemonState{}); err != nil {
+		t.Fatal(err)
+	}
+	stoppedPIDs, err := stopPreviousBackground(path, "/definitely/not/a/running/mcpx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stoppedPIDs) != 0 {
+		t.Fatalf("invalid state must not report stopped daemon pids: %v", stoppedPIDs)
+	}
+	if _, err := readDaemonState(path); err == nil {
+		t.Fatal("daemon state should be removed")
+	}
+}
+
+func TestBackgroundStartMessageShowsStoppedDaemonBeforeNewDaemon(t *testing.T) {
+	got := backgroundStartMessage(35600, "/tmp/mcpx-daemon.log", []int{35421, 35422})
+	want := "mcpx stopped previous background daemon (pid=35421)\n" +
+		"mcpx stopped previous background daemon (pid=35422)\n" +
+		"mcpx started in background (pid=35600, log=/tmp/mcpx-daemon.log)\n"
+	if got != want {
+		t.Fatalf("background start message=%q, want %q", got, want)
+	}
+}
+
+func TestBackgroundStartMessageWithoutPreviousDaemonOnlyShowsStart(t *testing.T) {
+	got := backgroundStartMessage(35600, "/tmp/mcpx-daemon.log", nil)
+	want := "mcpx started in background (pid=35600, log=/tmp/mcpx-daemon.log)\n"
+	if got != want {
+		t.Fatalf("background start message=%q, want %q", got, want)
 	}
 }

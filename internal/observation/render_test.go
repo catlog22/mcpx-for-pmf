@@ -214,6 +214,39 @@ func TestRenderTextShowsBatchReadPathsAndRanges(t *testing.T) {
 	}
 }
 
+func TestRenderTextShowsReadViewTargets(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "list directory", input: `{"view":"list","path":"flux-boot-ui/src/store","include_glob":"**/*.ts"}`, want: "• Read flux-boot-ui/src/store (list)"},
+		{name: "search scope", input: `{"view":"search","query":"loading","paths":["flux-boot-ui/src"]}`, want: `• Read search "loading" in flux-boot-ui/src`},
+		{name: "context scope", input: `{"view":"context","query":"consultComm refresh history","paths":["flux-boot-ui/src/store"]}`, want: `• Read context "consultComm refresh history" in flux-boot-ui/src/store`},
+		{name: "environment sections", input: `{"view":"environment","sections":["toolchains","runtime"]}`, want: "• Read environment (toolchains, runtime)"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			if err := RenderText(&output, Event{
+				Tool:   "read",
+				Type:   TypeToolCompleted,
+				Input:  []byte(test.input),
+				Output: []byte(`{"status":"succeeded"}`),
+			}, false); err != nil {
+				t.Fatal(err)
+			}
+			text := output.String()
+			if !strings.Contains(text, test.want) {
+				t.Fatalf("read target missing %q: %q", test.want, text)
+			}
+			if strings.Contains(text, "• Read read\n") {
+				t.Fatalf("read action fell back to generic tool name: %q", text)
+			}
+		})
+	}
+}
+
 func TestRenderTextShowsSearchCommandAndFullMatchPaths(t *testing.T) {
 	var output bytes.Buffer
 	if err := RenderText(&output, Event{

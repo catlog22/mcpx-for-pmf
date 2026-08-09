@@ -828,9 +828,7 @@ func toolAction(tool string, raw []byte) (string, string) {
 		}
 		label = compactCommand(label)
 	case "read":
-		if publicView(raw) == "file" || (publicView(raw) == "" && (input["path"] != nil || input["items"] != nil)) {
-			label = fileReadLabel(input)
-		}
+		label = readActionLabel(input)
 	case "file_read":
 		label = fileReadLabel(input)
 	case "context_query":
@@ -1129,6 +1127,57 @@ func inputMap(raw []byte) map[string]any {
 		return nil
 	}
 	return input
+}
+
+func readActionLabel(input map[string]any) string {
+	if input == nil {
+		return "read request"
+	}
+	view := strings.ToLower(strings.TrimSpace(stringValue(input["view"])))
+	switch view {
+	case "", "file":
+		if input["path"] != nil || input["items"] != nil || view == "file" {
+			return fileReadLabel(input)
+		}
+	case "list":
+		scope := stringValue(input["path"])
+		if scope == "" {
+			scope = "."
+		}
+		return scope + " (list)"
+	case "search", "context":
+		query := stringValue(input["query"])
+		if query == "" {
+			query = "<query>"
+		}
+		scopes := inputPaths(input)
+		if len(scopes) == 0 {
+			scopes = []string{"."}
+		}
+		return view + " " + strconv.Quote(query) + " in " + strings.Join(scopes, ", ")
+	case "environment":
+		sections := stringValues(input["sections"], 6)
+		if len(sections) == 0 {
+			return "environment"
+		}
+		return "environment (" + strings.Join(sections, ", ") + ")"
+	}
+	if path := stringValue(input["path"]); path != "" {
+		return path
+	}
+	if scopes := inputPaths(input); len(scopes) > 0 {
+		return strings.Join(scopes, ", ")
+	}
+	if query := stringValue(input["query"]); query != "" {
+		if view == "" {
+			view = "query"
+		}
+		return view + " " + strconv.Quote(query)
+	}
+	if view != "" {
+		return view
+	}
+	return "read request"
 }
 
 func fileReadLabel(input map[string]any) string {

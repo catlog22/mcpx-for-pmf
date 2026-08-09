@@ -97,12 +97,12 @@ func main() {
 		os.Exit(0)
 	}
 	if *background {
-		pid, logPath, err := startBackground(os.Args[1:])
+		pid, logPath, stoppedPIDs, err := startBackground(os.Args[1:])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "start background server: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("mcpx started in background (pid=%d, log=%s)\n", pid, logPath)
+		fmt.Print(backgroundStartMessage(pid, logPath, stoppedPIDs))
 		return
 	}
 
@@ -123,6 +123,15 @@ func main() {
 		logging.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
+}
+
+func backgroundStartMessage(pid int, logPath string, stoppedPIDs []int) string {
+	var output strings.Builder
+	for _, stoppedPID := range stoppedPIDs {
+		fmt.Fprintf(&output, "mcpx stopped previous background daemon (pid=%d)\n", stoppedPID)
+	}
+	fmt.Fprintf(&output, "mcpx started in background (pid=%d, log=%s)\n", pid, logPath)
+	return output.String()
 }
 
 func printUsage() {
