@@ -30,8 +30,9 @@ const (
 
 // Request is the common tool arguments envelope.
 type Request struct {
-	// RequestID and StartedAtMs are populated by the Gateway Runtime Context,
-	// never by MCP tool arguments.
+	// RequestID is populated by the Gateway Runtime Context. StartedAtMs is
+	// populated by the server instrumentation boundary from the required
+	// started_at_ms tool argument and is never treated as business payload.
 	RequestID         string         `json:"-"`
 	OperationID       string         `json:"-"`
 	ParentOperationID string         `json:"-"`
@@ -373,7 +374,8 @@ func EnsureRequestID(id string) string {
 }
 
 // ParseRequest decodes business tool arguments into Request.
-// Runtime metadata is intentionally ignored and is injected by the Gateway.
+// Runtime metadata is intentionally ignored here and injected by the server
+// instrumentation boundary before handlers consume the normalized request.
 func ParseRequest(raw json.RawMessage) (Request, error) {
 	var req Request
 	if len(raw) == 0 || string(raw) == "null" {

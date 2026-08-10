@@ -45,7 +45,7 @@ func TestRuntimeContextGeneratesValuesWithoutHeaders(t *testing.T) {
 	}
 }
 
-func TestRegisteredToolSchemasExcludeRuntimeContext(t *testing.T) {
+func TestRegisteredToolSchemasRequireStartedAtMsAndExcludeServerRuntimeContext(t *testing.T) {
 	runtime := newWorkspaceRuntime(t, "demo")
 	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
 	runtime.registerTools(protocol)
@@ -58,31 +58,32 @@ func TestRegisteredToolSchemasExcludeRuntimeContext(t *testing.T) {
 		if err := json.Unmarshal(encoded, &tool); err != nil {
 			t.Fatalf("decode %s: %v", name, err)
 		}
-		for _, field := range []string{"request_id", "trace_id", "span_id", "started_at_ms", "received_at_ms", "completed_at_ms", "processing_ms", "server_elapsed_ms"} {
-			if schemaContainsProperty(tool["inputSchema"], field) {
-				t.Fatalf("%s input schema contains runtime field %q: %s", name, field, encoded)
+		inputSchema, _ := tool["inputSchema"].(map[string]any)
+		if !schemaContainsProperty(inputSchema, "started_at_ms") || !schemaRequiresProperty(inputSchema, "started_at_ms") {
+			t.Fatalf("%s input schema must require started_at_ms: %s", name, encoded)
+		}
+		for _, field := range []string{"request_id", "trace_id", "span_id", "received_at_ms", "completed_at_ms", "network_latency_ms", "processing_ms", "server_elapsed_ms"} {
+			if schemaContainsProperty(inputSchema, field) {
+				t.Fatalf("%s input schema contains server runtime field %q: %s", name, field, encoded)
 			}
 		}
 	}
 }
 
-func TestInstrumentToolUsesRuntimeContextWithoutArgumentMetadata(t *testing.T) {
+func TestInstrumentToolUsesStartedAtMsArgumentForTiming(t *testing.T) {
 	started := time.Now().Add(-100 * time.Millisecond).UnixMilli()
 	ctx := withRuntimeContext(context.Background(), RuntimeContext{
-		RequestID: "req_context", TraceID: "trace_context", SpanID: "span_context", StartedAtMs: started,
+		RequestID: "req_context", TraceID: "trace_context", SpanID: "span_context", StartedAtMs: time.Now().UnixMilli(),
 	})
 	called := false
 	handler := func(handlerCtx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		called = true
-		if _, exists := mcpresult.Arguments(req)["started_at_ms"]; exists {
-			t.Fatal("runtime metadata reached tool arguments")
-		}
-		if runtime, ok := runtimeContextFrom(handlerCtx); !ok || runtime.RequestID != "req_context" {
+		if runtime, ok := runtimeContextFrom(handlerCtx); !ok || runtime.RequestID != "req_context" || runtime.StartedAtMs != started {
 			t.Fatalf("handler runtime context = %+v, %v", runtime, ok)
 		}
 		return mcpresult.NewStructured(map[string]any{"value": "ok"}, "ok"), nil
 	}
-	request := mcpresult.Request(map[string]any{"action": "list"})
+	request := mcpresult.Request(map[string]any{"action": "list", "started_at_ms": started})
 
 	result, err := (&Runtime{}).instrumentTool("runtime_context_test", handler)(ctx, request)
 	if err != nil || !called {
@@ -94,6 +95,28 @@ func TestInstrumentToolUsesRuntimeContextWithoutArgumentMetadata(t *testing.T) {
 	if trace["request_id"] != "req_context" || trace["trace_id"] != "trace_context" || trace["span_id"] != "span_context" {
 		t.Fatalf("ARC did not project runtime identity: %+v", trace)
 	}
+	if trace["started_at_ms"] != float64(started) || trace["network_latency_ms"].(float64) <= 0 {
+		t.Fatalf("ARC did not use request started_at_ms: %+v", trace)
+	}
+	structured, _ := result.StructuredContent.(map[string]any)
+	timing, _ := structured["timing"].(map[string]any)
+	if timing["started_at_ms"] != started || timing["server_timestamp_ms"] == nil || timing["tool_duration_ms"] == nil {
+		t.Fatalf("model timing = %+v", timing)
+	}
+}
+
+func schemaRequiresProperty(value any, wanted string) bool {
+	item, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	required, _ := item["required"].([]any)
+	for _, field := range required {
+		if field == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func schemaContainsProperty(value any, wanted string) bool {

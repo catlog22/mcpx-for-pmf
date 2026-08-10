@@ -258,6 +258,10 @@ func (r *Runtime) validateOperationToolArguments(toolName string, arguments map[
 	merged := cloneArguments(arguments)
 	merged["remote_session_id"] = sessionID
 	merged["purpose"] = purpose
+	// operation_batch creates child tool calls on the server. Validate those
+	// child arguments against the public schema with a server-generated send
+	// timestamp; executeOperationStep refreshes it again at actual dispatch.
+	merged["started_at_ms"] = time.Now().UnixMilli()
 	return validateOperationSchemaValue(merged, schema, "arguments")
 }
 

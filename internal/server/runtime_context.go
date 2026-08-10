@@ -30,8 +30,9 @@ type toolInvocationNameKey struct{}
 type operationChildKey struct{}
 type cleanCoreRequestKey struct{}
 
-// RuntimeContext is gateway-owned lifecycle metadata. It is never decoded
-// from tool arguments and is not part of an MCP input schema.
+// RuntimeContext is server-owned lifecycle metadata. Identity and trace fields
+// come from the Gateway; instrumentTool overrides StartedAtMs from the required
+// tool argument before invoking business handlers.
 type RuntimeContext struct {
 	RequestID         string
 	OperationID       string

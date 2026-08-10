@@ -98,7 +98,7 @@ func TestGatewayStreamableActionDiscovery(t *testing.T) {
 			t.Fatalf("marshal output schema %s: %v", tool.Name, err)
 		}
 		var schema map[string]any
-		if err := json.Unmarshal(encoded, &schema); err != nil || schema["$id"] != "mcpx.structured_content.v1.3" {
+		if err := json.Unmarshal(encoded, &schema); err != nil || schema["$id"] != "mcpx.structured_content.v1.4" {
 			t.Fatalf("invalid output schema %s: %s", tool.Name, encoded)
 		}
 	}

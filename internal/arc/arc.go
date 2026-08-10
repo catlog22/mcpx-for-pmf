@@ -15,7 +15,7 @@ import (
 	"mcpx/internal/mcpresult"
 )
 
-const Version = "1.3"
+const Version = "1.4"
 
 // ResultMetadataKey identifies the hidden response metadata that carries the
 // complete ARC envelope. Keeping the envelope in _meta prevents MCP hosts
@@ -160,17 +160,18 @@ func WrapToolResult(tool string, runtime ResultContext, raw *mcp.CallToolResult)
 		content = append(content, item)
 	}
 	raw.Content = content
-	raw.StructuredContent = modelStructuredContent(status, resultType, resultData, data, semanticContext, hints, actions, raw.IsError)
+	raw.StructuredContent = modelStructuredContent(status, resultType, resultData, data, semanticContext, runtime.Timing, hints, actions, raw.IsError)
 	setMetadata(raw, envelope, resultType)
 	return raw
 }
 
 // modelStructuredContent is the machine contract for models.
-func modelStructuredContent(status, resultType string, resultData any, rawData map[string]any, semanticContext Context, hints Hints, actions []Action, isError bool) map[string]any {
+func modelStructuredContent(status, resultType string, resultData any, rawData map[string]any, semanticContext Context, timing Timing, hints Hints, actions []Action, isError bool) map[string]any {
 	payload := map[string]any{
 		"status":  status,
 		"type":    resultType,
 		"context": contextData(semanticContext),
+		"timing":  timingData(timing),
 		"data":    resultData,
 	}
 	if rawData != nil {
@@ -193,6 +194,16 @@ func modelStructuredContent(status, resultType string, resultData any, rawData m
 	}
 	normalized, _ := normalizePublicData(payload).(map[string]any)
 	return normalized
+}
+
+func timingData(timing Timing) map[string]any {
+	return map[string]any{
+		"started_at_ms":         timing.StartedAtMs,
+		"server_received_at_ms": timing.ReceivedAtMs,
+		"server_timestamp_ms":   timing.CompletedAtMs,
+		"network_latency_ms":    timing.NetworkLatencyMs,
+		"tool_duration_ms":      timing.ProcessingMs,
+	}
 }
 
 func contextData(context Context) map[string]any {
@@ -308,6 +319,9 @@ func setMetadata(result *mcp.CallToolResult, envelope Envelope, resultType strin
 	result.Meta["mcpx.span_id"] = trace.SpanID
 	result.Meta["mcpx.request_id"] = trace.RequestID
 	result.Meta["mcpx.result_type"] = resultType
+	result.Meta["mcpx.server_timestamp_ms"] = trace.CompletedAtMs
+	result.Meta["mcpx.network_latency_ms"] = trace.NetworkLatencyMs
+	result.Meta["mcpx.tool_duration_ms"] = trace.Duration.ServerMs - trace.NetworkLatencyMs
 	result.Meta["mcpx.processing_ms"] = trace.Duration.ServerMs - trace.NetworkLatencyMs
 	result.Meta["mcpx.server_elapsed_ms"] = trace.Duration.ServerMs
 	result.Meta[ResultMetadataKey] = envelope
@@ -776,7 +790,7 @@ func buildOutputSchema() json.RawMessage {
 		// result contract explicit while leaving tool-specific data open; the
 		// result type and the actual data fields are the stable discriminator.
 		"$id": "mcpx.structured_content.v" + Version, "type": "object",
-		"required":             []string{"status", "type", "context", "data"},
+		"required":             []string{"status", "type", "context", "timing", "data"},
 		"additionalProperties": false,
 		"properties": map[string]any{
 			"status": map[string]any{"type": "string", "enum": []string{"succeeded", "accepted", "waiting_confirmation", "interrupted", "failed"}},
@@ -788,6 +802,15 @@ func buildOutputSchema() json.RawMessage {
 					"reasoning_summary": map[string]any{"type": "string"}, "progress_summary": map[string]any{"type": "string"},
 					"next_step": map[string]any{"type": "string"}, "plan_id": map[string]any{"type": "string"},
 					"plan_task_id": map[string]any{"type": "string"}, "execution_task_id": map[string]any{"type": "string"}, "operation_id": map[string]any{"type": "string"},
+				},
+			},
+			"timing": map[string]any{
+				"type": "object", "additionalProperties": false, "description": "本次工具调用的端到端时序；网络延迟由模型发送时间与服务端接收时间估算",
+				"required": []string{"started_at_ms", "server_received_at_ms", "server_timestamp_ms", "network_latency_ms", "tool_duration_ms"},
+				"properties": map[string]any{
+					"started_at_ms": map[string]any{"type": "integer"}, "server_received_at_ms": map[string]any{"type": "integer"},
+					"server_timestamp_ms": map[string]any{"type": "integer"}, "network_latency_ms": map[string]any{"type": "integer", "minimum": 0},
+					"tool_duration_ms": map[string]any{"type": "integer", "minimum": 0},
 				},
 			},
 			"data":  map[string]any{"type": "object", "additionalProperties": true, "description": "按 type 返回的业务结果；ID、SHA、路径、命令输出和分页游标均原样位于此处"},

@@ -85,6 +85,64 @@ func TestToolLogRecordsDuration(t *testing.T) {
 	}
 }
 
+func TestToolRequestStartedAtMsPrefersClientMeta(t *testing.T) {
+	received := time.UnixMilli(1786365000200)
+	request := mcpresult.Request(map[string]any{"started_at_ms": int64(1786365000100)})
+	request.Params.Meta = mcp.Meta{clientStartedAtMetaKey: int64(1786365000050)}
+	if got := toolRequestStartedAtMs(request, received); got != int64(1786365000050) {
+		t.Fatalf("started_at_ms = %d, want client meta timestamp", got)
+	}
+}
+
+func TestInstrumentToolSendsNativeProgressHeartbeat(t *testing.T) {
+	old := toolProgressHeartbeatInterval
+	toolProgressHeartbeatInterval = 5 * time.Millisecond
+	defer func() { toolProgressHeartbeatInterval = old }()
+
+	protocol := mcp.NewServer(&mcp.Implementation{Name: "progress-server", Version: "0.1.0"}, nil)
+	handler := (&Runtime{}).instrumentTool("slow_tool", func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		time.Sleep(20 * time.Millisecond)
+		return mcpresult.NewText("done"), nil
+	})
+	protocol.AddTool(&mcp.Tool{Name: "slow_tool", InputSchema: map[string]any{"type": "object"}}, handler)
+
+	progress := make(chan *mcp.ProgressNotificationParams, 4)
+	client := mcp.NewClient(&mcp.Implementation{Name: "progress-client", Version: "0.1.0"}, &mcp.ClientOptions{
+		ProgressNotificationHandler: func(_ context.Context, req *mcp.ProgressNotificationClientRequest) {
+			if req != nil && req.Params != nil {
+				progress <- req.Params
+			}
+		},
+	})
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	serverSession, err := protocol.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverSession.Close()
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientSession.Close()
+
+	params := &mcp.CallToolParams{Name: "slow_tool", Arguments: map[string]any{"started_at_ms": time.Now().UnixMilli()}}
+	params.SetProgressToken("heartbeat-1")
+	if _, err := clientSession.CallTool(ctx, params); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case update := <-progress:
+		if update.ProgressToken != "heartbeat-1" || !strings.Contains(update.Message, "slow_tool is still running") {
+			t.Fatalf("unexpected progress update: %+v", update)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("server did not send native progress heartbeat")
+	}
+}
+
 func TestInstrumentToolCarriesSemanticContextToARC(t *testing.T) {
 	handler := func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return mcpresult.NewStructured(map[string]any{"status": "succeeded"}, "ok"), nil

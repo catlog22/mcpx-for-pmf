@@ -37,6 +37,11 @@ func TestWrapToolResultProducesARCSearchEnvelope(t *testing.T) {
 	if trace["started_at_ms"] != float64(100) || trace["received_at_ms"] != float64(110) || trace["completed_at_ms"] != float64(125) {
 		t.Fatalf("trace timing = %+v", trace)
 	}
+	structured := wrapped.StructuredContent.(map[string]any)
+	timing := structured["timing"].(map[string]any)
+	if timing["started_at_ms"] != int64(100) || timing["server_received_at_ms"] != int64(110) || timing["server_timestamp_ms"] != int64(125) || timing["network_latency_ms"] != int64(10) || timing["tool_duration_ms"] != int64(15) {
+		t.Fatalf("structured timing = %+v", timing)
+	}
 	result := mcpx["result"].(map[string]any)
 	if result["type"] != "search_result" || result["schema"] != SchemaSearchResult {
 		t.Fatalf("result identity = %+v", result)
@@ -180,8 +185,8 @@ func TestWrapToolResultKeepsHumanTextAndModelStructuredContent(t *testing.T) {
 	if !ok {
 		t.Fatalf("models need structuredContent, got %#v", written.StructuredContent)
 	}
-	if sc["status"] == nil || sc["type"] == nil || sc["context"] == nil || sc["data"] == nil {
-		t.Fatalf("structuredContent must expose status/type/context/data: %#v", sc)
+	if sc["status"] == nil || sc["type"] == nil || sc["context"] == nil || sc["timing"] == nil || sc["data"] == nil {
+		t.Fatalf("structuredContent must expose status/type/context/timing/data: %#v", sc)
 	}
 	data, _ := sc["data"].(map[string]any)
 	if data["value"] != "ready" {
@@ -333,18 +338,18 @@ func TestOutputSchemaAndRegistry(t *testing.T) {
 	if err := json.Unmarshal(rawOutputSchema, &schema); err != nil {
 		t.Fatal(err)
 	}
-	if schema["$id"] != "mcpx.structured_content.v1.3" {
+	if schema["$id"] != "mcpx.structured_content.v1.4" {
 		t.Fatalf("schema id = %v", schema["$id"])
 	}
 	required, _ := schema["required"].([]any)
-	for _, field := range []any{"status", "type", "context", "data"} {
+	for _, field := range []any{"status", "type", "context", "timing", "data"} {
 		if !containsAny(required, field) {
 			t.Fatalf("output schema missing required %v: %v", field, required)
 		}
 	}
 	properties, _ := schema["properties"].(map[string]any)
-	if properties["context"] == nil || properties["data"] == nil {
-		t.Fatalf("structured output schema missing context/data: %+v", properties)
+	if properties["context"] == nil || properties["timing"] == nil || properties["data"] == nil {
+		t.Fatalf("structured output schema missing context/timing/data: %+v", properties)
 	}
 	if schema["additionalProperties"] != false {
 		t.Fatalf("structured output schema must reject unknown envelope fields: %+v", schema)

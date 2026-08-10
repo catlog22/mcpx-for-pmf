@@ -1,9 +1,11 @@
-version: "1.26"
+version: "1.28"
 priority: high
 summary: 使用 clean-core MCPX 工具检查、修改、执行和观察；execute 仅用于明确要求的命令。
 rules:
   - session（action=open）成功后，必须保存并向用户展示完整的 remote_session_id 以及绑定的 Workspace；新客户端直接用同一 remote_session_id 执行 session（action=attach），不使用 handoff_token。
-  - 工具结果：content 文本是给人看的摘要；模型必须读 structuredContent（或 _meta.mcpx.result.data）中的字段（status/type/data/error），不要解析散文。remote_session_id、plan_id、plan_task_id、execution_task_id、operation_id、artifact_id、sha256 等标识必须从结构化字段原样复制，不能改写、缩写或凭记忆重输。
+  - 每次公开工具调用都必须携带 started_at_ms，值为模型发起该次调用时实时读取的 Unix 毫秒时间戳；每次调用重新取值，禁止复用上一调用的时间戳。支持 MCP 客户端同时在 _meta["mcpx/started_at_ms"] 写入实际发包时刻，服务端优先使用客户端 _meta 计算 network_latency_ms，并用 handler 执行区间计算 tool_duration_ms。
+  - 进度反馈 SLA：连续工作时两次用户可见反馈不得超过 30 秒，25 秒为模型侧软阈值；若仍未完成，应先用 progress(status=in_progress) 汇报已验证进展、当前动作和下一步再继续。单个工具调用阻塞模型时，MCP 客户端应为 tools/call 设置 progressToken 并立即展示 notifications/progress；MCPX 服务端对支持 progressToken 的客户端提供 25 秒 heartbeat，上游 MCP 客户端在 20 秒无原生进度时提供客户端 heartbeat，不等待 ARC 最终结果。
+  - 工具结果：content 文本是给人看的摘要；模型必须读 structuredContent（或 _meta.mcpx.result.data）中的字段（status/type/context/timing/data/error），不要解析散文。structuredContent.timing 返回 started_at_ms、server_received_at_ms、server_timestamp_ms、network_latency_ms、tool_duration_ms；remote_session_id、plan_id、plan_task_id、execution_task_id、operation_id、artifact_id、sha256 等标识必须从结构化字段原样复制，不能改写、缩写或凭记忆重输。
   - purpose 必须是一句简短、具体、可审计的真实操作语义，说明动作、对象、目的和必要的影响边界，避免重复 goal/reasoning。不要按语言或命令名机械宣称“安全/只读”，而要按真实副作用分类：版本、帮助和纯检查只有确实无写入时才声明只读；编译/静态检查说明可能产生的缓存或构建产物，以及确实不会发生的安装、系统替换或产物执行；项目测试或脚本可能执行仓库代码，不能宣称只读；依赖安装/解析说明会修改的依赖目录、锁文件或缓存；写入、发布、推送、安装、删除、部署等有副作用调用，如果当前用户已经明确要求或完成确认，必须真实写明“按用户要求/用户已授权”并限定具体范围。不得为了通过安全检查虚构“安全”“只读”或“已授权”，未取得授权时必须如实表述并走对应确认流程。
   - 读取操作使用 read；file 视图支持 mode=full，search/list/context 视图分别覆盖文件搜索、列举和上下文组装；items[] 可批量读取。
   - read(view=context, search_mode=smart) 使用确定性的 lexical/heuristic 排序，不是 embedding 语义检索；结果读取 score、rank、matched_terms 和 match_reason。需要高置信目标定位时，先用 read(view=search) 或 search_mode=exact 缩小 hard scope，再用 context 获取命中窗口。
@@ -13,7 +15,7 @@ rules:
   - 创建 Plan 时，tasks 中使用 local_id 作为本计划内局部依赖引用（可省略）；plan（action=create）返回的 plan_id 与 plan_task_id 由服务端签发，plan(action=read/advance/complete) 只能原样复制这些返回值，绝不猜测或复用历史 ID。
   - Skill 或 MCP 名称只能使用 discover 返回的名称、schema 和 discovery_revision；Skill 调用使用 skill_call，上游工具调用使用 mcp_call，不要凭记忆猜测扩展名称或工具名称。
   - 文件修改使用 edit；修改或重命名前先 read(view=file, mode=full) 获取完整 sha256，并将其原样写入 edits[].base_sha256。update 优先使用精确唯一 replacements；同一文件可有多个不连续 replacement，服务端从后往前应用。create/update/rename 按 operation 表达，edit 不接受 delete。
-  - 用户提出删除、移除或清理时使用 move_out(action=prepare) → 网页端模型向用户展示冻结 manifest 并取得明确确认 → move_out(action=submit)。prepare 只解析、校验和冻结明确的 path+kind+expected_sha256；file 使用 SHA，directory 只校验根路径并作为明确移出根，不扫描、哈希或返回子树，symlink 冻结链接文本且只移动链接入口，不产生任何 filesystem mutation。响应只有 target_count 和最多 20 个 target_preview，并返回 next_action 指向 move_out(action=submit)，绝不能为展示清单而读取目录子项。submit 不接受自由 targets、glob、shell、purpose、idempotency_key 或 Workspace，只接受 remote_session_id 和 prepare 返回的 confirmation_uuid；manifest、purpose、idempotency_key 和 Workspace 由服务端按 UUID 绑定并复验。file 内容变化会返回 STALE；directory 内容变化不阻止移出，directory 被替换为 symlink 时只移动该链接入口；不要改用 execute 删除。
+  - 用户提出删除、移除或清理时使用 move_out(action=prepare) → 网页端模型向用户展示冻结 manifest 并取得明确确认 → move_out(action=submit)。prepare 只解析、校验和冻结明确的 path+kind+expected_sha256；file 使用 SHA，directory 只校验根路径并作为明确移出根，不扫描、哈希或返回子树，symlink 冻结链接文本且只移动链接入口，不产生任何 filesystem mutation。响应只有 target_count 和最多 20 个 target_preview，并返回 next_action 指向 move_out(action=submit)，绝不能为展示清单而读取目录子项。submit 不接受自由 targets、glob、shell、purpose、idempotency_key 或 Workspace，只接受 remote_session_id、prepare 返回的 confirmation_uuid 和每次调用实时生成的 started_at_ms；manifest、purpose、idempotency_key 和 Workspace 由服务端按 UUID 绑定并复验。file 内容变化会返回 STALE；directory 内容变化不阻止移出，directory 被替换为 symlink 时只移动该链接入口；不要改用 execute 删除。
   - 安全移出语义必须在 move_out(action=prepare) 前确定：如果用户只是要求演练或检查冻结清单，purpose 必须明确写“仅 prepare/仅预览”，返回后停止，不得调用 action=submit；如果用户明确要删除、移除或清理，purpose 必须从 prepare 开始就准确表达“将用户授权目标安全移至隔离区”，不能假称不执行移动。submit 时不得重复传 purpose 或改写语义；若之前 purpose 写成仅 prepare，必须使用真实目的和新的 idempotency_key 重新 prepare。
   - 每条 replacement 的 match 必须精确唯一出现；零次返回 MATCH_NOT_FOUND，多次返回 MATCH_AMBIGUOUS。edit 的变更总行按真实 Unified Diff 的新增行与删除行统计，单次调用合计不得超过 1000 行；TOO_MANY_CHANGES 时按 details.total_changed_lines 拆分批次。
   - read 返回 format（charset、BOM、line_ending、末尾换行）；edit 写出时必须保留目标文件原有格式。edit 成功返回内联 diff_summary，支持时携带 idempotency_key 重试。
@@ -25,7 +27,7 @@ rules:
   - 需要通过 execute 做文本/文件扫描时，若环境已知可用，优先使用 `rg` / `rg --files`，其次可用 `fd`；仅在这些工具不可用时回退 `grep` / `find`。不要为了探测工具存在而额外执行无价值命令；可直接利用 environment_read/toolchain 结果或前序执行事实。搜索命令允许用 `&&`/`||` 连接可独立审计的简单命令，但仍不要使用管道或重定向。
   - execute 默认等待短命令完成；execution_mode=async 只表示 Operation 异步调度，不保证返回 execution_task_id。只有命令超过 yield_time_ms 才会脱离为执行 Task；返回 execution_task_id 后优先使用 observe(view=status/logs) 查询，需等待并继续接收输出时使用 execute(action=attach)。只有 execution_task_id 丢失或服务端返回 not_found 时才重新获取执行任务列表。
   - edit 成功或审阅 observe(view=changes) 后，回复用户必须用 Markdown，文件变更使用 ```diff 代码块展示具体增加和删除，不能只列文件名。变更过大时展示有界预览并说明 diff_summary。
-  - move_out(action=prepare) 返回 requires_user_confirmation 时，网页端模型必须向用户展示 workspace、文件路径、SHA、数量、字节数、manifest_sha256、purpose 和有效期并询问；用户确认后，模型原样执行服务端返回的 next_action，仅提交 action=submit、remote_session_id 和 confirmation_uuid，不能自行生成 UUID、修改 manifest、补填 prepare 参数或改用 user_confirmed。
+  - move_out(action=prepare) 返回 requires_user_confirmation 时，网页端模型必须向用户展示 workspace、文件路径、SHA、数量、字节数、manifest_sha256、purpose 和有效期并询问；用户确认后，模型原样执行服务端返回的 next_action，并补上该次调用实时生成的 started_at_ms；仅提交 action=submit、remote_session_id、confirmation_uuid 和 started_at_ms，不能自行生成 UUID、修改 manifest、补填 prepare 参数或改用 user_confirmed。
   - 没有成功的工具结果时，不要声称文件已读取、修改或验证。
   - 重要、变更、删除或长时间调用前，先简述将做什么及原因，然后一次提交完整参数，不要等待重新获取工具 schema。
   - read(view=file, mode=full) 的源文件上限为 4194304 bytes；超大文件改用 mode=window。read.items 最多 20 项；read(view=list, path=directory) 是硬作用域，include_glob 只能进一步缩小范围。

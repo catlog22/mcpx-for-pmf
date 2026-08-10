@@ -15,6 +15,7 @@ import (
 	"mcpx/internal/envelope"
 	"mcpx/internal/file"
 	"mcpx/internal/filesnapshot"
+	"mcpx/internal/logging"
 	"mcpx/internal/mcpproxy"
 	"mcpx/internal/secrets"
 	"mcpx/internal/skill"
@@ -276,7 +277,18 @@ func (r *Runtime) toolMCPCall(ctx context.Context, req *mcp.CallToolRequest) (*m
 	if !ok {
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "not_found", "mcp server not configured")
 	}
-	res, err := mcpproxy.CallTool(ctx, cfg, toolName, args)
+	res, err := mcpproxy.CallToolWithProgress(ctx, cfg, toolName, args, func(update mcpproxy.ToolProgress) {
+		message := strings.TrimSpace(update.Message)
+		if message == "" {
+			message = "upstream tool is still running"
+		}
+		if update.Synthetic {
+			message = "client heartbeat: " + message
+		}
+		if !notifyRequestProgress(ctx, req, fmt.Sprintf("MCP %s/%s: %s", serverName, toolName, message), update.Progress, update.Total) {
+			logging.Debug("upstream mcp progress", "server", serverName, "tool", toolName, "message", message, "synthetic", update.Synthetic)
+		}
+	})
 	if err != nil {
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "mcp_error", err.Error())
 	}

@@ -123,6 +123,11 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 		"type":        "string",
 		"description": "关联的服务端执行 Task ID",
 	}
+	startedAtMs := map[string]any{
+		"type":        "integer",
+		"minimum":     1,
+		"description": "模型发起本次工具调用时的 Unix 毫秒时间戳；每次调用必须读取当时时间，禁止复用上一次调用的值",
+	}
 	rawBytes := mcpresult.ToolSchemaJSON(tool)
 	var raw map[string]any
 	if err := json.Unmarshal(rawBytes, &raw); err != nil || raw == nil {
@@ -140,8 +145,10 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 	properties["plan_id"] = planID
 	properties["plan_task_id"] = planTaskID
 	properties["execution_task_id"] = executionTaskID
+	properties["started_at_ms"] = startedAtMs
 	raw["type"] = "object"
 	raw["properties"] = properties
+	raw["required"] = appendRequired(raw["required"], "started_at_ms")
 	if branches, ok := raw["oneOf"].([]any); ok {
 		for _, rawBranch := range branches {
 			branch, ok := rawBranch.(map[string]any)
@@ -156,6 +163,8 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 			if actionSchema, ok := branchProperties["action"].(map[string]any); ok {
 				action, _ = actionSchema["const"].(string)
 			}
+			branchProperties["started_at_ms"] = startedAtMs
+			branch["required"] = appendRequired(branch["required"], "started_at_ms")
 			if strictActions[action] {
 				branch["properties"] = branchProperties
 				continue
@@ -230,6 +239,35 @@ type interactionTiming struct {
 	ServerElapsedMs  int64
 }
 
+const (
+	clientStartedAtMetaKey      = "mcpx/started_at_ms"
+	progressNotificationTimeout = 2 * time.Second
+)
+
+var toolProgressHeartbeatInterval = 25 * time.Second
+
+type progressPulseContextKey struct{}
+
+type progressPulse struct {
+	reset chan struct{}
+}
+
+func withProgressPulse(ctx context.Context) (context.Context, *progressPulse) {
+	pulse := &progressPulse{reset: make(chan struct{}, 1)}
+	return context.WithValue(ctx, progressPulseContextKey{}, pulse), pulse
+}
+
+func signalProgressPulse(ctx context.Context) {
+	pulse, _ := ctx.Value(progressPulseContextKey{}).(*progressPulse)
+	if pulse == nil {
+		return
+	}
+	select {
+	case pulse.reset <- struct{}{}:
+	default:
+	}
+}
+
 func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (result *mcp.CallToolResult, err error) {
 		// Keep the entire instrumentation boundary defensive. Handler calls use
@@ -244,12 +282,16 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 		}()
 		received := time.Now()
 		callCtx, runtime := ensureRuntimeContext(ctx, mcpresult.Header(req), received)
+		runtime.StartedAtMs = toolRequestStartedAtMs(req, received)
 		clientName, clientVersion := clientInfoFromContext(callCtx)
 		if clientName != "" && clientName != "unknown" {
 			runtime = runtimeContextWithClient(runtime, clientName, clientVersion)
 		}
 		callCtx = withRuntimeContext(callCtx, runtime)
 		callCtx = withToolInvocationName(callCtx, name)
+		callCtx, progressPulse := withProgressPulse(callCtx)
+		stopProgressHeartbeat := startToolProgressHeartbeat(callCtx, req, name, received, progressPulse)
+		defer stopProgressHeartbeat()
 		if isCleanPublicTool(name) {
 			callCtx = withCleanCoreRequest(callCtx)
 		}
@@ -330,14 +372,121 @@ func callToolSafely(name string, call func() (*mcp.CallToolResult, error)) (resu
 	return call()
 }
 
+func toolRequestStartedAtMs(req *mcp.CallToolRequest, received time.Time) int64 {
+	fallback := received.UnixMilli()
+	if req != nil && req.Params != nil && req.Params.Meta != nil {
+		if started, ok := positiveInt64(req.Params.Meta[clientStartedAtMetaKey]); ok {
+			return started
+		}
+	}
+	if started, ok := positiveInt64(mcpresult.Arguments(req)["started_at_ms"]); ok {
+		return started
+	}
+	return fallback
+}
+
+func positiveInt64(value any) (int64, bool) {
+	switch number := value.(type) {
+	case int:
+		if number > 0 {
+			return int64(number), true
+		}
+	case int64:
+		if number > 0 {
+			return number, true
+		}
+	case float64:
+		if number > 0 {
+			return int64(number), true
+		}
+	case json.Number:
+		if parsed, err := number.Int64(); err == nil && parsed > 0 {
+			return parsed, true
+		}
+	}
+	return 0, false
+}
+
+func startToolProgressHeartbeat(ctx context.Context, req *mcp.CallToolRequest, name string, started time.Time, pulse *progressPulse) func() {
+	if toolProgressHeartbeatInterval <= 0 || req == nil || req.Params == nil || req.Session == nil || req.Params.GetProgressToken() == nil || pulse == nil {
+		return func() {}
+	}
+	heartbeatCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		timer := time.NewTimer(toolProgressHeartbeatInterval)
+		defer timer.Stop()
+		for {
+			select {
+			case <-timer.C:
+				elapsed := time.Since(started)
+				notifyRequestProgress(heartbeatCtx, req,
+					fmt.Sprintf("MCPX %s is still running; elapsed %ds", name, int(elapsed.Seconds())),
+					elapsed.Seconds(), 0,
+				)
+				timer.Reset(toolProgressHeartbeatInterval)
+			case <-pulse.reset:
+				resetToolProgressTimer(timer, toolProgressHeartbeatInterval)
+			case <-heartbeatCtx.Done():
+				return
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+func notifyRequestProgress(ctx context.Context, req *mcp.CallToolRequest, message string, progress, total float64) bool {
+	if req == nil || req.Params == nil || req.Session == nil {
+		return false
+	}
+	token := req.Params.GetProgressToken()
+	if token == nil {
+		return false
+	}
+	notifyCtx, cancel := context.WithTimeout(ctx, progressNotificationTimeout)
+	defer cancel()
+	if err := req.Session.NotifyProgress(notifyCtx, &mcp.ProgressNotificationParams{
+		ProgressToken: token,
+		Progress:      progress,
+		Total:         total,
+		Message:       strings.TrimSpace(message),
+	}); err != nil {
+		return false
+	}
+	signalProgressPulse(ctx)
+	return true
+}
+
+func resetToolProgressTimer(timer *time.Timer, interval time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(interval)
+}
+
 func makeInteractionTiming(startedAtMs int64, received, completed time.Time) interactionTiming {
 	receivedAtMs := received.UnixMilli()
 	completedAtMs := completed.UnixMilli()
+	networkLatencyMs := receivedAtMs - startedAtMs
+	if networkLatencyMs < 0 {
+		networkLatencyMs = 0
+	}
+	processingMs := completedAtMs - receivedAtMs
+	if processingMs < 0 {
+		processingMs = 0
+	}
 	return interactionTiming{
 		StartedAtMs: startedAtMs, ReceivedAtMs: receivedAtMs, CompletedAtMs: completedAtMs,
-		NetworkLatencyMs: receivedAtMs - startedAtMs,
-		ProcessingMs:     completedAtMs - receivedAtMs,
-		ServerElapsedMs:  completedAtMs - startedAtMs,
+		NetworkLatencyMs: networkLatencyMs,
+		ProcessingMs:     processingMs,
+		ServerElapsedMs:  networkLatencyMs + processingMs,
 	}
 }
 

@@ -237,12 +237,15 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 			t.Fatalf("decode %s: %v", name, err)
 		}
 		outputSchema, ok := listedTool["outputSchema"].(map[string]any)
-		if !ok || outputSchema["$id"] != "mcpx.structured_content.v1.3" {
+		if !ok || outputSchema["$id"] != "mcpx.structured_content.v1.4" {
 			t.Fatalf("%s must expose the ARC structuredContent OutputSchema: %+v", name, listedTool["outputSchema"])
 		}
 		inputSchema, err := json.Marshal(tool.InputSchema)
 		if err != nil {
 			t.Fatalf("marshal input schema %s: %v", name, err)
+		}
+		if !strings.Contains(string(inputSchema), `"started_at_ms"`) {
+			t.Fatalf("%s must require started_at_ms: %s", name, inputSchema)
 		}
 		for _, forbidden := range []string{"presentation", "renderer", "show_source", "density"} {
 			if strings.Contains(string(inputSchema), `"`+forbidden+`"`) {
@@ -297,12 +300,12 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 			submitRequired, _ = branch["required"].([]any)
 		}
 	}
-	for _, field := range []string{"action", "remote_session_id", "workspace", "purpose", "targets", "idempotency_key"} {
+	for _, field := range []string{"action", "remote_session_id", "workspace", "purpose", "targets", "idempotency_key", "started_at_ms"} {
 		if prepareProperties[field] == nil || !containsSchemaRequired(prepareRequired, field) {
 			t.Fatalf("move_out prepare branch missing required %q: %s", field, moveSchema)
 		}
 	}
-	for _, field := range []string{"action", "remote_session_id", "confirmation_uuid"} {
+	for _, field := range []string{"action", "remote_session_id", "confirmation_uuid", "started_at_ms"} {
 		if submitProperties[field] == nil || !containsSchemaRequired(submitRequired, field) {
 			t.Fatalf("move_out submit branch missing required %q: %s", field, moveSchema)
 		}
@@ -349,6 +352,14 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 
 	rawCall := func(name string, args map[string]any) map[string]any {
 		t.Helper()
+		if _, exists := args["started_at_ms"]; !exists {
+			withTiming := make(map[string]any, len(args)+1)
+			for key, value := range args {
+				withTiming[key] = value
+			}
+			args = withTiming
+			args["started_at_ms"] = time.Now().UnixMilli()
+		}
 		if name == "edit" {
 			if _, exists := args["purpose"]; !exists {
 				withPurpose := make(map[string]any, len(args)+1)
