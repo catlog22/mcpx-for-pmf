@@ -214,7 +214,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		}
 	}
 	expectedTools := []string{
-		"session", "read", "edit", "move_out", "observe", "progress",
+		"workspace", "session", "read", "edit", "move_out", "observe", "progress",
 		"operation_batch", "operation_manage",
 		"execute", "plan", "artifact", "discover", "skill_call", "mcp_call",
 		"runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide",
@@ -237,15 +237,18 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 			t.Fatalf("decode %s: %v", name, err)
 		}
 		outputSchema, ok := listedTool["outputSchema"].(map[string]any)
-		if !ok || outputSchema["$id"] != "mcpx.structured_content.v1.4" {
+		if !ok || outputSchema["$id"] != "mcpx.structured_content.v1.5" {
 			t.Fatalf("%s must expose the ARC structuredContent OutputSchema: %+v", name, listedTool["outputSchema"])
 		}
 		inputSchema, err := json.Marshal(tool.InputSchema)
 		if err != nil {
 			t.Fatalf("marshal input schema %s: %v", name, err)
 		}
-		if !strings.Contains(string(inputSchema), `"started_at_ms"`) {
-			t.Fatalf("%s must require started_at_ms: %s", name, inputSchema)
+		if strings.Contains(string(inputSchema), `"started_at_ms"`) {
+			t.Fatalf("%s must not expose started_at_ms: %s", name, inputSchema)
+		}
+		if strings.Contains(string(inputSchema), `"goal"`) {
+			t.Fatalf("%s must not expose deprecated goal: %s", name, inputSchema)
 		}
 		for _, forbidden := range []string{"presentation", "renderer", "show_source", "density"} {
 			if strings.Contains(string(inputSchema), `"`+forbidden+`"`) {
@@ -300,12 +303,12 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 			submitRequired, _ = branch["required"].([]any)
 		}
 	}
-	for _, field := range []string{"action", "remote_session_id", "workspace", "purpose", "targets", "idempotency_key", "started_at_ms"} {
+	for _, field := range []string{"action", "remote_session_id", "workspace", "purpose", "targets", "idempotency_key"} {
 		if prepareProperties[field] == nil || !containsSchemaRequired(prepareRequired, field) {
 			t.Fatalf("move_out prepare branch missing required %q: %s", field, moveSchema)
 		}
 	}
-	for _, field := range []string{"action", "remote_session_id", "confirmation_uuid", "started_at_ms"} {
+	for _, field := range []string{"action", "remote_session_id", "confirmation_uuid"} {
 		if submitProperties[field] == nil || !containsSchemaRequired(submitRequired, field) {
 			t.Fatalf("move_out submit branch missing required %q: %s", field, moveSchema)
 		}
@@ -352,14 +355,6 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 
 	rawCall := func(name string, args map[string]any) map[string]any {
 		t.Helper()
-		if _, exists := args["started_at_ms"]; !exists {
-			withTiming := make(map[string]any, len(args)+1)
-			for key, value := range args {
-				withTiming[key] = value
-			}
-			args = withTiming
-			args["started_at_ms"] = time.Now().UnixMilli()
-		}
 		if name == "edit" {
 			if _, exists := args["purpose"]; !exists {
 				withPurpose := make(map[string]any, len(args)+1)
@@ -533,8 +528,8 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	}
 	revs, _ := openData["revisions"].(map[string]any)
 	for _, key := range []string{
-		"tool_schema_revision", "capability_manifest_revision", "guidance_revision", "skill_manifest_revision",
-		"mcp_manifest_revision", "instruction_revision", "session_capability_revision",
+		"tool_schema_revision", "capability_manifest_revision", "guidance_revision", "skill_revision",
+		"mcp_revision", "instruction_revision", "session_capability_revision",
 	} {
 		if revs[key] == nil || revs[key] == "" {
 			t.Fatalf("missing revision %s: %+v", key, revs)
@@ -582,8 +577,15 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	if executedData["completed_in_call"] != true || executedData["exit_code"] != float64(0) {
 		t.Fatalf("execute run did not reach handler: %+v", executedData)
 	}
+	legacyGoalExecute := call("execute", map[string]any{
+		"action": "run", "remote_session_id": remoteID, "purpose": "acceptance legacy goal compatibility",
+		"goal": "legacy client context", "command": "printf acceptance-legacy-goal", "scope": "workspace",
+	})
+	if !statusOK(legacyGoalExecute) {
+		t.Fatalf("legacy goal execute must be accepted and ignored: %+v", legacyGoalExecute)
+	}
 	planCreated := call("plan_manage", map[string]any{
-		"action": "create", "remote_session_id": remoteID, "goal": "acceptance plan", "purpose": "acceptance plan create",
+		"action": "create", "remote_session_id": remoteID, "summary": "acceptance plan", "purpose": "acceptance plan create",
 		"tasks": []any{map[string]any{"local_id": "verify", "title": "Verify protocol"}},
 	})
 	planData, _ := planCreated["data"].(map[string]any)

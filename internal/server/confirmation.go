@@ -2,40 +2,24 @@ package server
 
 import "mcpx/internal/approval"
 
-func cleanPendingConfirmationItems(pending []map[string]any) []map[string]any {
-	items := make([]map[string]any, 0, len(pending))
-	for _, original := range pending {
-		item := map[string]any{}
-		for _, key := range []string{"summary", "workspace", "created_at", "command", "purpose", "scope"} {
-			if value, ok := original[key]; ok {
-				item[key] = value
-			}
-		}
-		item["tool"] = "execute"
-		item["user_confirmed_required"] = true
-		items = append(items, item)
-	}
-	return items
-}
-
-// pendingConfirmationItems exposes resumable semantic-confirmation context
-// without exposing the internal store ID or a separate management action.
+// pendingConfirmationItems builds the session bootstrap view for commands that
+// still need an explicit user confirmation.
 func pendingConfirmationItems(pending []approval.Pending) []map[string]any {
 	items := make([]map[string]any, 0, len(pending))
-	for _, item := range pending {
-		view := map[string]any{
-			"tool":               item.Tool,
-			"summary":            item.Summary,
-			"workspace":          item.Workspace,
-			"created_at":         item.CreatedAt,
-			"confirmation_token": item.ConfirmationToken,
+	for _, pendingItem := range pending {
+		item := map[string]any{
+			"tool":                    "execute",
+			"summary":                 pendingItem.Summary,
+			"workspace":               pendingItem.Workspace,
+			"created_at":              pendingItem.CreatedAt,
+			"user_confirmed_required": true,
 		}
-		if item.Command != "" {
-			view["command"] = item.Command
-			view["purpose"] = item.Purpose
-			view["scope"] = item.Scope
+		if pendingItem.Command != "" {
+			item["command"] = pendingItem.Command
+			item["purpose"] = pendingItem.Purpose
+			item["scope"] = pendingItem.Scope
 		}
-		items = append(items, view)
+		items = append(items, item)
 	}
 	return items
 }

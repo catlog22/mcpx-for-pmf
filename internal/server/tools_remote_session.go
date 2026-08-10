@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -94,8 +93,6 @@ func (r *Runtime) remoteError(envReq envelope.Request, remoteSessionID, workspac
 		code = "version_conflict"
 	case errors.Is(err, errRemoteSessionRunning):
 		code = "running_task"
-	case errors.Is(err, remotesession.ErrInvalidToken):
-		status, code = envelope.StatusDenied, "invalid_handoff_token"
 	case errors.Is(err, remotesession.ErrInvalidInput):
 		code = "invalid_request"
 	case errors.Is(err, errWorkspaceNotFound):
@@ -111,20 +108,20 @@ func (r *Runtime) remoteError(envReq envelope.Request, remoteSessionID, workspac
 	resp.RemoteSessionID = remoteSessionID
 	switch code {
 	case "workspace_not_found":
-		addRecoveryAction(&resp, "workspace_read", "select a valid workspace before retrying session", nil)
+		addRecoveryAction(&resp, "workspace", "select a valid workspace before retrying session", map[string]any{"action": "list"})
 		addRecoveryActions(&resp,
-			nextActionWithReason("workspace_read", "refresh the available workspace names", nil),
+			nextActionWithReason("workspace", "refresh the available workspace names", map[string]any{"action": "list"}),
 			nextActionWithReason("session", "open a Remote Session after selecting a workspace", map[string]any{"workspace": workspace}),
 		)
 	case "not_found":
 		if remoteSessionID != "" {
-			addRecoveryAction(&resp, "workspace_read", "refresh workspace selection before opening a new Remote Session", nil)
+			addRecoveryAction(&resp, "workspace", "refresh workspace selection before opening a new Remote Session", map[string]any{"action": "list"})
 		}
 	case "remote_session_required":
 		if workspace != "" {
 			addRecoveryAction(&resp, "session", "open or resume a Remote Session before using this tool", map[string]any{"workspace": workspace})
 		} else {
-			addRecoveryAction(&resp, "workspace_read", "select a workspace before opening a Remote Session", nil)
+			addRecoveryAction(&resp, "workspace", "select a workspace before opening a Remote Session", map[string]any{"action": "list"})
 		}
 	}
 	return r.resultJSON(resp)
@@ -159,138 +156,6 @@ func (r *Runtime) createRemoteSession(ctx context.Context, principal auth.Princi
 		r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: result.Session.ID, Workspace: workspaceName, Tool: "workspace_baseline", Status: "error", Detail: map[string]any{"error": err.Error()}})
 	}
 	return result, nil
-}
-
-func (r *Runtime) toolRemoteSessionList(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	envReq, principal, fail := r.remoteRequest(ctx, req)
-	if fail != nil {
-		return fail, nil
-	}
-	workspaceName := strings.TrimSpace(envReq.Workspace)
-	if workspaceName == "" {
-		workspaceName, _ = envReq.Payload["workspace"].(string)
-	}
-	query, _ := envReq.Payload["query"].(string)
-	status, _ := envReq.Payload["status"].(string)
-	cursor, _ := envReq.Payload["cursor"].(string)
-	limit := intPayload(envReq.Payload, "limit")
-	var statuses []string
-	for _, value := range strings.Split(status, ",") {
-		if value = strings.TrimSpace(value); value != "" {
-			statuses = append(statuses, value)
-		}
-	}
-	result, err := r.remote.List(ctx, principal, remotesession.ListInput{Workspace: workspaceName, Query: query, Statuses: statuses, Limit: limit, Cursor: cursor})
-	if err != nil {
-		return r.remoteError(envReq, "", workspaceName, err)
-	}
-	return r.remoteResult(envReq, "", workspaceName, result)
-}
-
-func (r *Runtime) toolRemoteSessionGet(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	envReq, principal, fail := r.remoteRequest(ctx, req)
-	if fail != nil {
-		return fail, nil
-	}
-	remoteSessionID, err := requireRemoteSessionID(envReq)
-	if err != nil {
-		return r.remoteError(envReq, "", "", err)
-	}
-	session, err := r.remote.Get(ctx, principal, remoteSessionID)
-	if err != nil {
-		return r.remoteError(envReq, remoteSessionID, "", err)
-	}
-	encoded, _ := json.Marshal(session)
-	data := map[string]any{}
-	_ = json.Unmarshal(encoded, &data)
-	if tasks, taskErr := r.tasks.List(session.ID, 20); taskErr == nil {
-		data["tasks"] = tasks
-	}
-	if session.Role == "owner" || session.Role == "approver" {
-		data["pending_confirmations"] = pendingConfirmationItems(r.approvals.ListRemoteSession(session.ID))
-	}
-	if artifacts, artifactErr := r.artifacts.List(ctx, session.ID, "", 10); artifactErr == nil {
-		data["recent_artifacts"] = artifacts
-	}
-	return r.remoteResult(envReq, remoteSessionID, session.WorkspaceName, data)
-}
-
-func (r *Runtime) toolRemoteSessionEvents(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	envReq, principal, fail := r.remoteRequest(ctx, req)
-	if fail != nil {
-		return fail, nil
-	}
-	remoteSessionID, err := requireRemoteSessionID(envReq)
-	if err != nil {
-		return r.remoteError(envReq, "", "", err)
-	}
-	events, err := r.remote.Events(ctx, principal, remoteSessionID, remotesession.EventsInput{AfterSequence: int64(intPayload(envReq.Payload, "after_sequence")), Limit: intPayload(envReq.Payload, "limit")})
-	if err != nil {
-		return r.remoteError(envReq, remoteSessionID, "", err)
-	}
-	data := map[string]any{"events": events}
-	// Models recovering a confirmed command from the event log also need the
-	// pending confirmation token; otherwise a lost retry token is unrecoverable.
-	if session, getErr := r.remote.Get(ctx, principal, remoteSessionID); getErr == nil && (session.Role == "owner" || session.Role == "approver") {
-		if pending := r.approvals.ListRemoteSession(session.ID); len(pending) > 0 {
-			data["pending_confirmations"] = pendingConfirmationItems(pending)
-		}
-	}
-	return r.remoteResult(envReq, remoteSessionID, "", data)
-}
-
-func (r *Runtime) toolRemoteSessionUpdate(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	envReq, principal, fail := r.remoteRequest(ctx, req)
-	if fail != nil {
-		return fail, nil
-	}
-	remoteSessionID, err := requireRemoteSessionID(envReq)
-	if err != nil {
-		return r.remoteError(envReq, "", "", err)
-	}
-	label, _ := envReq.Payload["label"].(string)
-	description, _ := envReq.Payload["description"].(string)
-	status, _ := envReq.Payload["status"].(string)
-	session, err := r.remote.Update(ctx, principal, remoteSessionID, label, description, status, intPayload(envReq.Payload, "expected_version"))
-	if err != nil {
-		return r.remoteError(envReq, remoteSessionID, "", err)
-	}
-	return r.remoteResult(envReq, remoteSessionID, session.WorkspaceName, session)
-}
-
-func (r *Runtime) toolRemoteSessionHandoff(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	envReq, principal, fail := r.remoteRequest(ctx, req)
-	if fail != nil {
-		return fail, nil
-	}
-	remoteSessionID, err := requireRemoteSessionID(envReq)
-	if err != nil {
-		return r.remoteError(envReq, "", "", err)
-	}
-	role, _ := envReq.Payload["role"].(string)
-	note, _ := envReq.Payload["note"].(string)
-	result, err := r.remote.Handoff(ctx, principal, remoteSessionID, role, note, time.Duration(intPayload(envReq.Payload, "expires_in"))*time.Second)
-	if err != nil {
-		return r.remoteError(envReq, remoteSessionID, "", err)
-	}
-	return r.remoteResult(envReq, remoteSessionID, "", result)
-}
-
-func (r *Runtime) toolRemoteSessionAttach(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	envReq, principal, fail := r.remoteRequest(ctx, req)
-	if fail != nil {
-		return fail, nil
-	}
-	token, _ := envReq.Payload["handoff_token"].(string)
-	clientName, clientVersion := clientInfoFromContext(ctx)
-	session, err := r.remote.Attach(ctx, principal, token, clientName, clientVersion)
-	if err != nil {
-		return r.remoteError(envReq, "", "", err)
-	}
-	return r.remoteResult(envReq, session.ID, session.WorkspaceName, map[string]any{
-		"session":                session,
-		"recommended_next_calls": []string{"session", "read", "observe"},
-	})
 }
 
 func (r *Runtime) toolRemoteSessionClose(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {

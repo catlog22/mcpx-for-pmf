@@ -12,11 +12,11 @@ import (
 	"mcpx/internal/remotesession"
 )
 
-const cleanCoreCapabilityVersion = "clean-core-p5"
+const cleanCoreCapabilityVersion = "clean-core-p8"
 
 func capabilityGroups() map[string][]string {
 	return map[string][]string{
-		"core":    {"session", "read", "edit", "move_out", "observe", "progress", "execute", "plan", "artifact", "discover", "skill_call", "mcp_call"},
+		"core":    {"workspace", "session", "read", "edit", "move_out", "observe", "progress", "execute", "plan", "artifact", "discover", "skill_call", "mcp_call"},
 		"support": {"operation_batch", "operation_manage", "runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide"},
 	}
 }
@@ -37,6 +37,7 @@ var toolCapabilityDefinitions = []toolCapabilityDefinition{
 	{Name: "progress", Domain: "progress", RequiresRemoteSession: true},
 	{Name: "operation_batch", Domain: "operation", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "operation_manage", Domain: "operation", RequiresRemoteSession: true},
+	{Name: "workspace", Domain: "workspace"},
 	{Name: "session", Domain: "session"},
 	{Name: "read", Domain: "source", RequiresRemoteSession: true},
 	{Name: "edit", Domain: "edit", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},

@@ -30,14 +30,13 @@ const (
 
 // Request is the common tool arguments envelope.
 type Request struct {
-	// RequestID is populated by the Gateway Runtime Context. StartedAtMs is
-	// populated by the server instrumentation boundary from the required
-	// started_at_ms tool argument and is never treated as business payload.
+	// RequestID and StartedAtMs are populated by the Gateway Runtime Context.
+	// StartedAtMs is derived by the server instrumentation boundary from an
+	// optional MCP client metadata timestamp or the server receive time.
 	RequestID         string         `json:"-"`
 	OperationID       string         `json:"-"`
 	ParentOperationID string         `json:"-"`
 	StepID            string         `json:"-"`
-	Goal              string         `json:"goal,omitempty"`
 	Purpose           string         `json:"purpose,omitempty"`
 	Intent            string         `json:"intent,omitempty"`
 	ReasoningSummary  string         `json:"reasoning_summary,omitempty"`
@@ -395,7 +394,6 @@ func ParseRequest(raw json.RawMessage) (Request, error) {
 	if strings.TrimSpace(req.Purpose) != "" {
 		req.Intent = req.Purpose
 	}
-	req.Goal = strings.TrimSpace(req.Goal)
 	req.Purpose = strings.TrimSpace(req.Purpose)
 	req.ReasoningSummary = strings.TrimSpace(req.ReasoningSummary)
 	req.ProgressSummary = strings.TrimSpace(req.ProgressSummary)
@@ -410,6 +408,9 @@ func ParseRequest(raw json.RawMessage) (Request, error) {
 			delete(req.Payload, key)
 		}
 	}
+	// goal was a legacy model-supplied context field. Keep accepting old wire
+	// payloads, but discard it before any business handler can consume it.
+	delete(req.Payload, "goal")
 	// MCP tool schemas expose flat arguments. Normalize them into Payload so
 	// handlers share one request representation; explicit Payload values win.
 	var flat map[string]any
@@ -425,7 +426,7 @@ func ParseRequest(raw json.RawMessage) (Request, error) {
 		req.CallID = firstStringValue(flat, "call_id", "callId")
 	}
 	for key, value := range flat {
-		if key == "purpose" || key == "intent" || key == "reasoning_summary" || key == "progress_summary" || key == "call_id" || key == "callId" || key == "session_id" || key == "remote_session_id" || key == "workspace" || key == "payload" || key == "execution_mode" || isRuntimeField(key) {
+		if key == "goal" || key == "purpose" || key == "intent" || key == "reasoning_summary" || key == "progress_summary" || key == "call_id" || key == "callId" || key == "session_id" || key == "remote_session_id" || key == "workspace" || key == "payload" || key == "execution_mode" || isRuntimeField(key) {
 			continue
 		}
 		if _, exists := req.Payload[key]; !exists {

@@ -144,9 +144,10 @@ func runObserver(args []string, commandName string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	client := observation.NewClient(observation.SocketPath(home))
+	isTTY := stdoutIsTTY()
 	colorMode := observation.ColorModeNone
 	if options.Format == "text" {
-		colorMode = terminalColorMode(stdoutIsTTY(), os.Getenv("NO_COLOR"), os.Getenv("COLORTERM"))
+		colorMode = terminalColorMode(isTTY, os.Getenv("NO_COLOR"), os.Getenv("COLORTERM"))
 	}
 	color := colorMode != observation.ColorModeNone
 	var textRenderer *observation.TextRenderer
@@ -159,9 +160,23 @@ func runObserver(args []string, commandName string) int {
 			Tool: options.Tool, Status: options.Status, OperationID: options.Operation, Path: options.Path,
 		})
 	}
-	err = client.Run(ctx, observation.SubscribeRequest{
+
+	request := observation.SubscribeRequest{
 		Type: "subscribe", Workspace: options.Workspace, HistoryLimit: options.History, Format: options.Format,
-	}, func(frame observation.Frame) error {
+	}
+	if options.Format == "text" {
+		if !isTTY || !stdinIsTTY() {
+			fmt.Fprintf(os.Stderr, "%s: text format requires a terminal; use --format json for pipes or redirected output\n", commandName)
+			return 2
+		}
+		if err := runWorkspaceTUI(ctx, client, request, options.Workspace, textRenderer, color); err != nil {
+			fmt.Fprintf(os.Stderr, "%s: terminal UI: %v\n", commandName, err)
+			return 1
+		}
+		return 0
+	}
+
+	err = client.Run(ctx, request, func(frame observation.Frame) error {
 		return renderWorkspaceFrameWithRenderer(os.Stdout, frame, options.Format, color, textRenderer)
 	})
 	if err != nil {
@@ -170,6 +185,8 @@ func runObserver(args []string, commandName string) int {
 	}
 	return 0
 }
+
+const defaultTerminalRows = 24
 
 func terminalColorMode(isTTY bool, noColor, colorTerm string) observation.ColorMode {
 	if !isTTY || strings.TrimSpace(noColor) != "" {
@@ -192,10 +209,14 @@ func renderWorkspaceFrame(w io.Writer, frame observation.Frame, format string, c
 }
 
 func renderWorkspaceFrameWithRenderer(w io.Writer, frame observation.Frame, format string, color bool, renderer *observation.TextRenderer) error {
+	return renderWorkspaceFrameWithRendererAtWidth(w, frame, format, color, renderer, terminalColumns())
+}
+
+func renderWorkspaceFrameWithRendererAtWidth(w io.Writer, frame observation.Frame, format string, color bool, renderer *observation.TextRenderer, terminalWidth int) error {
 	if format == "text" && renderer != nil {
 		// Refresh on every frame so a terminal resize cannot leave newly-rendered
 		// lines wider than the current viewport.
-		renderer.SetWidth(terminalColumns())
+		renderer.SetWidth(terminalWidth)
 	}
 	if frame.Type == "event" && frame.Event != nil {
 		if format == "json" {
@@ -288,27 +309,57 @@ func stdoutIsTTY() bool {
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
+func stdinIsTTY() bool {
+	info, err := os.Stdin.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
 func terminalColumns() int {
-	if columns, err := strconv.Atoi(strings.TrimSpace(os.Getenv("COLUMNS"))); err == nil && columns > 0 {
-		return columns
+	columns, _ := terminalSize()
+	return columns
+}
+
+func terminalRows() int {
+	_, rows := terminalSize()
+	if rows <= 0 {
+		return defaultTerminalRows
+	}
+	return rows
+}
+
+func terminalSize() (columns, rows int) {
+	if value, err := strconv.Atoi(strings.TrimSpace(os.Getenv("COLUMNS"))); err == nil && value > 0 {
+		columns = value
+	}
+	if value, err := strconv.Atoi(strings.TrimSpace(os.Getenv("LINES"))); err == nil && value > 0 {
+		rows = value
+	}
+	if columns > 0 && rows > 0 {
+		return columns, rows
 	}
 	info, err := os.Stdin.Stat()
 	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
-		return 0
+		return columns, rows
 	}
 	command := exec.Command("stty", "size")
 	command.Stdin = os.Stdin
 	output, err := command.Output()
 	if err != nil {
-		return 0
+		return columns, rows
 	}
 	fields := strings.Fields(string(output))
 	if len(fields) != 2 {
-		return 0
+		return columns, rows
 	}
-	columns, err := strconv.Atoi(fields[1])
-	if err != nil || columns <= 0 {
-		return 0
+	if rows <= 0 {
+		if value, err := strconv.Atoi(fields[0]); err == nil && value > 0 {
+			rows = value
+		}
 	}
-	return columns
+	if columns <= 0 {
+		if value, err := strconv.Atoi(fields[1]); err == nil && value > 0 {
+			columns = value
+		}
+	}
+	return columns, rows
 }

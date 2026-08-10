@@ -40,7 +40,6 @@ type renderOptions struct {
 	suppressOutputAction bool
 	commandOutputStarted bool
 	suppressContext      bool
-	suppressGoal         bool
 	suppressDuration     bool
 	outputLineStart      int
 }
@@ -146,7 +145,7 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 	}
 	wroteDetail := len(details) > 0
 	if !options.suppressContext && hasSemanticContext(event) {
-		contextLines := semanticContextLines(event, options.suppressGoal, options.terminalWidth)
+		contextLines := semanticContextLines(event, options.detail)
 		if len(contextLines) > 0 {
 			if err := writeChildren(w, contextLines, options.colorMode != ColorModeNone); err != nil {
 				return err
@@ -172,7 +171,7 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 }
 
 func renderProgressSummary(w io.Writer, event Event, options renderOptions) error {
-	return writeChildren(w, semanticContextLines(event, options.suppressGoal, options.terminalWidth), options.colorMode != ColorModeNone)
+	return writeChildren(w, semanticContextLines(event, options.detail), options.colorMode != ColorModeNone)
 }
 
 type progressView struct {
@@ -268,73 +267,30 @@ func writeProgressAction(w io.Writer, marker, verb, current, color string, enabl
 }
 
 func hasSemanticContext(event Event) bool {
-	return strings.TrimSpace(event.Goal) != "" || strings.TrimSpace(event.Purpose) != "" ||
-		strings.TrimSpace(event.ReasoningSummary) != "" || strings.TrimSpace(event.ProgressSummary) != "" ||
-		strings.TrimSpace(event.NextStep) != ""
+	return strings.TrimSpace(event.Purpose) != "" || strings.TrimSpace(event.ReasoningSummary) != "" ||
+		strings.TrimSpace(event.ProgressSummary) != "" || strings.TrimSpace(event.NextStep) != "" ||
+		strings.TrimSpace(event.PlanID) != "" || strings.TrimSpace(event.PlanTaskID) != "" ||
+		strings.TrimSpace(event.ExecutionTaskID) != ""
 }
 
-func semanticContextLines(event Event, suppressGoal bool, terminalWidth int) []string {
-	lines := make([]string, 0, 5)
-	purpose := compactLine(event.Purpose)
-	goal := compactLine(event.Goal)
-	if suppressGoal {
-		goal = ""
-	}
-	lines = append(lines, semanticPurposeGoalLines(purpose, goal, terminalWidth)...)
-	lines = append(lines, semanticContextGroups([]semanticContextGroup{
+func semanticContextLines(event Event, detail bool) []string {
+	groups := []semanticContextGroup{
 		{
-			{label: "reasoning", value: event.ReasoningSummary},
+			{label: "purpose", value: event.Purpose},
 			{label: "progress", value: event.ProgressSummary},
-		},
-		{
 			{label: "next", value: event.NextStep},
 		},
 		{
+			{label: "reasoning", value: event.ReasoningSummary},
 			{label: "plan", value: event.PlanID},
 			{label: "plan task", value: event.PlanTaskID},
 			{label: "execution task", value: event.ExecutionTaskID},
 		},
-	})...)
-	return lines
-}
-
-func semanticPurposeGoalLines(purpose, goal string, terminalWidth int) []string {
-	purposeText := ""
-	goalText := ""
-	if purpose != "" {
-		purposeText = "purpose: " + purpose
 	}
-	if goal != "" {
-		goalText = "goal: " + goal
+	if detail {
+		groups[1] = append(groups[1], semanticContextField{label: "operation", value: event.OperationID})
 	}
-	if purposeText == "" && goalText == "" {
-		return nil
-	}
-	if goalText == "" {
-		return []string{purposeText}
-	}
-	// TextRenderer reserves four cells for wrapped-line continuation in addition
-	// to writeChild's visible "  ↳ " prefix, so align within that effective body.
-	contentWidth := terminalWidth - 8
-	if contentWidth <= 0 {
-		contentWidth = defaultTerminalWidth - 8
-	}
-	if purposeText == "" {
-		padding := contentWidth - displayWidth(goalText)
-		if padding < 0 {
-			padding = 0
-		}
-		return []string{strings.Repeat(" ", padding) + goalText}
-	}
-	gap := contentWidth - displayWidth(purposeText) - displayWidth(goalText)
-	if gap >= 2 {
-		return []string{purposeText + strings.Repeat(" ", gap) + goalText}
-	}
-	padding := contentWidth - displayWidth(goalText)
-	if padding < 0 {
-		padding = 0
-	}
-	return []string{purposeText, strings.Repeat(" ", padding) + goalText}
+	return semanticContextGroups(groups)
 }
 
 type semanticContextField struct {
@@ -358,10 +314,6 @@ func semanticContextGroups(groups []semanticContextGroup) []string {
 		}
 	}
 	return lines
-}
-
-func semanticContextText(event Event, suppressGoal bool, terminalWidth int) string {
-	return strings.Join(semanticContextLines(event, suppressGoal, terminalWidth), "\n")
 }
 
 func renderCommandOutput(w io.Writer, event Event, options renderOptions) error {
@@ -989,8 +941,15 @@ func publicView(raw []byte) string {
 }
 
 func eventFactLine(event Event, detail, suppressDuration bool) string {
-	parts := make([]string, 0, 9)
+	parts := make([]string, 0, 10)
 	command := isCommandTool(event.Tool)
+	if tool := strings.TrimSpace(event.Tool); tool != "" {
+		if detail {
+			parts = append(parts, "tool="+tool)
+		} else {
+			parts = append(parts, "tool: "+tool)
+		}
+	}
 	if detail && event.Command != "" {
 		parts = append(parts, "command="+compactCommand(event.Command))
 	}
@@ -1005,10 +964,11 @@ func eventFactLine(event Event, detail, suppressDuration bool) string {
 		}
 	}
 	if event.DurationMs > 0 {
+		duration := (time.Duration(event.DurationMs) * time.Millisecond).String()
 		switch {
-		case command && !detail:
-			parts = append(parts, (time.Duration(event.DurationMs) * time.Millisecond).String())
-		case detail && !suppressDuration:
+		case !detail:
+			parts = append(parts, "time "+duration)
+		case !suppressDuration:
 			parts = append(parts, fmt.Sprintf("duration=%dms", event.DurationMs))
 		}
 	}
@@ -1024,10 +984,6 @@ func eventFactLine(event Event, detail, suppressDuration bool) string {
 	}
 	if detail && event.Path != "" {
 		parts = append(parts, "path="+event.Path)
-	}
-	if detail && event.Purpose != "" {
-		// Purpose is model input; do not ellipsis-truncate.
-		parts = append(parts, "purpose="+strings.TrimSpace(event.Purpose))
 	}
 	if detail && event.Phase != "" {
 		parts = append(parts, "phase="+event.Phase)

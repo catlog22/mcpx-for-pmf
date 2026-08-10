@@ -49,10 +49,13 @@ func TestEveryRegisteredToolExposesSemanticPurpose(t *testing.T) {
 				continue
 			}
 		}
-		for _, field := range []string{"goal", "purpose", "reasoning_summary", "progress_summary", "next_step", "plan_id", "plan_task_id", "execution_task_id"} {
+		for _, field := range []string{"purpose", "reasoning_summary", "progress_summary", "next_step", "plan_id", "plan_task_id", "execution_task_id"} {
 			if schema.Properties[field] == nil {
 				t.Errorf("tool %q does not expose %s: %+v", name, field, schema.Properties)
 			}
+		}
+		if schema.Properties["goal"] != nil {
+			t.Errorf("tool %q must not expose deprecated goal: %+v", name, schema.Properties)
 		}
 		if schema.Properties["task_id"] != nil {
 			t.Errorf("tool %q must not expose ambiguous task_id: %+v", name, schema.Properties)

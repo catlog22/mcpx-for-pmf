@@ -246,7 +246,7 @@ func (r *Runtime) toolMCPList(ctx context.Context, req *mcp.CallToolRequest) (*m
 		} else {
 			// Discover tools for every configured server (A05 bootstrap path).
 			data["servers"] = r.enrichServersWithTools(ctx, manager, servers)
-			data["mcp_manifest_revision"] = mcpRevision(data["servers"])
+			data["mcp_revision"] = mcpRevision(data["servers"])
 		}
 	}
 	return r.remoteResult(envReq, remoteID, ws.Name, data)
@@ -354,7 +354,7 @@ func skillItems(skills []skill.Skill) []map[string]any {
 		if len(argumentsSchema) == 0 {
 			argumentsSchema = map[string]any{"type": "object", "additionalProperties": true}
 		}
-		// Stable content fingerprint for skill_manifest_revision (A06).
+		// Stable content fingerprint for the Skill revision.
 		revInput := s.Manifest.Name + "\x00" + s.Manifest.Description + "\x00" + s.Manifest.Runtime + "\x00" + s.Dir
 		revision := skillRevision(revInput)
 		items = append(items, map[string]any{

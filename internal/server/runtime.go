@@ -944,7 +944,7 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 			{"kind": "artifact", "uri_template": "mcpx://remote-sessions/{remote_session_id}/artifacts/{artifact_id}"},
 		},
 		"recommended_workflows": map[string]any{
-			"bootstrap":      []string{"session"},
+			"bootstrap":      []string{"workspace", "session"},
 			"source_change":  []string{"read", "edit", "execute", "observe"},
 			"plan_delivery":  []string{"plan", "edit", "execute", "artifact", "observe"},
 			"extension_call": []string{"discover", "skill_call", "mcp_call"},
@@ -963,8 +963,6 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 		"mcp_revision":                 mcpRevision(servers),
 		"instruction_revision":         instructionRevision(instrDocs),
 		"session_capability_revision":  sessionCapabilityRevision(session),
-		"skill_manifest_revision":      skillRevision(fullSkills),
-		"mcp_manifest_revision":        mcpRevision(servers),
 	}
 	revs := data["revisions"].(map[string]any)
 	data["client_refresh"] = clientRefreshPayload(envReq.Payload, revs)
@@ -972,7 +970,6 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 		data["remote_session"] = map[string]any{"id": session.ID, "role": session.Role, "status": session.Status}
 	}
 	data["revision"] = capabilityRevision(data)
-	data["evaluation_revision"] = "clean-core-p1-p5-v1"
 	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remoteID, Workspace: ws.Name, Tool: "capability_list", Status: "ok"})
 	return r.remoteResult(envReq, remoteID, ws.Name, data)
 }
@@ -991,7 +988,7 @@ func (r *Runtime) toolWorkspaceList(ctx context.Context, req *mcp.CallToolReques
 			"description": w.Description,
 		})
 	}
-	r.logAudit(audit.Event{RequestID: envReq.RequestID, Tool: "workspace_read", Status: "ok"})
+	r.logAudit(audit.Event{RequestID: envReq.RequestID, Tool: "workspace", Status: "ok"})
 	return r.remoteResult(envReq, "", "", map[string]any{"workspaces": items})
 }
 

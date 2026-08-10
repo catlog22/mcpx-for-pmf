@@ -91,10 +91,6 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 			}
 		}
 	}
-	goal := map[string]any{
-		"type":        "string",
-		"description": "本轮工作的总体目标；只填写当前任务需要保持的目标",
-	}
 	purpose := map[string]any{
 		"type":        "string",
 		"description": purposeDescription(tool.Name),
@@ -105,7 +101,7 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 	}
 	progressSummary := map[string]any{
 		"type":        "string",
-		"description": "上一工具调用后的可验证进度摘要、结果和下一步；没有下一次工具调用时请使用 progress_summary",
+		"description": "上一工具调用后的可验证进度摘要、结果和下一步；仅在还有下一次常规工具调用时填写，准备停止工具调用时改用 progress 汇报终态",
 	}
 	nextStep := map[string]any{
 		"type":        "string",
@@ -123,11 +119,6 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 		"type":        "string",
 		"description": "关联的服务端执行 Task ID",
 	}
-	startedAtMs := map[string]any{
-		"type":        "integer",
-		"minimum":     1,
-		"description": "模型发起本次工具调用时的 Unix 毫秒时间戳；每次调用必须读取当时时间，禁止复用上一次调用的值",
-	}
 	rawBytes := mcpresult.ToolSchemaJSON(tool)
 	var raw map[string]any
 	if err := json.Unmarshal(rawBytes, &raw); err != nil || raw == nil {
@@ -137,7 +128,6 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 	if properties == nil {
 		properties = map[string]any{}
 	}
-	properties["goal"] = goal
 	properties["purpose"] = purpose
 	properties["reasoning_summary"] = reasoningSummary
 	properties["progress_summary"] = progressSummary
@@ -145,10 +135,8 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 	properties["plan_id"] = planID
 	properties["plan_task_id"] = planTaskID
 	properties["execution_task_id"] = executionTaskID
-	properties["started_at_ms"] = startedAtMs
 	raw["type"] = "object"
 	raw["properties"] = properties
-	raw["required"] = appendRequired(raw["required"], "started_at_ms")
 	if branches, ok := raw["oneOf"].([]any); ok {
 		for _, rawBranch := range branches {
 			branch, ok := rawBranch.(map[string]any)
@@ -163,13 +151,10 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 			if actionSchema, ok := branchProperties["action"].(map[string]any); ok {
 				action, _ = actionSchema["const"].(string)
 			}
-			branchProperties["started_at_ms"] = startedAtMs
-			branch["required"] = appendRequired(branch["required"], "started_at_ms")
 			if strictActions[action] {
 				branch["properties"] = branchProperties
 				continue
 			}
-			branchProperties["goal"] = goal
 			branchProperties["purpose"] = purpose
 			branchProperties["reasoning_summary"] = reasoningSummary
 			branchProperties["progress_summary"] = progressSummary
@@ -187,7 +172,7 @@ func requireIntentSchema(tool mcp.Tool) mcp.Tool {
 }
 
 func purposeDescription(toolName string) string {
-	const base = "用一句简短、具体的话说明本次操作、对象和目的；只陈述真实语义，避免重复 goal/reasoning。"
+	const base = "用一句简短、具体的话说明本次操作、对象和目的；只陈述真实语义，避免与 reasoning_summary 重复。"
 	switch strings.ToLower(strings.TrimSpace(toolName)) {
 	case "read", "observe", "runtime_read", "environment_read", "discover":
 		return base + " 只读操作应明确仅读取/检查，不修改 Workspace 或系统状态。"
@@ -330,7 +315,7 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 		result = arc.WrapToolResult(name, arc.ResultContext{
 			RequestID: runtime.RequestID, TraceID: runtime.TraceID, SpanID: runtime.SpanID,
 			Context: arc.Context{
-				Goal: observationRequest.Goal, Purpose: firstSemanticPurpose(observationRequest),
+				Purpose:          firstSemanticPurpose(observationRequest),
 				ReasoningSummary: observationRequest.ReasoningSummary,
 				ProgressSummary:  observationRequest.ProgressSummary, NextStep: observationRequest.NextStep,
 				PlanID: observationRequest.PlanID, PlanTaskID: observationRequest.PlanTaskID, ExecutionTaskID: observationRequest.ExecutionTaskID, OperationID: observationRequest.OperationID,
@@ -373,16 +358,12 @@ func callToolSafely(name string, call func() (*mcp.CallToolResult, error)) (resu
 }
 
 func toolRequestStartedAtMs(req *mcp.CallToolRequest, received time.Time) int64 {
-	fallback := received.UnixMilli()
 	if req != nil && req.Params != nil && req.Params.Meta != nil {
 		if started, ok := positiveInt64(req.Params.Meta[clientStartedAtMetaKey]); ok {
 			return started
 		}
 	}
-	if started, ok := positiveInt64(mcpresult.Arguments(req)["started_at_ms"]); ok {
-		return started
-	}
-	return fallback
+	return received.UnixMilli()
 }
 
 func positiveInt64(value any) (int64, bool) {

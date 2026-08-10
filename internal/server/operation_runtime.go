@@ -80,9 +80,6 @@ func (r *Runtime) executeOperationStep(ctx context.Context, input operation.Exec
 	arguments["remote_session_id"] = input.RemoteSessionID
 	arguments["purpose"] = input.Purpose
 	arguments["execution_mode"] = "sync"
-	// This is a fresh server-dispatched child tool call, so its send timestamp
-	// must describe this dispatch rather than the parent batch submission time.
-	arguments["started_at_ms"] = time.Now().UnixMilli()
 	request := mcpresult.Request(arguments)
 	childCtx := r.operationChildContext(ctx, input)
 	result, callErr := handler(childCtx, request)

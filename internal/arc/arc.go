@@ -15,7 +15,7 @@ import (
 	"mcpx/internal/mcpresult"
 )
 
-const Version = "1.4"
+const Version = "1.5"
 
 // ResultMetadataKey identifies the hidden response metadata that carries the
 // complete ARC envelope. Keeping the envelope in _meta prevents MCP hosts
@@ -60,7 +60,6 @@ type ResultContext struct {
 // operation. ReasoningSummary is intentionally a short rationale supplied by
 // the model; it must never contain hidden chain-of-thought.
 type Context struct {
-	Goal             string `json:"goal,omitempty"`
 	Purpose          string `json:"purpose,omitempty"`
 	ReasoningSummary string `json:"reasoning_summary,omitempty"`
 	ProgressSummary  string `json:"progress_summary,omitempty"`
@@ -210,7 +209,6 @@ func contextData(context Context) map[string]any {
 	context = normalizeContext(context)
 	data := map[string]any{}
 	for key, value := range map[string]string{
-		"goal":              context.Goal,
 		"purpose":           context.Purpose,
 		"reasoning_summary": context.ReasoningSummary,
 		"progress_summary":  context.ProgressSummary,
@@ -249,9 +247,6 @@ func mergeContextMap(context *Context, values map[string]any) {
 	if context == nil {
 		return
 	}
-	if context.Goal == "" {
-		context.Goal = stringValue(values, "goal")
-	}
 	if context.Purpose == "" {
 		context.Purpose = stringValue(values, "purpose")
 	}
@@ -279,7 +274,6 @@ func mergeContextMap(context *Context, values map[string]any) {
 }
 
 func normalizeContext(context Context) Context {
-	context.Goal = strings.TrimSpace(context.Goal)
 	context.Purpose = strings.TrimSpace(context.Purpose)
 	context.ReasoningSummary = strings.TrimSpace(context.ReasoningSummary)
 	context.ProgressSummary = strings.TrimSpace(context.ProgressSummary)
@@ -744,7 +738,7 @@ func resultDataSchema(name string) map[string]any {
 		})
 	case SchemaPlan:
 		return object(map[string]any{
-			"plan_id": map[string]any{"type": "string"}, "goal": map[string]any{"type": "string"},
+			"plan_id": map[string]any{"type": "string"}, "summary": map[string]any{"type": "string"},
 			"status": map[string]any{"type": "string"}, "tasks": map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
 			"progress": map[string]any{"type": "object"},
 		})
@@ -796,9 +790,9 @@ func buildOutputSchema() json.RawMessage {
 			"status": map[string]any{"type": "string", "enum": []string{"succeeded", "accepted", "waiting_confirmation", "interrupted", "failed"}},
 			"type":   map[string]any{"type": "string", "enum": typeValues},
 			"context": map[string]any{
-				"type": "object", "additionalProperties": false, "description": "模型公开的目标、作用、判断依据、进展和下一步；不是隐藏思维链",
+				"type": "object", "additionalProperties": false, "description": "模型公开的作用、判断依据、进展和下一步；不是隐藏思维链",
 				"properties": map[string]any{
-					"goal": map[string]any{"type": "string"}, "purpose": map[string]any{"type": "string"},
+					"purpose":           map[string]any{"type": "string"},
 					"reasoning_summary": map[string]any{"type": "string"}, "progress_summary": map[string]any{"type": "string"},
 					"next_step": map[string]any{"type": "string"}, "plan_id": map[string]any{"type": "string"},
 					"plan_task_id": map[string]any{"type": "string"}, "execution_task_id": map[string]any{"type": "string"}, "operation_id": map[string]any{"type": "string"},

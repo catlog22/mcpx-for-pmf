@@ -53,6 +53,13 @@ func TestTerminalColumnsUsesEnvironment(t *testing.T) {
 	}
 }
 
+func TestTerminalRowsUsesEnvironment(t *testing.T) {
+	t.Setenv("LINES", "17")
+	if got := terminalRows(); got != 17 {
+		t.Fatalf("terminal rows=%d, want 17", got)
+	}
+}
+
 func TestTerminalColorMode(t *testing.T) {
 	tests := []struct {
 		name      string

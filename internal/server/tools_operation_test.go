@@ -356,8 +356,11 @@ func TestOperationManageBatchStatusAndResult(t *testing.T) {
 		t.Fatalf("truncated batch result must expose operation_manage next_action: %+v", firstItem)
 	}
 	nextArgs, _ := nextAction["arguments"].(map[string]any)
-	if nextArgs["cursor"] != cursor || nextArgs["operation_id"] != longFirst.ID || nextArgs["action"] != "result" {
+	if nextArgs["cursor"] != cursor || nextArgs["operation_id"] != longFirst.ID || nextArgs["action"] != "result" || nextArgs["remote_session_id"] != session.ID {
 		t.Fatalf("next_action arguments=%+v", nextArgs)
+	}
+	if _, exists := nextArgs["session_id"]; exists {
+		t.Fatalf("next_action must use remote_session_id: %+v", nextArgs)
 	}
 	continued := callOperationTool(t, rt, "operation_manage", map[string]any{
 		"remote_session_id": session.ID, "operation_id": longFirst.ID, "action": "result", "cursor": cursor, "limit": 10,

@@ -127,7 +127,7 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolReque
 			// the full token to the model.
 			confirmationMessage := "confirmation_token: " + pending.ConfirmationToken + "；请向用户展示命令及用途，获得明确语义确认后，使用相同 command 和该 confirmation_token 重试。该 token 仅绑定本次操作，不承担认证职责。"
 			if confirmationToken != "" {
-				confirmationMessage = "你提供的 confirmation_token 未匹配当前待确认项；请使用本响应 data.confirmation_token 中的完整 token 原样重试：" + pending.ConfirmationToken + "（相同 command、session_id 和 scope）。"
+				confirmationMessage = "你提供的 confirmation_token 未匹配当前待确认项；请使用本响应 data.confirmation_token 中的完整 token 原样重试：" + pending.ConfirmationToken + "（相同 command、remote_session_id 和 scope）。"
 			}
 			confirmationData := commandConfirmationData{
 				ConfirmationToken:    pending.ConfirmationToken,

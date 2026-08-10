@@ -374,20 +374,20 @@ curl -sS -m 5 \
 ### 1. 建立会话和能力缓存
 
 1. Workspace 已知时直接调用 `session(action="open")`。
-2. 保存返回的完整 `remote_session_id`；新客户端用 `session(action="attach")` 接力。
+2. 保存返回的完整 `remote_session_id`；需要接力时用 `session(action="attach")` 复用该会话。
 3. 调用 `runtime_read(view="capabilities")` 获取当前能力和工具 Schema。
 4. 缓存 `tool_schema_revision`、`capability_manifest_revision`、
    `guidance_revision`、`instruction_revision`、`skill_revision` 和 `mcp_revision`。
 5. 后续 `session(action="open")` 或 `runtime_read` 传 `known_revisions`，已知版本未变化时
    直接复用本地缓存。
 
-每次重要调用通常可以提供统一的语义上下文：`goal` 表示总体目标，`purpose` 表示本次
-操作作用，`reasoning_summary` 表示可公开的简短判断依据，`progress_summary` 表示
-已验证进展，`next_step` 表示下一项具体计划；`plan_id`、`plan_task_id`、`execution_task_id`、`operation_id` 用于绑定执行上下文。
-例外是 `move_out(action="submit")`：其严格分支只接受 `action`、`remote_session_id`、`confirmation_uuid`，
+每次重要调用通常可以提供统一的语义上下文：`purpose` 表示本次操作作用，
+`reasoning_summary` 表示可公开的简短判断依据，`progress_summary` 表示已验证进展，
+`next_step` 表示下一项具体计划；`plan_id`、`plan_task_id`、`execution_task_id`、`operation_id` 用于绑定执行上下文。
+`move_out(action="submit")` 的参数只有 `action`、`remote_session_id`、`confirmation_uuid`，
 所有业务语义继续使用 prepare 时由服务端冻结的值。`reasoning_summary` 不是隐藏思维链，不得写入私有推理过程。上述字段会原样进入 ARC
 `structuredContent.context`、`_meta["mcpx.result"].mcpx.result.context` 和持久化观测事件。
-没有下一次工具调用、需要等待用户或发生阻塞时，直接在响应中说明状态和下一步。
+准备停止工具调用、需要等待用户或发生阻塞时，使用 `progress` 写入对应终态及下一步，再向用户回复。
 
 终端观测使用普通 stdout/stderr pipe，不依赖 PTY、tmux 或 ConPTY。观测事件先写入
 durable Store，再通过本地 JSONL 帧推送；`observe --format=json`、终端 text 渲染和
@@ -625,7 +625,6 @@ ARC 的机器结果固定包含 `context`：
 ```json
 {
   "context": {
-    "goal": "修复终端观测体验",
     "purpose": "验证命令执行结果",
     "reasoning_summary": "先确认最小执行链路",
     "progress_summary": "命令已完成并返回 exit_code=0",
@@ -638,8 +637,8 @@ ARC 的机器结果固定包含 `context`：
 }
 ```
 
-终端文本会将这些字段压缩为三组：目标与作用、判断/进展/下一步、计划/任务/操作
-标识；普通结果不会因为只有内部 `operation_id` 而额外生成 Context 区块。
+终端文本默认展示作用、进展、下一步、判断依据以及 Plan / Plan Task / Execution Task；
+`-detail` 继续展示 operation 等更细的执行元数据。普通结果不会因为只有内部 `operation_id` 而额外生成 Context 区块。
 
 ## 本机终端观测
 
@@ -672,20 +671,15 @@ ARC 的机器结果固定包含 `context`：
 ./bin/mcpx observe -detail -diff full -tool edit my-app
 ```
 
-文本模式使用紧凑的行式 CLI 输出：先显示 `Read`、`Edited`、`Ran`、`Searched`
-等语义动作，再缩进显示 Context（目标、作用、判断依据、进展、下一步）、执行事实和结果；命令 stdout/stderr 按流合并
-并带行号。内部 `operation.*` 调度事件、重复的远端 `*.started`/`*.completed`
-notice 默认静默，只保留失败、取消等对人有用的最终结果，不再绘制大块边框。
-ARC 人类展示层会按工具使用稳定的动作色（读取/发现、编辑、执行、计划、会话等），
-再按状态覆盖为运行中、等待确认、失败或中断色；相邻操作块之间显示带工具和状态的细分隔线。
-这些颜色和分隔线只属于 text observer 的人类展示；Context 字段进入 ARC JSON、structuredContent 和持久化机器事件，但颜色与分隔线不进入机器协议。
-超长输出按终端宽度换行并设置正文预算，超出时提示改用 JSON 查看完整事件。Diff
-展示会区分新增、删除和上下文；支持真彩色终端时使用更明确的前景色和低饱和背景色，
-普通终端降级为 ANSI 16 色。文本模式会清理命令输出中的 ANSI/C0 控制字符；设置
-`NO_COLOR=1` 关闭颜色，`COLORTERM=truecolor` 或 `24bit` 启用真彩色，`COLUMNS`
-可显式指定终端宽度。
+默认 `text` 模式是基于 Bubble Tea v2 + Bubbles viewport 的全屏 TUI，而不是持续追加的行式 stdout。TUI 使用 alternate screen、Bubble Tea 增量 renderer，并以 60 FPS 作为最大渲染帧率；事件可以高频进入内存，但终端不会按每个事件整屏清空重画。Header / Footer 固定，正文只渲染当前 viewport。
 
-机器处理日志时使用 `--format json`，不要解析文本中的颜色、缩进或装饰边框。
+TUI 支持虚拟滚动：鼠标滚轮每次移动 2 行目标；`↑/↓` 或 `k/j` 按行滚动；`PgUp/PgDn`（以及 pager 风格的 `b/f`、Space）整页滚动；`u/d` 半页滚动；`Home/End` 或 `g/G` 跳到开头/末尾。所有纵向滚动目标都通过 60 FPS 的临界阻尼 spring 动画收敛，不再直接瞬移 viewport offset；连续滚轮或按键会继续推动当前目标。默认处于 `FOLLOW`，新事件把 spring 目标向底部推进；一旦向上滚动会切到 `SCROLL`，后续事件不会把 viewport 强制拉回底部；滚到底部或按 `End`/`G` 后恢复 `FOLLOW`。左右方向键仍由 Bubbles viewport 原生处理，用于横向查看未软换行内容。
+
+鼠标左键可以直接拖选 ARC 正文，不需要进入额外的 COPY 模式。由于 full-screen TUI 要保留 mouse reporting 才能可靠接收滚轮，选区由 TUI 自己绘制；拖动时暂停 `FOLLOW`，松手只结束并保留选区，不修改剪贴板。已有选区时按 `Ctrl+C` 通过 Bubble Tea 的 OSC52 clipboard 命令复制去除 ANSI 样式后的纯文本；没有选区时 `Ctrl+C` 保持原来的退出行为。OSC52 是否真正写入系统剪贴板取决于终端支持；滚轮与键盘导航不受选区功能影响。
+
+ARC 内容仍先显示 `Read`、`Edited`、`Ran`、`Searched` 等语义动作，再显示 Context（作用、进展、下一步、判断依据、Plan / Task / Execution Task）、执行事实和结果；命令 stdout/stderr 带行号。内部 `operation.*` 调度事件、重复的远端 `*.started`/`*.completed` notice 默认静默，只保留失败、取消等对人有用的最终结果。ARC 人类展示层继续按工具和状态使用稳定 ANSI 颜色，Diff 继续区分新增、删除和上下文；支持真彩色终端时使用真彩色，普通终端降级 ANSI 16 色。设置 `NO_COLOR=1` 可关闭 ARC 内容颜色，`COLORTERM=truecolor` 或 `24bit` 启用真彩色。
+
+`text` 模式要求 stdin/stdout 都是真实终端，不再回退为管道兼容文本流。机器处理、重定向或管道场景必须使用 `--format json`；不要解析 TUI 的颜色、状态栏或布局。
 事件中保留 `event_id`、`sequence`、`request_id`、`operation_id`、`plan_task_id`、
 `execution_task_id`、`edit_id`、状态、耗时、路径、命令和截断标志等字段。
 

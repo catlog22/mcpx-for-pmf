@@ -164,54 +164,6 @@ type actionSchemaBranch struct {
 	Required    []string
 }
 
-func actionTool(name, description string, common map[string]any, branches map[string]actionSchemaBranch) mcp.Tool {
-	return actionToolWithAnnotation(name, description, common, branches, mutatingToolAnnotation)
-}
-
-func actionToolWithAnnotation(name, description string, common map[string]any, branches map[string]actionSchemaBranch, annotation toolAnnotation) mcp.Tool {
-	actions := make([]string, 0, len(branches))
-	for action := range branches {
-		actions = append(actions, action)
-	}
-	sort.Strings(actions)
-	properties := map[string]any{"action": map[string]any{"type": "string", "enum": actions}}
-	for key, value := range common {
-		properties[key] = value
-	}
-	oneOf := make([]map[string]any, 0, len(actions))
-	for _, action := range actions {
-		branch := branches[action]
-		if branch.Description == "" {
-			branch.Description = "仅执行「" + action + "」操作；失败时按返回的 next_action 继续。"
-		}
-		for key, value := range branch.Properties {
-			if _, exists := properties[key]; !exists {
-				properties[key] = value
-			}
-		}
-		branchProperties := map[string]any{"action": map[string]any{"const": action}}
-		for key, value := range branch.Properties {
-			branchProperties[key] = value
-		}
-		required := append([]string{"action"}, branch.Required...)
-		branchSchema := map[string]any{
-			"properties": branchProperties,
-			"required":   required,
-		}
-		description := branch.Description
-		if description == "" {
-			description = "仅执行「" + action + "」操作；失败时按返回的 next_action 继续。"
-		}
-		branchSchema["description"] = description
-		oneOf = append(oneOf, branchSchema)
-	}
-	raw, _ := json.Marshal(map[string]any{
-		"type": "object", "properties": properties, "required": []string{"action"}, "oneOf": oneOf,
-	})
-	tool := annotatedTool(mcp.Tool{Name: name, Description: description, InputSchema: json.RawMessage(raw)}, annotation)
-	return tool
-}
-
 // cleanActionTool is the strict action schema used by the final core catalog.
 // Every branch repeats common properties so remote models can validate the
 // selected action without relying on permissive root-level fallbacks.
@@ -296,34 +248,7 @@ func enumSchema(description string, values ...string) map[string]any {
 	return map[string]any{"type": "string", "enum": values, "description": description}
 }
 
-func publicTool(name, description string, properties map[string]any, required []string, annotation toolAnnotation) mcp.Tool {
-	publicProperties := make(map[string]any, len(properties))
-	for key, value := range properties {
-		if key == "remote_session_id" {
-			key = "session_id"
-		}
-		publicProperties[key] = value
-	}
-	publicProperties["execution_mode"] = enumSchema("执行模式", "sync", "async")
-	publicRequired := make([]string, 0, len(required))
-	for _, key := range required {
-		if key == "remote_session_id" {
-			key = "session_id"
-		}
-		publicRequired = append(publicRequired, key)
-	}
-	raw, _ := json.Marshal(map[string]any{
-		"type":                 "object",
-		"properties":           publicProperties,
-		"required":             publicRequired,
-		"additionalProperties": false,
-	})
-	tool := annotatedTool(mcp.Tool{Name: name, Description: description, InputSchema: json.RawMessage(raw)}, annotation)
-	return tool
-}
-
-// registerConsolidatedToolsCatalog registers the remaining clean-core and support tools.
-// Historical public aliases are intentionally not registered or retained.
+// registerConsolidatedToolsCatalog registers the clean-core support tools.
 func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server) {
 	toolDesc := prompts.MustDescriptions()
 	remoteSession := stringSchema("持久化的 Remote Session 标识")
@@ -423,12 +348,12 @@ func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server) {
 		"idempotency_key": stringSchema("同一计划写操作重试时复用的幂等键"), "execution_mode": enumSchema("执行模式", "sync", "async"),
 	}
 	planBranches := map[string]actionSchemaBranch{
-		"create":   {Properties: map[string]any{"goal": stringSchema("计划目标"), "summary": stringSchema("计划摘要"), "tasks": arraySchema(planTaskInputSchema(), "有序计划任务")}, Required: []string{"remote_session_id", "purpose", "goal", "tasks"}},
+		"create":   {Properties: map[string]any{"summary": stringSchema("计划摘要"), "tasks": arraySchema(planTaskInputSchema(), "有序计划任务")}, Required: []string{"remote_session_id", "purpose", "tasks"}},
 		"read":     {Properties: map[string]any{"plan_id": stringSchema("服务端返回的 Plan ID")}, Required: []string{"remote_session_id", "plan_id"}},
 		"advance":  {Properties: map[string]any{"plan_id": stringSchema("Plan ID"), "plan_task_id": stringSchema("服务端返回的正式 Plan Task ID")}, Required: []string{"remote_session_id", "purpose", "plan_id", "plan_task_id"}},
 		"complete": {Properties: map[string]any{"plan_id": stringSchema("Plan ID"), "plan_task_id": stringSchema("服务端返回的正式 Plan Task ID"), "evidence": arraySchema(planEvidenceSchema(), "完成任务所需证据")}, Required: []string{"remote_session_id", "purpose", "plan_id", "plan_task_id", "evidence"}},
 		"block":    {Properties: map[string]any{"plan_id": stringSchema("Plan ID"), "plan_task_id": stringSchema("服务端返回的正式 Plan Task ID"), "reason": stringSchema("阻塞原因"), "evidence": arraySchema(planEvidenceSchema(), "已获得证据")}, Required: []string{"remote_session_id", "purpose", "plan_id", "plan_task_id", "reason"}},
-		"replan":   {Properties: map[string]any{"plan_id": stringSchema("Plan ID"), "goal": stringSchema("新的计划目标"), "summary": stringSchema("新的计划摘要"), "reason": stringSchema("重新规划原因"), "operations": arraySchema(planOperationSchema(), "新增、更新或移除任务")}, Required: []string{"remote_session_id", "purpose", "plan_id", "reason", "operations"}},
+		"replan":   {Properties: map[string]any{"plan_id": stringSchema("Plan ID"), "summary": stringSchema("新的计划摘要"), "reason": stringSchema("重新规划原因"), "operations": arraySchema(planOperationSchema(), "新增、更新或移除任务")}, Required: []string{"remote_session_id", "purpose", "plan_id", "reason", "operations"}},
 		"deliver":  {Properties: map[string]any{"plan_id": stringSchema("Plan ID")}, Required: []string{"remote_session_id", "purpose", "plan_id"}},
 	}
 	r.addTool(s, cleanActionTool("plan", toolDesc["plan"], planCommon, planBranches, planToolAnnotation), r.toolPlanClean)

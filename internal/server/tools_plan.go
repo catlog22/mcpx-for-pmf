@@ -63,7 +63,7 @@ func (r *Runtime) toolPlanManage(ctx context.Context, req *mcp.CallToolRequest) 
 	planID, _ := envReq.Payload["plan_id"].(string)
 	switch action {
 	case "create":
-		input, err := decodePlanCreate(envReq.Payload)
+		input, err := decodePlanCreate(envReq.Payload, envReq.Purpose)
 		if err != nil {
 			return r.planError(envReq, session, err)
 		}
@@ -138,10 +138,14 @@ func (r *Runtime) toolPlanManage(ctx context.Context, req *mcp.CallToolRequest) 
 	}
 }
 
-func decodePlanCreate(payload map[string]any) (plan.CreateInput, error) {
+func decodePlanCreate(payload map[string]any, purpose string) (plan.CreateInput, error) {
 	var input plan.CreateInput
 	if err := decodePayload(payload, &input); err != nil {
 		return plan.CreateInput{}, fmt.Errorf("%w: invalid create payload: %v", plan.ErrInvalidInput, err)
+	}
+	input.Goal = strings.TrimSpace(input.Summary)
+	if input.Goal == "" {
+		input.Goal = strings.TrimSpace(purpose)
 	}
 	return input, nil
 }
@@ -187,7 +191,9 @@ func requiredPlanTaskID(payload map[string]any) (string, error) {
 }
 
 func planMap(item plan.Plan) map[string]any {
-	return structMap(item)
+	result := structMap(item)
+	delete(result, "goal")
+	return result
 }
 
 func planTaskMap(planID string, task plan.Task) map[string]any {
@@ -197,7 +203,7 @@ func planTaskMap(planID string, task plan.Task) map[string]any {
 func deliveryMap(item plan.Delivery) map[string]any {
 	return map[string]any{
 		"plan_id": item.PlanID, "remote_session_id": item.RemoteSessionID, "status": item.Status,
-		"ready": item.Ready, "checks": item.Checks, "blockers": item.Blockers, "plan": item.Plan,
+		"ready": item.Ready, "checks": item.Checks, "blockers": item.Blockers, "plan": planMap(item.Plan),
 	}
 }
 

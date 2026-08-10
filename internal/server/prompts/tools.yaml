@@ -1,5 +1,6 @@
 # Public tool short descriptions (list surface). Schema structure stays in Go.
 tools:
+  workspace: 列出当前已注册的 Workspace；action=list。该工具不需要 Remote Session，用于在创建 session 前发现可用工作空间。
   read: 读取 Workspace 文件、搜索结果、文件列表、上下文或环境；view 决定读取语义，支持 items[] 批量读取。view=list 同时返回递归普通文件 files 和当前 scope 第一层 entries（file/directory/symlink/other）；清理 Workspace 前优先读取根 entries，entries_complete=false 或 entries_policy_filtered=true 时不得声称范围完整。purpose 应简短说明读取对象与用途，并明确这是只读检查、不修改 Workspace。
   edit: 使用精确片段或完整内容批量修改 Workspace 文件；不提供文件删除。用户提出删除、移除或清理时必须先使用 move_out(action=prepare)，用户确认后再使用 move_out(action=submit)；返回内联 Unified Diff 与严格变更行统计。purpose 应说明具体文件和变更目的；用户已明确要求时应真实声明按用户要求/已授权，禁止虚构授权。
   move_out: 安全移出已注册 Workspace 内明确文件、目录或 symlink；action=prepare 严格只读并冻结 manifest，返回 confirmation_uuid 与下一动作；action=submit 只接受 remote_session_id 和该 confirmation_uuid，并重新校验服务端冻结的 manifest、purpose、idempotency_key 与 Workspace 后移至操作系统回收站。directory 的 prepare 只校验根路径，不扫描、哈希或返回子树；symlink 只移动链接入口且绝不跟随目标。purpose 必须真实区分仅 prepare 预览和用户已授权移出明确目标；submit 只使用已确认 confirmation_uuid。

@@ -17,7 +17,7 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	runtime.registerTools(protocol)
 
 	want := []string{
-		"session", "read", "edit", "move_out", "observe", "progress",
+		"workspace", "session", "read", "edit", "move_out", "observe", "progress",
 		"operation_batch", "operation_manage",
 		"execute", "plan", "artifact", "discover", "skill_call", "mcp_call",
 		"runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide",
@@ -63,6 +63,9 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 		if properties["task_id"] != nil {
 			t.Fatalf("%s must not expose ambiguous task_id: %s", name, mcpresult.ToolSchemaJSON(registered))
 		}
+		if properties["session_id"] != nil {
+			t.Fatalf("%s must use remote_session_id: %s", name, mcpresult.ToolSchemaJSON(registered))
+		}
 		if _, clean := map[string]bool{"session": true, "read": true, "edit": true, "observe": true}[name]; clean && properties["remote_session_id"] == nil {
 			t.Fatalf("%s must expose remote_session_id", name)
 		}
@@ -77,6 +80,20 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 			}
 		}
 	}
+	workspaceTool := runtime.listedToolMap()["workspace"]
+	var workspaceSchema map[string]any
+	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(workspaceTool), &workspaceSchema); err != nil {
+		t.Fatal(err)
+	}
+	workspaceProperties, _ := workspaceSchema["properties"].(map[string]any)
+	if workspaceProperties["remote_session_id"] != nil || workspaceProperties["action"] == nil {
+		t.Fatalf("workspace schema must expose action without remote_session_id: %s", mcpresult.ToolSchemaJSON(workspaceTool))
+	}
+	workspaceAction, _ := workspaceProperties["action"].(map[string]any)
+	if values, _ := workspaceAction["enum"].([]any); !reflect.DeepEqual(values, []any{"list"}) {
+		t.Fatalf("workspace action enum=%v", values)
+	}
+
 	editTool := runtime.listedToolMap()["edit"]
 	if editTool.Annotations == nil || editTool.Annotations.ReadOnlyHint || editTool.Annotations.DestructiveHint == nil || *editTool.Annotations.DestructiveHint || !editTool.Annotations.IdempotentHint || editTool.Annotations.OpenWorldHint == nil || *editTool.Annotations.OpenWorldHint {
 		t.Fatalf("edit must expose constrained non-destructive workspace mutation: %+v", editTool.Annotations)

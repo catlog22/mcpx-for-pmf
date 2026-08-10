@@ -45,7 +45,7 @@ func TestRuntimeContextGeneratesValuesWithoutHeaders(t *testing.T) {
 	}
 }
 
-func TestRegisteredToolSchemasRequireStartedAtMsAndExcludeServerRuntimeContext(t *testing.T) {
+func TestRegisteredToolSchemasExcludeClientTimestampAndServerRuntimeContext(t *testing.T) {
 	runtime := newWorkspaceRuntime(t, "demo")
 	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
 	runtime.registerTools(protocol)
@@ -59,8 +59,8 @@ func TestRegisteredToolSchemasRequireStartedAtMsAndExcludeServerRuntimeContext(t
 			t.Fatalf("decode %s: %v", name, err)
 		}
 		inputSchema, _ := tool["inputSchema"].(map[string]any)
-		if !schemaContainsProperty(inputSchema, "started_at_ms") || !schemaRequiresProperty(inputSchema, "started_at_ms") {
-			t.Fatalf("%s input schema must require started_at_ms: %s", name, encoded)
+		if schemaContainsProperty(inputSchema, "started_at_ms") {
+			t.Fatalf("%s input schema must not expose started_at_ms: %s", name, encoded)
 		}
 		for _, field := range []string{"request_id", "trace_id", "span_id", "received_at_ms", "completed_at_ms", "network_latency_ms", "processing_ms", "server_elapsed_ms"} {
 			if schemaContainsProperty(inputSchema, field) {
@@ -70,24 +70,31 @@ func TestRegisteredToolSchemasRequireStartedAtMsAndExcludeServerRuntimeContext(t
 	}
 }
 
-func TestInstrumentToolUsesStartedAtMsArgumentForTiming(t *testing.T) {
-	started := time.Now().Add(-100 * time.Millisecond).UnixMilli()
+func TestInstrumentToolUsesServerReceiveTimeWithoutClientTimestamp(t *testing.T) {
+	before := time.Now().UnixMilli()
 	ctx := withRuntimeContext(context.Background(), RuntimeContext{
-		RequestID: "req_context", TraceID: "trace_context", SpanID: "span_context", StartedAtMs: time.Now().UnixMilli(),
+		RequestID: "req_context", TraceID: "trace_context", SpanID: "span_context", StartedAtMs: 1,
 	})
 	called := false
+	var handlerStarted int64
 	handler := func(handlerCtx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		called = true
-		if runtime, ok := runtimeContextFrom(handlerCtx); !ok || runtime.RequestID != "req_context" || runtime.StartedAtMs != started {
+		runtime, ok := runtimeContextFrom(handlerCtx)
+		if !ok || runtime.RequestID != "req_context" {
 			t.Fatalf("handler runtime context = %+v, %v", runtime, ok)
 		}
+		handlerStarted = runtime.StartedAtMs
 		return mcpresult.NewStructured(map[string]any{"value": "ok"}, "ok"), nil
 	}
-	request := mcpresult.Request(map[string]any{"action": "list", "started_at_ms": started})
+	request := mcpresult.Request(map[string]any{"action": "list"})
 
 	result, err := (&Runtime{}).instrumentTool("runtime_context_test", handler)(ctx, request)
 	if err != nil || !called {
 		t.Fatalf("instrumented call err=%v called=%v", err, called)
+	}
+	after := time.Now().UnixMilli()
+	if handlerStarted < before || handlerStarted > after {
+		t.Fatalf("handler started_at_ms = %d, want server receive time in [%d,%d]", handlerStarted, before, after)
 	}
 	envelope := decodeARCEnvelope(t, result)
 	mcpx, _ := envelope["mcpx"].(map[string]any)
@@ -95,12 +102,12 @@ func TestInstrumentToolUsesStartedAtMsArgumentForTiming(t *testing.T) {
 	if trace["request_id"] != "req_context" || trace["trace_id"] != "trace_context" || trace["span_id"] != "span_context" {
 		t.Fatalf("ARC did not project runtime identity: %+v", trace)
 	}
-	if trace["started_at_ms"] != float64(started) || trace["network_latency_ms"].(float64) <= 0 {
-		t.Fatalf("ARC did not use request started_at_ms: %+v", trace)
+	if trace["started_at_ms"] != trace["received_at_ms"] || trace["network_latency_ms"] != float64(0) {
+		t.Fatalf("ARC did not use server receive time fallback: %+v", trace)
 	}
 	structured, _ := result.StructuredContent.(map[string]any)
 	timing, _ := structured["timing"].(map[string]any)
-	if timing["started_at_ms"] != started || timing["server_timestamp_ms"] == nil || timing["tool_duration_ms"] == nil {
+	if timing["started_at_ms"] != timing["server_received_at_ms"] || timing["server_timestamp_ms"] == nil || timing["tool_duration_ms"] == nil {
 		t.Fatalf("model timing = %+v", timing)
 	}
 }

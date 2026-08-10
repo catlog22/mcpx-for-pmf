@@ -258,10 +258,6 @@ func (r *Runtime) validateOperationToolArguments(toolName string, arguments map[
 	merged := cloneArguments(arguments)
 	merged["remote_session_id"] = sessionID
 	merged["purpose"] = purpose
-	// operation_batch creates child tool calls on the server. Validate those
-	// child arguments against the public schema with a server-generated send
-	// timestamp; executeOperationStep refreshes it again at actual dispatch.
-	merged["started_at_ms"] = time.Now().UnixMilli()
 	return validateOperationSchemaValue(merged, schema, "arguments")
 }
 
@@ -382,7 +378,7 @@ func (r *Runtime) operationError(envReq envelope.Request, session remotesession.
 
 func operationView(record operation.Record, includeResults bool) map[string]any {
 	data := map[string]any{
-		"operation_id": record.ID, "session_id": record.RemoteSessionID, "workspace": record.WorkspaceName,
+		"operation_id": record.ID, "remote_session_id": record.RemoteSessionID, "workspace": record.WorkspaceName,
 		"state": record.State, "purpose": record.Purpose,
 	}
 	steps := make([]map[string]any, 0, len(record.Steps))
@@ -401,10 +397,10 @@ func operationView(record operation.Record, includeResults bool) map[string]any 
 	data["stats"] = operationStats(record)
 	if record.State == operation.StateQueued || record.State == operation.StateRunning {
 		data["next_action"] = nextActionWithReason("operation_manage", "操作仍在执行；使用一次 wait 等待结果，不要重复轮询 status", map[string]any{
-			"session_id":   record.RemoteSessionID,
-			"operation_id": record.ID,
-			"action":       "wait",
-			"timeout_ms":   30000,
+			"remote_session_id": record.RemoteSessionID,
+			"operation_id":      record.ID,
+			"action":            "wait",
+			"timeout_ms":        30000,
 		})
 	}
 	// A completed wait already exposes each machine-readable result under
@@ -511,10 +507,10 @@ func operationResultView(page operation.ResultPage) map[string]any {
 	data["next_cursor"] = page.NextCursor
 	if page.NextCursor != "" {
 		arguments := map[string]any{
-			"session_id":   page.Operation.RemoteSessionID,
-			"operation_id": page.Operation.ID,
-			"action":       "result",
-			"cursor":       page.NextCursor,
+			"remote_session_id": page.Operation.RemoteSessionID,
+			"operation_id":      page.Operation.ID,
+			"action":            "result",
+			"cursor":            page.NextCursor,
 		}
 		if page.StepID != "" {
 			arguments["step_id"] = page.StepID
@@ -769,7 +765,7 @@ func validateOperationSchemaValue(value any, schema map[string]any, path string)
 
 func isOperationInjectedField(key string) bool {
 	switch key {
-	case "session_id", "remote_session_id", "purpose", "intent", "progress_summary", "execution_mode":
+	case "session_id", "remote_session_id", "goal", "purpose", "intent", "progress_summary", "execution_mode":
 		return true
 	default:
 		return false

@@ -10,7 +10,6 @@ import (
 type HumanObsSnapshot struct {
 	Tool             string
 	Status           string
-	Goal             string
 	Purpose          string
 	Intent           string
 	ReasoningSummary string
@@ -43,7 +42,6 @@ func NormalizeHumanToolOutput(snap HumanObsSnapshot, maxBytes int) (json.RawMess
 		"summary":   summary,
 	}
 	for key, value := range map[string]string{
-		"goal":              snap.Goal,
 		"purpose":           snap.Purpose,
 		"reasoning_summary": snap.ReasoningSummary,
 		"progress_summary":  snap.ProgressSummary,

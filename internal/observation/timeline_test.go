@@ -113,7 +113,7 @@ func TestTextRendererDefaultShowsTranscriptContextActionSeparatorAndRunDuration(
 		}
 	}
 	text := output.String()
-	for _, want := range []string{"Workspace demo · Session rs_demo", "• Read a.go (full)", "────────────────────────", "• Ran go test ./...", "↳ exit 0 · 2.1s"} {
+	for _, want := range []string{"Workspace demo · Session rs_demo", "• Read a.go (full)", "↳ tool: read", "• Ran go test ./...", "↳ tool: execute · exit 0 · time 2.1s"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("default transcript context/action fact missing %q: %q", want, text)
 		}
@@ -121,7 +121,7 @@ func TestTextRendererDefaultShowsTranscriptContextActionSeparatorAndRunDuration(
 	if strings.Count(text, "Workspace demo") != 1 || strings.Count(text, "Session rs_demo") != 1 {
 		t.Fatalf("transcript context repeated: %q", text)
 	}
-	for _, forbidden := range []string{"operation=op_secret", "duration=2100ms", "── execute"} {
+	for _, forbidden := range []string{"operation=op_secret", "duration=2100ms", "── execute", "────────────────────────"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("default telemetry leaked %q: %q", forbidden, text)
 		}
@@ -259,8 +259,8 @@ func TestTextRendererShowsProgressBeforeCompletionOnce(t *testing.T) {
 	progress := "已完成定位，下一步运行测试"
 	for _, event := range []Event{
 		{Sequence: 0, RequestID: "req_previous", Tool: "read", Type: TypeToolCompleted, Status: "succeeded", Output: []byte(`{"status":"succeeded"}`)},
-		{Sequence: 1, RequestID: "req_progress", Tool: "execute", Type: TypeToolStarted, Goal: "验证变更", Purpose: "运行测试", ReasoningSummary: "先验证最小闭环", ProgressSummary: progress, NextStep: "检查失败日志", PlanID: "pl_progress", PlanTaskID: "pt_progress", ExecutionTaskID: "task_progress", OperationID: "op_progress"},
-		{Sequence: 2, RequestID: "req_progress", Tool: "execute", Type: TypeToolCompleted, Status: "succeeded", DurationMs: 27, Goal: "验证变更", Purpose: "运行测试", ReasoningSummary: "先验证最小闭环", ProgressSummary: progress, NextStep: "检查失败日志", PlanID: "pl_progress", PlanTaskID: "pt_progress", ExecutionTaskID: "task_progress", OperationID: "op_progress", Command: "go test ./...", Input: []byte(`{"command":"go test ./..."}`), Output: []byte(`{"status":"succeeded"}`)},
+		{Sequence: 1, RequestID: "req_progress", Tool: "execute", Type: TypeToolStarted, Purpose: "运行测试", ReasoningSummary: "先验证最小闭环", ProgressSummary: progress, NextStep: "检查失败日志", PlanID: "pl_progress", PlanTaskID: "pt_progress", ExecutionTaskID: "task_progress", OperationID: "op_progress"},
+		{Sequence: 2, RequestID: "req_progress", Tool: "execute", Type: TypeToolCompleted, Status: "succeeded", DurationMs: 27, Purpose: "运行测试", ReasoningSummary: "先验证最小闭环", ProgressSummary: progress, NextStep: "检查失败日志", PlanID: "pl_progress", PlanTaskID: "pt_progress", ExecutionTaskID: "task_progress", OperationID: "op_progress", Command: "go test ./...", Input: []byte(`{"command":"go test ./..."}`), Output: []byte(`{"status":"succeeded"}`)},
 	} {
 		if err := renderer.RenderEvent(&output, event); err != nil {
 			t.Fatal(err)
@@ -270,62 +270,59 @@ func TestTextRendererShowsProgressBeforeCompletionOnce(t *testing.T) {
 	if strings.Contains(text, "Progress model summary") || strings.Count(text, "已完成定位，下一步运行测试") != 1 {
 		t.Fatalf("progress rendering=%q", text)
 	}
-	for _, want := range []string{"goal: 验证变更", "purpose: 运行测试", "reasoning: 先验证最小闭环", "next: 检查失败日志"} {
+	for _, want := range []string{
+		"purpose: 运行测试",
+		"progress: 已完成定位，下一步运行测试",
+		"next: 检查失败日志",
+		"reasoning: 先验证最小闭环",
+		"plan: pl_progress · plan task: pt_progress · execution task: task_progress",
+	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("semantic context missing %q: %q", want, text)
 		}
 	}
-	purposeIndex := strings.Index(text, "purpose: 运行测试")
-	goalIndex := strings.Index(text, "goal: 验证变更")
-	if purposeIndex < 0 || goalIndex <= purposeIndex || !strings.Contains(text, "↳ next: 检查失败日志\n") || !strings.Contains(text, "plan: pl_progress · plan task: pt_progress · execution task: task_progress") || !strings.Contains(text, "• Ran go test ./...") || !strings.Contains(text, "↳ 27ms") {
-		t.Fatalf("semantic context hierarchy, command, or run duration was not grouped: %q", text)
+	primaryLine := "purpose: 运行测试 · progress: 已完成定位，下一步运行测试 · next: 检查失败日志"
+	metadataLine := "reasoning: 先验证最小闭环 · plan: pl_progress · plan task: pt_progress · execution task: task_progress"
+	primaryIndex := strings.Index(text, primaryLine)
+	metadataIndex := strings.Index(text, metadataLine)
+	if primaryIndex < 0 || metadataIndex <= primaryIndex || !strings.Contains(text, "• Ran go test ./...") || !strings.Contains(text, "↳ tool: execute · time 27ms") {
+		t.Fatalf("semantic context hierarchy, compact layout, command, or run duration was not grouped: %q", text)
 	}
-	for _, forbidden := range []string{"operation=op_progress", "duration=27ms", "↳ operation: op_progress"} {
+	for _, forbidden := range []string{"goal:", "operation=op_progress", "duration=27ms", "↳ operation: op_progress"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("default telemetry leaked %q: %q", forbidden, text)
 		}
 	}
 }
 
-func TestTextRendererRightAlignsGoalAndSuppressesUnchangedGoal(t *testing.T) {
-	renderer := NewTextRendererWithWidth(false, 80)
+func TestTextRendererDefaultAuditSnapshotKeepsDiffWithoutGoal(t *testing.T) {
+	renderer := NewTextRenderer(false)
 	var output bytes.Buffer
 	for _, event := range []Event{
-		{Sequence: 1, RequestID: "req_1", Tool: "read", Type: TypeToolCompleted, Goal: "完成 ARC 改造", Purpose: "读取 render", NextStep: "读取 timeline", Input: []byte(`{"view":"file","path":"render.go"}`), Output: []byte(`{"status":"succeeded"}`)},
-		{Sequence: 2, RequestID: "req_2", Tool: "read", Type: TypeToolCompleted, Goal: "完成 ARC 改造", Purpose: "读取 timeline", NextStep: "修改代码", Input: []byte(`{"view":"file","path":"timeline.go"}`), Output: []byte(`{"status":"succeeded"}`)},
-		{Sequence: 3, RequestID: "req_3", Tool: "read", Type: TypeToolCompleted, Goal: "验证 ARC 改造", Purpose: "读取测试", NextStep: "运行测试", Input: []byte(`{"view":"file","path":"timeline_test.go"}`), Output: []byte(`{"status":"succeeded"}`)},
+		{Sequence: 1, RequestID: "req_audit", Tool: "execute", Type: TypeToolStarted, Purpose: "验证 ARC renderer", ReasoningSummary: "运行最小测试闭环", ProgressSummary: "代码已修改", NextStep: "检查 diff", PlanID: "pl_audit", PlanTaskID: "pt_audit", ExecutionTaskID: "task_audit"},
+		{Sequence: 2, RequestID: "req_audit", Tool: "execute", Type: TypeToolCompleted, Status: "succeeded", DurationMs: 21, Command: "go test ./...", Purpose: "验证 ARC renderer", ReasoningSummary: "运行最小测试闭环", ProgressSummary: "代码已修改", NextStep: "检查 diff", PlanID: "pl_audit", PlanTaskID: "pt_audit", ExecutionTaskID: "task_audit", Input: []byte(`{"command":"go test ./...","goal":"legacy ignored"}`), Output: []byte(`{"status":"succeeded"}`)},
+		{Sequence: 3, RequestID: "req_edit", Tool: "edit", Type: TypeFileChanged, Status: "succeeded", Output: []byte(`{"results":[{"path":"audit.go","operation":"update","diff":"--- a/audit.go\n+++ b/audit.go\n@@ -1 +1 @@\n-old\n+new\n"}]}`)},
 	} {
 		if err := renderer.RenderEvent(&output, event); err != nil {
 			t.Fatal(err)
 		}
 	}
 	text := output.String()
-	if strings.Count(text, "goal: 完成 ARC 改造") != 1 || strings.Count(text, "goal: 验证 ARC 改造") != 1 {
-		t.Fatalf("goal suppression/change rendering incorrect: %q", text)
-	}
-	for _, want := range []string{"↳ next: 读取 timeline\n", "↳ next: 修改代码\n", "↳ next: 运行测试\n"} {
+	for _, want := range []string{
+		"Ran go test ./...",
+		"tool: execute · time 21ms",
+		"purpose: 验证 ARC renderer · progress: 代码已修改 · next: 检查 diff",
+		"reasoning: 运行最小测试闭环 · plan: pl_audit · plan task: pt_audit · execution task: task_audit",
+		"Edited audit.go [-1,+1]",
+		"1 | -old",
+		"1 | +new",
+	} {
 		if !strings.Contains(text, want) {
-			t.Fatalf("next step should stay on its own line %q: %q", want, text)
+			t.Fatalf("default audit snapshot missing %q: %q", want, text)
 		}
 	}
-	for _, line := range strings.Split(text, "\n") {
-		if strings.Contains(line, "purpose: 读取 render") && strings.Contains(line, "goal: 完成 ARC 改造") {
-			if displayWidth(line) != 76 {
-				t.Fatalf("purpose/goal line width=%d, want 76 effective body columns: %q", displayWidth(line), line)
-			}
-			return
-		}
-	}
-	t.Fatalf("purpose/goal were not rendered on the same right-aligned line: %q", text)
-}
-
-func TestSemanticPurposeGoalLinesFallsBackOnNarrowTerminal(t *testing.T) {
-	lines := semanticPurposeGoalLines("读取很长的 purpose", "完成很长的 goal", 24)
-	if len(lines) != 2 {
-		t.Fatalf("narrow purpose/goal lines=%#v, want 2 lines", lines)
-	}
-	if !strings.HasPrefix(lines[0], "purpose: ") || !strings.Contains(lines[1], "goal: ") {
-		t.Fatalf("narrow purpose/goal fallback=%#v", lines)
+	if strings.Contains(text, "goal:") {
+		t.Fatalf("default audit snapshot must not render goal: %q", text)
 	}
 }
 

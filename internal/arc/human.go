@@ -115,12 +115,12 @@ func renderEditConfirmation(summary string, data map[string]any) (string, bool) 
 func renderContextBlock(display string, context Context) string {
 	context = normalizeContext(context)
 	lines := make([]string, 0, 3)
-	hasNarrative := context.Goal != "" || context.Purpose != "" || context.ReasoningSummary != "" || context.ProgressSummary != "" || context.NextStep != ""
+	hasNarrative := context.Purpose != "" || context.ReasoningSummary != "" || context.ProgressSummary != "" || context.NextStep != ""
 	for index, group := range [][]struct {
 		label string
 		value string
 	}{
-		{{label: "goal", value: context.Goal}, {label: "purpose", value: context.Purpose}},
+		{{label: "purpose", value: context.Purpose}},
 		{{label: "reasoning", value: context.ReasoningSummary}, {label: "progress", value: context.ProgressSummary}, {label: "next", value: context.NextStep}},
 		{{label: "plan", value: context.PlanID}, {label: "plan task", value: context.PlanTaskID}, {label: "execution task", value: context.ExecutionTaskID}, {label: "operation", value: context.OperationID}},
 	} {
@@ -477,8 +477,8 @@ func renderPlanData(summary string, data map[string]any) (string, bool) {
 	if status := humanField(data, "status"); status != "" {
 		fmt.Fprintf(&builder, "\n- Status: %s", inlineCode(status))
 	}
-	if goal := compactHuman(humanField(data, "goal")); goal != "" {
-		fmt.Fprintf(&builder, "\n- Goal: %s", goal)
+	if planSummary := compactHuman(humanField(data, "summary")); planSummary != "" {
+		fmt.Fprintf(&builder, "\n- Summary: %s", planSummary)
 	}
 	if task := humanMap(data["task"]); len(task) > 0 {
 		if title := compactHuman(humanField(task, "title")); title != "" {

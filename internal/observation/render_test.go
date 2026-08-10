@@ -390,7 +390,7 @@ func TestRenderTextSummarizesPlanManageEnvelope(t *testing.T) {
 	if err := RenderText(&output, Event{
 		Tool:   "plan_manage",
 		Type:   TypeToolCompleted,
-		Input:  []byte(`{"action":"create","goal":"修复可见性"}`),
+		Input:  []byte(`{"action":"create","summary":"修复可见性"}`),
 		Output: []byte(`{"status":"ok","result":{"content":[{"type":"text","text":"{\"ok\":true,\"status\":\"ok\",\"data\":{\"plan_id\":\"pl_demo\",\"status\":\"ready\",\"tasks\":[{\"plan_task_id\":\"pt_1\"},{\"plan_task_id\":\"pt_2\"}]}}"}]}}`),
 	}, false); err != nil {
 		t.Fatal(err)

@@ -79,7 +79,7 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		project              map[string]any
 		gitHead              string
 		treeDigest           string
-		pendingConfirmations any
+		pendingConfirmations []map[string]any
 		taskList             any
 		artifacts            any
 		latestModelState     any
@@ -151,11 +151,6 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 	} else {
 		instructionPayload = map[string]any{"documents": docs, "inline": false}
 	}
-	confirmationItems := pendingConfirmations
-	if pending, ok := pendingConfirmations.([]map[string]any); ok {
-		confirmationItems = cleanPendingConfirmationItems(pending)
-	}
-
 	toolManifest := r.registeredToolManifest()
 	build := r.build
 	if build.Version == "" {
@@ -171,9 +166,6 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		"mcp_revision":                 mcpRevision(servers),
 		"instruction_revision":         instructionRevision(docs),
 		"session_capability_revision":  sessionCapabilityRevision(&session),
-		// Legacy aliases are retained in the payload for one migration cycle.
-		"skill_manifest_revision": skillRevision(skills),
-		"mcp_manifest_revision":   mcpRevision(servers),
 	}
 
 	data := map[string]any{
@@ -201,7 +193,7 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		"git": map[string]any{
 			"head": gitHead, "tree_digest": treeDigest,
 		},
-		"pending_confirmations": confirmationItems,
+		"pending_confirmations": pendingConfirmations,
 		"tasks":                 taskList,
 		"artifacts":             artifacts,
 		"schema_source":         "tools/list",
@@ -209,13 +201,12 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		"capability_groups":     capabilityGroups(),
 		"client_refresh":        clientRefreshPayload(envReq.Payload, revisions),
 		"recommended_workflows": map[string]any{
-			"bootstrap":      []string{"session"},
+			"bootstrap":      []string{"workspace", "session"},
 			"source_change":  []string{"read", "edit", "execute", "observe"},
 			"plan_delivery":  []string{"plan", "edit", "execute", "artifact", "observe"},
 			"extension_call": []string{"discover", "skill_call", "mcp_call"},
 		},
-		"evaluation_revision": "clean-core-p1-p5-v1",
-		"opened_at":           time.Now().UTC().Format(time.RFC3339),
+		"opened_at": time.Now().UTC().Format(time.RFC3339),
 	}
 	if latestModelState != nil {
 		data["latest_model_state"] = latestModelState

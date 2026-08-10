@@ -69,9 +69,7 @@ func riskDescriptor(readOnly, destructive, idempotent, openWorld bool, classific
 	}
 }
 
-// cleanCoreTool keeps remote_session_id visible. The old publicTool helper
-// intentionally rewrites that field to session_id for the legacy catalog;
-// clean-core clients use the stable remote_session_id contract directly.
+// cleanCoreTool builds the stable clean-core contract with remote_session_id.
 func cleanCoreTool(name, description string, properties map[string]any, required []string, annotation toolAnnotation) mcp.Tool {
 	publicProperties := make(map[string]any, len(properties)+1)
 	for key, value := range properties {
@@ -93,6 +91,10 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 	remoteSession := stringSchema("跨客户端复用的 Remote Session 标识")
 	workspace := stringSchema("已注册的 Workspace 名称")
 	path := stringSchema("Workspace 内的相对文件路径")
+
+	r.addTool(s, cleanCoreTool("workspace", desc["workspace"], map[string]any{
+		"action": enumSchema("Workspace 查询动作", "list"),
+	}, []string{"action"}, readOnlyToolAnnotation), r.toolWorkspace)
 
 	r.addTool(s, cleanCoreTool("session", desc["session"], map[string]any{
 		"remote_session_id":            remoteSession,
@@ -234,7 +236,6 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"offset":             numberSchema("diff 视图的字节偏移"),
 		"cursor":             stringSchema("分页游标"),
 		"call_id":            stringSchema("按调用关联 ID 过滤 history"),
-		"session_id":         stringSchema("按 Remote Session 过滤 history；通常使用 remote_session_id 即可"),
 		"event_ids":          arraySchema(map[string]any{"type": "string"}, "按事件 sequence ID 过滤 history"),
 		"request_ids":        arraySchema(map[string]any{"type": "string"}, "按多个请求 ID 过滤 history"),
 		"operation_ids":      arraySchema(map[string]any{"type": "string"}, "按 Operation ID 过滤 history"),

@@ -87,7 +87,7 @@ func TestToolLogRecordsDuration(t *testing.T) {
 
 func TestToolRequestStartedAtMsPrefersClientMeta(t *testing.T) {
 	received := time.UnixMilli(1786365000200)
-	request := mcpresult.Request(map[string]any{"started_at_ms": int64(1786365000100)})
+	request := mcpresult.Request(map[string]any{})
 	request.Params.Meta = mcp.Meta{clientStartedAtMetaKey: int64(1786365000050)}
 	if got := toolRequestStartedAtMs(request, received); got != int64(1786365000050) {
 		t.Fatalf("started_at_ms = %d, want client meta timestamp", got)
@@ -128,7 +128,7 @@ func TestInstrumentToolSendsNativeProgressHeartbeat(t *testing.T) {
 	}
 	defer clientSession.Close()
 
-	params := &mcp.CallToolParams{Name: "slow_tool", Arguments: map[string]any{"started_at_ms": time.Now().UnixMilli()}}
+	params := &mcp.CallToolParams{Name: "slow_tool", Arguments: map[string]any{}}
 	params.SetProgressToken("heartbeat-1")
 	if _, err := clientSession.CallTool(ctx, params); err != nil {
 		t.Fatal(err)
@@ -171,18 +171,21 @@ func TestInstrumentToolCarriesSemanticContextToARC(t *testing.T) {
 		t.Fatalf("context=%#v", structured["context"])
 	}
 	for key, want := range map[string]string{
-		"goal": "提升观测体验", "purpose": "验证 ARC 语义上下文", "reasoning_summary": "先验证请求到结果的透传",
+		"purpose": "验证 ARC 语义上下文", "reasoning_summary": "先验证请求到结果的透传",
 		"progress_summary": "工具调用已完成", "next_step": "检查终端渲染", "plan_id": "pl_context", "plan_task_id": "pt_context", "execution_task_id": "task_context",
 	} {
 		if semantic[key] != want {
 			t.Fatalf("context[%q]=%v, want %q", key, semantic[key], want)
 		}
 	}
+	if _, exists := semantic["goal"]; exists {
+		t.Fatalf("legacy goal must be ignored by ARC context: %+v", semantic)
+	}
 	if _, exists := semantic["task_id"]; exists {
 		t.Fatalf("ambiguous task_id leaked into ARC context: %+v", semantic)
 	}
 	text := result.Content[0].(*mcp.TextContent).Text
-	if !strings.Contains(text, "Context:") || !strings.Contains(text, "next: 检查终端渲染") {
+	if strings.Contains(text, "goal:") || !strings.Contains(text, "Context:") || !strings.Contains(text, "next: 检查终端渲染") {
 		t.Fatalf("human ARC text=%q", text)
 	}
 }

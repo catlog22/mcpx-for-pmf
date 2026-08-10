@@ -28,7 +28,6 @@ type TextRenderer struct {
 	detail                  bool
 	lastWorkspace           string
 	lastRemoteSessionID     string
-	lastGoal                string
 }
 
 type interactionBlock struct {
@@ -146,11 +145,6 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 	if !r.detail && isCompactObservationNoise(event) {
 		return nil
 	}
-	goal := compactLine(event.Goal)
-	suppressGoal := goal != "" && goal == r.lastGoal
-	if goal != "" && !suppressGoal {
-		r.lastGoal = goal
-	}
 	if err := r.writeTranscriptContext(w, event); err != nil {
 		return err
 	}
@@ -210,7 +204,6 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 		suppressOutputAction: suppressOutputAction,
 		commandOutputStarted: wasCommandOutput,
 		suppressContext:      block.contextShown,
-		suppressGoal:         suppressGoal,
 		suppressDuration:     block.pendingStarted && event.Type == TypeToolCompleted,
 		outputLineStart:      outputLineStart,
 	}, block.commandOutput && event.Type == TypeToolCompleted); err != nil {
@@ -279,7 +272,6 @@ func (r *TextRenderer) ResetAfterGap() {
 	r.lastSemanticFingerprint = ""
 	r.lastClosedKey = ""
 	r.duplicateCount = 0
-	r.lastGoal = ""
 }
 
 func commandOutputLineCount(event Event) int {
@@ -451,12 +443,8 @@ func (r *TextRenderer) activate(w io.Writer, block *interactionBlock, event Even
 			}
 		}
 	}
-	if !block.opened && r.lastClosedKey != "" && r.lastClosedKey != block.key {
-		if r.detail {
-			if err := r.writeOperationSeparator(w, event); err != nil {
-				return err
-			}
-		} else if err := r.writeActionSeparator(w); err != nil {
+	if !block.opened && r.lastClosedKey != "" && r.lastClosedKey != block.key && r.detail {
+		if err := r.writeOperationSeparator(w, event); err != nil {
 			return err
 		}
 	}

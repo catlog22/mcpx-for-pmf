@@ -23,28 +23,16 @@ func publicDispatch(req *mcp.CallToolRequest, key, value string) *mcp.CallToolRe
 	return forwardedRequest(req, map[string]any{key: value})
 }
 
-func (r *Runtime) toolWorkspaceObserve(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	view := publicSelector(req, "view")
-	switch view {
-	case "changes":
-		return r.toolObserveChanges(ctx, req)
-	case "history":
-		return r.toolWorkspaceHistoryRead(ctx, req)
-	default:
-		return r.toolWorkspaceState(ctx, publicDispatch(req, "action", view))
-	}
-}
-
-// toolWorkspaceRead consolidates list/observe/history behind view.
-func (r *Runtime) toolWorkspaceRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	switch publicSelector(req, "view") {
-	case "list":
+func (r *Runtime) toolWorkspace(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ctx = withCleanCoreRequest(ctx)
+	if publicSelector(req, "action") == "list" {
 		return r.toolWorkspaceList(ctx, req)
-	case "history":
-		return r.toolWorkspaceHistoryRead(ctx, req)
-	default:
-		return r.toolWorkspaceObserve(ctx, req)
 	}
+	envReq, _, fail := r.remoteRequest(ctx, req)
+	if fail != nil {
+		return fail, nil
+	}
+	return r.terminalError(envReq, "", "", "bad_request", "action must be list")
 }
 
 // toolSession consolidates open + lifecycle transitions behind action.
@@ -55,11 +43,9 @@ func (r *Runtime) toolSession(ctx context.Context, req *mcp.CallToolRequest) (*m
 	case "open":
 		return r.toolSessionOpen(ctx, req)
 	case "attach":
-		// Clean core handoff is direct session reuse. The caller supplies the
-		// existing remote_session_id; no one-time handoff token is involved.
 		return r.toolSessionOpen(ctx, req)
 	case "close":
-		return r.toolSessionTransition(ctx, publicDispatch(req, "operation", action))
+		return r.toolRemoteSessionClose(ctx, req)
 	default:
 		envReq, _, fail := r.remoteRequest(ctx, req)
 		if fail != nil {
@@ -67,20 +53,6 @@ func (r *Runtime) toolSession(ctx context.Context, req *mcp.CallToolRequest) (*m
 		}
 		return r.terminalError(envReq, envReq.RemoteSessionID, envReq.Workspace, "bad_request", "action must be open, close, or attach")
 	}
-}
-
-// toolTask consolidates attach/stop/stdin behind action.
-func (r *Runtime) toolTask(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return r.toolTaskControl(ctx, publicDispatch(req, "operation", publicSelector(req, "action")))
-}
-
-// toolPlan consolidates create + transitions behind action.
-func (r *Runtime) toolPlan(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	action := publicSelector(req, "action")
-	if action == "create" {
-		return r.toolPlanCreatePublic(ctx, req)
-	}
-	return r.toolPlanTransition(ctx, publicDispatch(req, "transition", action))
 }
 
 // toolEnvironment is write-side snapshot create (action=snapshot_create).
@@ -93,11 +65,6 @@ func (r *Runtime) toolEnvironment(ctx context.Context, req *mcp.CallToolRequest)
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "bad_request", "action must be snapshot_create")
 	}
 	return r.toolEnvironmentSnapshotCreate(ctx, req)
-}
-
-// toolArtifact is write-side register.
-func (r *Runtime) toolArtifact(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return r.toolArtifactRegister(ctx, req)
 }
 
 func (r *Runtime) toolWorkspaceHistoryRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -118,7 +85,7 @@ func (r *Runtime) toolWorkspaceHistoryRead(ctx context.Context, req *mcp.CallToo
 	}
 	query := observation.HistoryQuery{
 		Workspace:        workspaceName,
-		SessionID:        firstString(envReq.RemoteSessionID, stringPayload(envReq.Payload, "session_id")),
+		SessionID:        envReq.RemoteSessionID,
 		CallID:           firstString(envReq.CallID, stringPayload(envReq.Payload, "call_id")),
 		EventIDs:         stringSlicePayload(envReq.Payload, "event_ids"),
 		RequestIDs:       append(stringSlicePayload(envReq.Payload, "request_ids"), stringPayload(envReq.Payload, "request_id")),
@@ -154,10 +121,10 @@ func (r *Runtime) toolWorkspaceHistoryRead(ctx context.Context, req *mcp.CallToo
 func historyEventView(event observation.Event) map[string]any {
 	view := map[string]any{
 		"event_id": event.EventID, "sequence": event.Sequence, "workspace": event.Workspace,
-		"session_id": event.RemoteSessionID, "request_id": event.RequestID, "call_id": event.CallID, "operation_id": event.OperationID,
+		"remote_session_id": event.RemoteSessionID, "request_id": event.RequestID, "call_id": event.CallID, "operation_id": event.OperationID,
 		"parent_operation_id": event.ParentOperationID, "step_id": event.StepID, "kind": event.Type, "type": event.Type,
 		"name": event.Tool, "tool": event.Tool, "phase": event.Phase, "status": event.Status,
-		"goal": event.Goal, "purpose": event.Purpose, "reasoning_summary": event.ReasoningSummary,
+		"purpose": event.Purpose, "reasoning_summary": event.ReasoningSummary,
 		"progress_summary": event.ProgressSummary, "next_step": event.NextStep, "plan_id": event.PlanID,
 		"plan_task_id": event.PlanTaskID, "execution_task_id": event.ExecutionTaskID, "summary": event.Summary, "command": event.Command,
 		"working_directory": event.WorkingDirectory, "duration_ms": event.DurationMs,
@@ -233,18 +200,6 @@ func parseUnixMillis(value string) (int64, error) {
 	return parsed, nil
 }
 
-func (r *Runtime) toolSessionRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	action := publicSelector(req, "view")
-	if action == "summary" {
-		action = "get"
-	}
-	return r.toolSessionManage(ctx, publicDispatch(req, "action", action))
-}
-
-func (r *Runtime) toolSessionTransition(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return r.toolSessionManage(ctx, publicDispatch(req, "action", publicSelector(req, "operation")))
-}
-
 func (r *Runtime) toolSourceRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	view := publicSelector(req, "view")
 	if view == "file" {
@@ -259,30 +214,6 @@ func (r *Runtime) toolSourceRead(ctx context.Context, req *mcp.CallToolRequest) 
 		updates["mode"] = mode
 	}
 	return r.toolContextQueryUnified(ctx, forwardedRequest(req, updates))
-}
-
-func (r *Runtime) toolCommandRun(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return r.toolCommandExecute(ctx, req)
-}
-
-func (r *Runtime) toolTaskRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return r.toolTaskManage(ctx, publicDispatch(req, "action", publicSelector(req, "view")))
-}
-
-func (r *Runtime) toolTaskControl(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return r.toolTaskManage(ctx, publicDispatch(req, "action", publicSelector(req, "operation")))
-}
-
-func (r *Runtime) toolPlanCreatePublic(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return r.toolPlanManage(ctx, publicDispatch(req, "action", "create"))
-}
-
-func (r *Runtime) toolPlanReadPublic(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return r.toolPlanManage(ctx, publicDispatch(req, "action", "get"))
-}
-
-func (r *Runtime) toolPlanTransition(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return r.toolPlanManage(ctx, publicDispatch(req, "action", publicSelector(req, "transition")))
 }
 
 func (r *Runtime) toolRuntimeRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -301,26 +232,6 @@ func (r *Runtime) toolEnvironmentRead(ctx context.Context, req *mcp.CallToolRequ
 
 func (r *Runtime) toolEnvironmentSnapshotCreate(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return r.toolEnvironmentInspect(ctx, forwardedRequest(req, map[string]any{"save_snapshot": true}))
-}
-
-func (r *Runtime) toolExtensionDiscover(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return r.toolExtensionManage(ctx, publicDispatch(req, "action", publicSelector(req, "view")))
-}
-
-func (r *Runtime) toolSkillCall(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return r.toolExtensionManage(ctx, forwardedRequest(req, map[string]any{"action": "call", "kind": "skill"}))
-}
-
-func (r *Runtime) toolMCPCallPublic(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return r.toolExtensionManage(ctx, forwardedRequest(req, map[string]any{"action": "call", "kind": "mcp"}))
-}
-
-func (r *Runtime) toolArtifactReadPublic(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	action := publicSelector(req, "view")
-	if action == "content" {
-		action = "read"
-	}
-	return r.toolArtifactManage(ctx, publicDispatch(req, "action", action))
 }
 
 func (r *Runtime) toolObserveChanges(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {

@@ -108,16 +108,16 @@ func TestWrapToolResultRendersSessionBootstrapAsMarkdown(t *testing.T) {
 }
 
 func TestWrapToolResultRendersPlanIdentityAndProgress(t *testing.T) {
-	raw := mcpresult.NewText(`{"status":"ok","data":{"plan_id":"pl_demo","goal":"修复工具可见性","status":"ready","tasks":[{"plan_task_id":"pt_1"},{"plan_task_id":"pt_2"}],"progress":{"completed":1,"total":2}}}`)
+	raw := mcpresult.NewText(`{"status":"ok","data":{"plan_id":"pl_demo","goal":"legacy internal value","summary":"修复工具可见性","status":"ready","tasks":[{"plan_task_id":"pt_1"},{"plan_task_id":"pt_2"}],"progress":{"completed":1,"total":2}}}`)
 	written := WrapToolResult("plan_manage", ResultContext{}, raw)
 	text := written.Content[0].(*mcp.TextContent).Text
-	for _, want := range []string{"Plan ID: `pl_demo`", "Status: `ready`", "Goal: 修复工具可见性", "Progress: 1/2 completed", "`pt_1`", "`pt_2`"} {
+	for _, want := range []string{"Plan ID: `pl_demo`", "Status: `ready`", "Summary: 修复工具可见性", "Progress: 1/2 completed", "`pt_1`", "`pt_2`"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("plan text missing %q: %q", want, text)
 		}
 	}
-	if strings.Contains(text, `"plan_id"`) || text == "ok" {
-		t.Fatalf("plan must not degrade to JSON/ok: %q", text)
+	if strings.Contains(text, "Goal:") || strings.Contains(text, `"plan_id"`) || text == "ok" {
+		t.Fatalf("plan must not expose goal or degrade to JSON/ok: %q", text)
 	}
 }
 
@@ -211,7 +211,6 @@ func TestWrapToolResultExposesSemanticContextToARCAndHumanText(t *testing.T) {
 	written := WrapToolResult("file_read", ResultContext{
 		RequestID: "req_context",
 		Context: Context{
-			Goal:             "修复观测体验",
 			Purpose:          "读取目标文件",
 			ReasoningSummary: "先确认当前实现和格式",
 			ProgressSummary:  "已定位相关渲染入口",
@@ -232,7 +231,6 @@ func TestWrapToolResultExposesSemanticContextToARCAndHumanText(t *testing.T) {
 		t.Fatalf("context=%#v", structured["context"])
 	}
 	for key, want := range map[string]string{
-		"goal":              "修复观测体验",
 		"purpose":           "读取目标文件",
 		"reasoning_summary": "先确认当前实现和格式",
 		"progress_summary":  "已定位相关渲染入口",
@@ -247,10 +245,13 @@ func TestWrapToolResultExposesSemanticContextToARCAndHumanText(t *testing.T) {
 		}
 	}
 	text := written.Content[0].(*mcp.TextContent).Text
+	if _, exists := context["goal"]; exists {
+		t.Fatalf("goal must not appear in ARC context: %+v", context)
+	}
 	if _, exists := context["task_id"]; exists {
 		t.Fatalf("ambiguous task_id must not appear in ARC context: %+v", context)
 	}
-	for _, want := range []string{"Context:", "- goal: 修复观测体验 · purpose: 读取目标文件", "next: 运行单元测试", "- plan: pl_context · plan task: pt_context · execution task: task_context · operation: op_context"} {
+	for _, want := range []string{"Context:", "- purpose: 读取目标文件", "next: 运行单元测试", "- plan: pl_context · plan task: pt_context · execution task: task_context · operation: op_context"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("human text missing %q: %s", want, text)
 		}
@@ -338,7 +339,7 @@ func TestOutputSchemaAndRegistry(t *testing.T) {
 	if err := json.Unmarshal(rawOutputSchema, &schema); err != nil {
 		t.Fatal(err)
 	}
-	if schema["$id"] != "mcpx.structured_content.v1.4" {
+	if schema["$id"] != "mcpx.structured_content.v1.5" {
 		t.Fatalf("schema id = %v", schema["$id"])
 	}
 	required, _ := schema["required"].([]any)
@@ -387,6 +388,16 @@ func TestOutputSchemaAndRegistry(t *testing.T) {
 		if codeChangeProperties[legacy] != nil {
 			t.Fatalf("code change schema still exposes legacy field %s: %+v", legacy, codeChangeSchema)
 		}
+	}
+	var planSchema map[string]any
+	if err := json.Unmarshal(registry[SchemaPlan], &planSchema); err != nil {
+		t.Fatal(err)
+	}
+	planEnvelopeProperties, _ := planSchema["properties"].(map[string]any)
+	planDataSchema, _ := planEnvelopeProperties["data"].(map[string]any)
+	planProperties, _ := planDataSchema["properties"].(map[string]any)
+	if planProperties["goal"] != nil || planProperties["summary"] == nil {
+		t.Fatalf("plan schema must expose summary without legacy goal: %+v", planSchema)
 	}
 	registry[SchemaText][0] = 'x'
 	if string(SchemaRegistry()[SchemaText]) == string(registry[SchemaText]) {

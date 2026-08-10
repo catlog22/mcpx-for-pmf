@@ -27,7 +27,6 @@ func TestNormalizeToolInputRedactsSensitiveArguments(t *testing.T) {
 func TestNormalizeHumanToolOutputOmitsStructuredContent(t *testing.T) {
 	encoded, truncated := NormalizeHumanToolOutput(HumanObsSnapshot{
 		Status:           "succeeded",
-		Goal:             "verify output",
 		Purpose:          "run the command",
 		ReasoningSummary: "the command is the smallest probe",
 		ProgressSummary:  "command started",
@@ -53,7 +52,7 @@ func TestNormalizeHumanToolOutputOmitsStructuredContent(t *testing.T) {
 		t.Fatalf("human fields missing: %s", text)
 	}
 	for key, want := range map[string]string{
-		"goal": "verify output", "purpose": "run the command", "reasoning_summary": "the command is the smallest probe",
+		"purpose": "run the command", "reasoning_summary": "the command is the smallest probe",
 		"progress_summary": "command started", "next_step": "inspect the result", "plan_id": "pl_1", "plan_task_id": "pt_1", "execution_task_id": "task_1",
 	} {
 		if payload[key] != want {

@@ -164,17 +164,20 @@ func TestCleanCorePlanEvidenceAndArtifactWorkflow(t *testing.T) {
 
 	created := callEnvelope(t, rt.toolPlanClean, context.Background(), map[string]any{
 		"action": "create", "remote_session_id": remoteID, "purpose": "track the workflow",
-		"goal": "complete the clean core workflow", "tasks": []any{map[string]any{"local_id": "main", "title": "apply and verify"}},
+		"summary": "complete the clean core workflow", "tasks": []any{map[string]any{"local_id": "main", "title": "apply and verify"}},
 		"idempotency_key": "plan-create-1",
 	})
 	if !statusOK(created) {
 		t.Fatalf("plan create=%+v", created)
 	}
 	createdData := created["data"].(map[string]any)
+	if _, exists := createdData["goal"]; exists {
+		t.Fatalf("clean-core plan output must not expose internal goal: %+v", createdData)
+	}
 	planID := createdData["plan_id"].(string)
 	replay := callEnvelope(t, rt.toolPlanClean, context.Background(), map[string]any{
 		"action": "create", "remote_session_id": remoteID, "purpose": "same plan, rephrased",
-		"goal": "complete the clean core workflow", "tasks": []any{map[string]any{"local_id": "main", "title": "apply and verify"}},
+		"summary": "complete the clean core workflow", "tasks": []any{map[string]any{"local_id": "main", "title": "apply and verify"}},
 		"idempotency_key": "plan-create-1",
 	})
 	if replay["data"].(map[string]any)["idempotent_replay"] != true {
@@ -242,6 +245,9 @@ func TestCleanCorePlanEvidenceAndArtifactWorkflow(t *testing.T) {
 		"action": "deliver", "remote_session_id": remoteID, "purpose": "deliver the completed workflow", "plan_id": planID,
 	})
 	deliveryData := delivered["data"].(map[string]any)
+	if deliveredPlan, ok := deliveryData["plan"].(map[string]any); !ok || deliveredPlan["goal"] != nil {
+		t.Fatalf("delivery plan must not expose internal goal: %+v", deliveryData["plan"])
+	}
 	if !statusOK(delivered) || deliveryData["ready"] != true {
 		t.Fatalf("plan deliver=%+v", delivered)
 	}

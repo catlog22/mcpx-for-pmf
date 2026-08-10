@@ -1,8 +1,6 @@
 package server
 
 import (
-	"mcpx/internal/mcpresult"
-
 	"context"
 	"os"
 	"os/exec"
@@ -12,160 +10,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"mcpx/internal/auth"
-	"mcpx/internal/config"
+	"mcpx/internal/mcpresult"
 	"mcpx/internal/remotesession"
-	"mcpx/internal/screenshot"
 )
-
-func TestRemoteSessionMCPIsVendorAndTransportIndependent(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("MCPX_HOME", home)
-	workspacePath := filepath.Join(home, "project")
-	if err := os.MkdirAll(workspacePath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cfg := config.DefaultConfig()
-	cfg.Auth.Mode = "bearer"
-	cfg.Auth.Token = "token-a"
-	cfg.Workspaces = []config.WorkspaceEntry{{Name: "project", Path: workspacePath}}
-	cfg.Logging.Enabled = false
-	if err := config.WriteGlobal(filepath.Join(home, "config.yaml"), cfg); err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := New(Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = runtime.Close() })
-
-	contextFor := func(token string, _ ...string) context.Context {
-		return auth.ContextWithAuthorization(context.Background(), "Bearer "+token)
-	}
-	call := func(t *testing.T, handler mcp.ToolHandler, ctx context.Context, arguments map[string]any) map[string]any {
-		t.Helper()
-		if _, exists := arguments["intent"]; !exists {
-			withIntent := make(map[string]any, len(arguments)+1)
-			for key, value := range arguments {
-				withIntent[key] = value
-			}
-			withIntent["intent"] = "transport acceptance operation"
-			arguments = withIntent
-		}
-		result, err := handler(ctx, mcpresult.Request(arguments))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return decodeToolResult(t, result)
-	}
-
-	ctxA1 := contextFor("token-a", "transport-a-1", "vendor-a")
-	created := call(t, runtime.toolSessionOpen, ctxA1, map[string]any{
-		"workspace": "project",
-		"label":     "cross-vendor session",
-	})
-	remoteSessionID, _ := created["remote_session_id"].(string)
-	if created["status"] != "ok" || remoteSessionID == "" {
-		t.Fatalf("create failed: %+v", created)
-	}
-	principal, err := runtime.principalFromContext(ctxA1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	createdSession, err := runtime.remote.Get(ctxA1, principal, remoteSessionID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	baselineSnapshotID := createdSession.EnvironmentSnapshotID
-	if baselineSnapshotID == "" {
-		t.Fatalf("session_open did not bind an environment baseline: %+v", created)
-	}
-	inspected := call(t, runtime.toolEnvironmentInspect, ctxA1, map[string]any{
-		"remote_session_id": remoteSessionID,
-		"sections":          []any{"os", "architecture"},
-		"compare_to":        baselineSnapshotID,
-		"save_snapshot":     false,
-	})
-	inspectionData, _ := inspected["data"].(map[string]any)
-	if inspected["status"] != "ok" && inspected["status"] != "succeeded" || inspectionData["os"] == nil || inspectionData["architecture"] == nil {
-		t.Fatalf("environment inspection failed: %+v", inspected)
-	}
-	if inspectionData["runtime"] != nil || inspectionData["toolchains"] != nil || inspectionData["comparison"] == nil {
-		t.Fatalf("environment sections were not filtered: %+v", inspectionData)
-	}
-
-	// A different bearer is a different Principal even when it presents the
-	// same durable identifier. Session existence is deliberately concealed.
-	runtime.cfg.Auth.Token = "token-b"
-	ctxB := contextFor("token-b", "transport-b-1", "vendor-b")
-	denied := call(t, runtime.toolRemoteSessionGet, ctxB, map[string]any{"remote_session_id": remoteSessionID})
-	if errorCode(denied) != "not_found" {
-		t.Fatalf("unattached principal should not see session: %+v", denied)
-	}
-
-	// The owner can continue from another transport session without relying on
-	// the original Mcp-Session-Id.
-	runtime.cfg.Auth.Token = "token-a"
-	ctxA2 := contextFor("token-a", "transport-a-2", "vendor-a-next")
-	continued := call(t, runtime.toolRemoteSessionGet, ctxA2, map[string]any{"remote_session_id": remoteSessionID})
-	if !statusOK(continued) {
-		t.Fatalf("transport session change lost durable state: %+v", continued)
-	}
-	viewerHandoff := call(t, runtime.toolRemoteSessionHandoff, ctxA2, map[string]any{
-		"remote_session_id": remoteSessionID, "role": "viewer", "expires_in": 60,
-	})
-	viewerToken := viewerHandoff["data"].(map[string]any)["handoff_token"].(string)
-	runtime.cfg.Auth.Token = "token-c"
-	ctxC := contextFor("token-c", "transport-c-1", "vendor-c")
-	if response := call(t, runtime.toolRemoteSessionAttach, ctxC, map[string]any{"handoff_token": viewerToken}); !statusOK(response) {
-		t.Fatalf("viewer attach failed: %+v", response)
-	}
-	runtime.screenshot = fakeScreenCapturer{}
-	viewerCapture := call(t, runtime.toolScreenshotCapture, ctxC, map[string]any{"remote_session_id": remoteSessionID, "mode": "fullscreen"})
-	if errorCode(viewerCapture) != "forbidden" {
-		t.Fatalf("viewer should not capture screen: %+v", viewerCapture)
-	}
-	runtime.cfg.Auth.Token = "token-a"
-	handoff := call(t, runtime.toolRemoteSessionHandoff, ctxA2, map[string]any{
-		"remote_session_id": remoteSessionID,
-		"role":              "editor",
-		"expires_in":        60,
-	})
-	handoffData, _ := handoff["data"].(map[string]any)
-	handoffToken, _ := handoffData["handoff_token"].(string)
-	if handoffToken == "" {
-		t.Fatalf("handoff token missing: %+v", handoff)
-	}
-
-	runtime.cfg.Auth.Token = "token-b"
-	attached := call(t, runtime.toolRemoteSessionAttach, ctxB, map[string]any{"handoff_token": handoffToken})
-	meta, _ := attached["meta"].(map[string]any)
-	if !statusOK(attached) || meta["session_id"] != remoteSessionID {
-		t.Fatalf("cross-vendor attach failed: %+v", attached)
-	}
-	visible := call(t, runtime.toolRemoteSessionGet, ctxB, map[string]any{"remote_session_id": remoteSessionID})
-	if !statusOK(visible) {
-		t.Fatalf("attached principal cannot query session: %+v", visible)
-	}
-	reused := call(t, runtime.toolRemoteSessionAttach, contextFor("token-b", "transport-b-2", "vendor-c"), map[string]any{"handoff_token": handoffToken})
-	if errorCode(reused) != "invalid_handoff_token" {
-		t.Fatalf("handoff token was not one-shot: %+v", reused)
-	}
-}
-
-type fakeScreenCapturer struct{}
-
-func (fakeScreenCapturer) Capture(_ context.Context, request screenshot.Request) (screenshot.Result, error) {
-	return screenshot.Result{
-		Data: []byte{1, 2, 3, 4},
-		Metadata: screenshot.Metadata{
-			Mode: request.Mode, Display: request.Display, X: request.X, Y: request.Y,
-			CapturedWidth: request.Width, CapturedHeight: request.Height,
-			OutputWidth: 300, OutputHeight: 200, Compression: request.Compression,
-			Format: "jpeg", MIMEType: "image/jpeg", Bytes: 4, SHA256: "sha256:test",
-		},
-	}, nil
-}
 
 func callEnvelope(t *testing.T, handler mcp.ToolHandler, ctx context.Context, arguments map[string]any) map[string]any {
 	t.Helper()
@@ -177,9 +24,7 @@ func callEnvelope(t *testing.T, handler mcp.ToolHandler, ctx context.Context, ar
 		withIntent["intent"] = "test operation"
 		arguments = withIntent
 	}
-	var request *mcp.CallToolRequest
-	request = mcpresult.Request(arguments)
-	result, err := handler(ctx, request)
+	result, err := handler(ctx, mcpresult.Request(arguments))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +95,7 @@ func TestWorkspaceRevisionSingleRootUnchanged(t *testing.T) {
 	}
 }
 
-func TestSessionEventsIncludePendingConfirmations(t *testing.T) {
+func TestSessionAttachIncludesPendingConfirmations(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	rt.cfg.Security.Commands.Confirm = append(rt.cfg.Security.Commands.Confirm, `^echo\b`)
 	principal, err := rt.principalFromContext(context.Background())
@@ -272,48 +117,45 @@ func TestSessionEventsIncludePendingConfirmations(t *testing.T) {
 		"remote_session_id": created.Session.ID,
 		"command":           "echo pending", "purpose": "inspect pending", "scope": "workspace",
 	})
-
 	commandResult, err := rt.toolCommandExecute(context.Background(), command)
 	if err != nil {
 		t.Fatal(err)
 	}
 	commandResponse := decodeToolResult(t, commandResult)
-	commandData, _ := commandResponse["data"].(map[string]any)
-	token, _ := commandData["confirmation_token"].(string)
-	if commandResponse["status"] != "waiting_confirmation" || token == "" {
+	if commandResponse["status"] != "waiting_confirmation" {
 		t.Fatalf("command confirmation = %+v", commandResponse)
 	}
 
-	events := mcpresult.Request(map[string]any{
-		"intent":            "recover pending confirmation from event log",
-		"remote_session_id": created.Session.ID, "view": "events", "limit": 5,
+	attach := mcpresult.Request(map[string]any{
+		"intent":            "attach the existing session",
+		"remote_session_id": created.Session.ID,
+		"action":            "attach",
 	})
-
-	eventsResult, err := rt.toolSessionRead(context.Background(), events)
+	attachResult, err := rt.toolSession(context.Background(), attach)
 	if err != nil {
 		t.Fatal(err)
 	}
-	eventsResponse := decodeToolResult(t, eventsResult)
-	eventsData, _ := eventsResponse["data"].(map[string]any)
-	items, ok := eventsData["pending_confirmations"].([]any)
+	attachResponse := decodeToolResult(t, attachResult)
+	attachData, _ := attachResponse["data"].(map[string]any)
+	items, ok := attachData["pending_confirmations"].([]any)
 	if !ok || len(items) == 0 {
-		t.Fatalf("session events must expose pending confirmations: %+v", eventsData)
+		t.Fatalf("session attach must expose pending confirmations: %+v", attachData)
 	}
 	item := items[0].(map[string]any)
-	if item["confirmation_token"] != token || item["command"] != "echo pending" {
-		t.Fatalf("pending confirmation item=%+v want token=%s", item, token)
+	if item["command"] != "echo pending" || item["purpose"] != "inspect pending" || item["user_confirmed_required"] != true {
+		t.Fatalf("pending confirmation item=%+v", item)
 	}
 }
 
 func TestRemoteSessionNotFoundExplainsExactCopy(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	request := mcpresult.Request(map[string]any{
-		"intent":            "read a missing remote session",
+		"intent":            "attach a missing remote session",
 		"remote_session_id": "rs-does-not-exist",
-		"view":              "summary",
+		"action":            "attach",
 	})
 
-	result, err := rt.toolSessionRead(context.Background(), request)
+	result, err := rt.toolSession(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
