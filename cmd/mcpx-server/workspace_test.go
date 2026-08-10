@@ -16,6 +16,13 @@ func TestParseWorkspaceObserverArgs(t *testing.T) {
 	if options.Workspace != "demo" || options.History != observation.MaxObserverHistory || options.Format != "json" || options.Diff != "summary" || options.Tool != "read" || options.Status != "succeeded" || options.Operation != "op_1" || options.Path != "src/demo.go" {
 		t.Fatalf("options=%+v", options)
 	}
+	defaults, err := parseWorkspaceObserverArgs([]string{"demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaults.Format != "text" || defaults.Diff != "full" || !defaults.Detail && defaults.Diff != "full" {
+		t.Fatalf("defaults=%+v", defaults)
+	}
 	if _, err := parseWorkspaceObserverArgs(nil); err == nil {
 		t.Fatal("missing workspace should fail")
 	}
@@ -50,13 +57,6 @@ func TestTerminalColumnsUsesEnvironment(t *testing.T) {
 	t.Setenv("COLUMNS", "42")
 	if got := terminalColumns(); got != 42 {
 		t.Fatalf("terminal columns=%d, want 42", got)
-	}
-}
-
-func TestTerminalRowsUsesEnvironment(t *testing.T) {
-	t.Setenv("LINES", "17")
-	if got := terminalRows(); got != 17 {
-		t.Fatalf("terminal rows=%d, want 17", got)
 	}
 }
 

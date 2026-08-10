@@ -657,7 +657,7 @@ ARC 的机器结果固定包含 `context`：
 -history int       回放最近事件数量，范围 1-100，默认 100
 -format text|json  文本或一行一个 JSON 事件，默认 text
 -detail            显示语义用途、操作 ID 和执行事实
--diff summary|preview|full
+-diff summary|preview|full  默认 full
 -tool string       按工具过滤
 -status string     按事件状态过滤
 -operation string  按 operation_id 过滤
@@ -671,15 +671,28 @@ ARC 的机器结果固定包含 `context`：
 ./bin/mcpx observe -detail -diff full -tool edit my-app
 ```
 
-默认 `text` 模式是基于 Bubble Tea v2 + Bubbles viewport 的全屏 TUI，而不是持续追加的行式 stdout。TUI 使用 alternate screen、Bubble Tea 增量 renderer，并以 60 FPS 作为最大渲染帧率；事件可以高频进入内存，但终端不会按每个事件整屏清空重画。Header / Footer 固定，正文只渲染当前 viewport。
+默认 `text` 模式是持续追加的行式文本流，直接写入 stdout，在终端、管道或重定向场景均可使用；
+`json` 模式每行输出一个完整 JSON 事件，适合脚本与日志采集。
 
-TUI 支持虚拟滚动：鼠标滚轮每次移动 2 行目标；`↑/↓` 或 `k/j` 按行滚动；`PgUp/PgDn`（以及 pager 风格的 `b/f`、Space）整页滚动；`u/d` 半页滚动；`Home/End` 或 `g/G` 跳到开头/末尾。所有纵向滚动目标都通过 60 FPS 的临界阻尼 spring 动画收敛，不再直接瞬移 viewport offset；连续滚轮或按键会继续推动当前目标。默认处于 `FOLLOW`，新事件把 spring 目标向底部推进；一旦向上滚动会切到 `SCROLL`，后续事件不会把 viewport 强制拉回底部；滚到底部或按 `End`/`G` 后恢复 `FOLLOW`。左右方向键仍由 Bubbles viewport 原生处理，用于横向查看未软换行内容。
+文本流布局保持固定的缩进层级：
 
-鼠标左键可以直接拖选 ARC 正文，不需要进入额外的 COPY 模式。由于 full-screen TUI 要保留 mouse reporting 才能可靠接收滚轮，选区由 TUI 自己绘制；拖动时暂停 `FOLLOW`，松手只结束并保留选区，不修改剪贴板。已有选区时按 `Ctrl+C` 通过 Bubble Tea 的 OSC52 clipboard 命令复制去除 ANSI 样式后的纯文本；没有选区时 `Ctrl+C` 保持原来的退出行为。OSC52 是否真正写入系统剪贴板取决于终端支持；滚轮与键盘导航不受选区功能影响。
+- 事件行：状态标记（`•` / `!` / `?`）+ 语义动作（`Read`、`Edited`、`Ran`、`Searched`）+ 目标标签；
+- 事实与结果：2 空格缩进的子行，展示耗时、退出码、结果摘要与失败原因；
+- 命令输出：4 空格缩进、行首带行号，并按 stdout / stderr 区分着色。
+- 交互之间以「空行 + 彩色分隔线（`───`，含完成时间）+ 空行」分隔；超过终端宽度自动软换行。
 
-ARC 内容仍先显示 `Read`、`Edited`、`Ran`、`Searched` 等语义动作，再显示 Context（作用、进展、下一步、判断依据、Plan / Task / Execution Task）、执行事实和结果；命令 stdout/stderr 带行号。内部 `operation.*` 调度事件、重复的远端 `*.started`/`*.completed` notice 默认静默，只保留失败、取消等对人有用的最终结果。ARC 人类展示层继续按工具和状态使用稳定 ANSI 颜色，Diff 继续区分新增、删除和上下文；支持真彩色终端时使用真彩色，普通终端降级 ANSI 16 色。设置 `NO_COLOR=1` 可关闭 ARC 内容颜色，`COLORTERM=truecolor` 或 `24bit` 启用真彩色。
+颜色层级（ui-ux-pro-max 语义色规范）：
 
-`text` 模式要求 stdin/stdout 都是真实终端，不再回退为管道兼容文本流。机器处理、重定向或管道场景必须使用 `--format json`；不要解析 TUI 的颜色、状态栏或布局。
+- 状态标记使用状态色（失败红 / 等待确认黄 / 运行中蓝 / 成功回退工具色）；
+- 动作动词使用工具语义色（`Read` 青、`Edited` 绿、`Ran` 琥珀、`Plan` 黄、`Session` 品红）；
+- 目标标签与结果值保持默认前景色，事实 key（`time`、`path`、`exit_code` 等）使用 muted 次级色；
+- 交互分隔线继承当前交互的工具色，失败交互为红色；
+- 命令输出行号使用 muted 色，stdout 弱化（dim）、stderr 黄色；
+- 支持真彩色终端时全部语义色升级为 true-color 变体，普通终端降级 ANSI 16 色，`NO_COLOR=1` 或非终端完全无色。
+
+ARC 内容仍先显示 `Read`、`Edited`、`Ran`、`Searched` 等语义动作，再显示 Context（作用、进展、下一步、判断依据、Plan / Task / Execution Task）、执行事实和结果；命令 stdout/stderr 带行号。内部 `operation.*` 调度事件、重复的远端 `*.started`/`*.completed` notice 默认静默，只保留失败、取消等对人有用的最终结果。ARC 人类展示层继续按工具和状态使用稳定 ANSI 颜色，Diff 默认完整（`-diff full`），区分新增、删除和上下文；支持真彩色终端时使用真彩色，普通终端降级 ANSI 16 色。设置 `NO_COLOR=1` 可关闭颜色，`COLORTERM=truecolor` 或 `24bit` 启用真彩色；非终端（管道/重定向）自动关闭颜色。
+
+`-detail` 会追加 operation、call、path 等执行元数据；默认视图只展示必要事实，避免与事件行重复。机器处理、重定向或管道场景也可直接使用默认 `text` 模式，或选择 `--format json` 获取无格式的完整事件。
 事件中保留 `event_id`、`sequence`、`request_id`、`operation_id`、`plan_task_id`、
 `execution_task_id`、`edit_id`、状态、耗时、路径、命令和截断标志等字段。
 

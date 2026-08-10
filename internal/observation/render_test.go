@@ -18,23 +18,29 @@ func TestActionColorUsesToolAndErrorOverride(t *testing.T) {
 		{tool: "plan", color: ansiYellow},
 		{tool: "session", color: ansiMagenta},
 	} {
-		if got := actionColor(test.tool, false); got != test.color {
+		if got := actionColor(test.tool, false, ColorModeANSI16); got != test.color {
 			t.Fatalf("%s color=%q, want %q", test.tool, got, test.color)
 		}
 	}
-	if got := actionColor("file_read", true); got != ansiRed {
+	if got := actionColor("file_read", true, ColorModeANSI16); got != ansiRed {
 		t.Fatalf("error color=%q", got)
+	}
+	if got := actionColor("read", false, ColorModeTrueColor); got != ansiTrueCyan {
+		t.Fatalf("truecolor read=%q, want %q", got, ansiTrueCyan)
+	}
+	if got := mutedColor(ColorModeTrueColor); got != ansiTrueMuted {
+		t.Fatalf("truecolor muted=%q, want %q", got, ansiTrueMuted)
 	}
 }
 
 func TestEventStatusUsesSemanticMarkerAndColor(t *testing.T) {
 	confirmation := Event{Tool: "execute", Status: "waiting_confirmation"}
-	if eventMarker(confirmation) != "?" || eventActionColor(confirmation, ansiGreen) != ansiYellow {
-		t.Fatalf("confirmation style marker=%q color=%q", eventMarker(confirmation), eventActionColor(confirmation, ansiGreen))
+	if eventMarker(confirmation) != "?" || eventActionColor(confirmation, ansiGreen, ColorModeANSI16) != ansiYellow {
+		t.Fatalf("confirmation style marker=%q color=%q", eventMarker(confirmation), eventActionColor(confirmation, ansiGreen, ColorModeANSI16))
 	}
 	failed := Event{Tool: "file_read", Status: "failed"}
-	if eventMarker(failed) != "!" || eventActionColor(failed, ansiBlue) != ansiRed {
-		t.Fatalf("failure style marker=%q color=%q", eventMarker(failed), eventActionColor(failed, ansiBlue))
+	if eventMarker(failed) != "!" || eventActionColor(failed, ansiBlue, ColorModeANSI16) != ansiRed {
+		t.Fatalf("failure style marker=%q color=%q", eventMarker(failed), eventActionColor(failed, ansiBlue, ColorModeANSI16))
 	}
 }
 
@@ -217,7 +223,7 @@ func TestRenderTextShowsSemanticProgressStates(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := output.String()
-			for _, want := range []string{test.want, "↳ result: 2 files changed · tests checked", "↳ next: 根据状态继续"} {
+			for _, want := range []string{test.want, "result: 2 files changed · tests checked", "next: 根据状态继续"} {
 				if !strings.Contains(got, want) {
 					t.Fatalf("progress rendering missing %q: %q", want, got)
 				}
@@ -273,7 +279,7 @@ func TestRenderTextHidesToolStartAndShowsHumanReadAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"• Read auth.go (lines 11-30)", "↳ Read 1 source item(s); 42 bytes returned."} {
+	for _, want := range []string{"• Read auth.go (lines 11-30)", "Read 1 source item(s); 42 bytes returned."} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("human read rendering missing %q: %s", want, text)
 		}
@@ -296,9 +302,9 @@ func TestRenderTextShowsBatchReadPathsAndRanges(t *testing.T) {
 	text := output.String()
 	for _, want := range []string{
 		"• Read 3 files",
-		"↳ internal/arc/arc.go (lines 1-40)",
-		"↳ internal/arc/human.go (lines 81-100)",
-		"↳ internal/arc/presentation.go (full)",
+		"internal/arc/arc.go (lines 1-40)",
+		"internal/arc/human.go (lines 81-100)",
+		"internal/arc/presentation.go (full)",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("batch read rendering missing %q: %s", want, text)
@@ -353,7 +359,7 @@ func TestRenderTextShowsSearchCommandAndFullMatchPaths(t *testing.T) {
 	text := output.String()
 	for _, want := range []string{
 		`• Searched rg --glob "**/*.vue" "会员卡 手机号 customer userId" fanyi-cloud-ui`,
-		`↳ Source search returned 2 match(es): fanyi-cloud-ui/src/views/erp/cashier-desk/index.vue:81, fanyi-cloud-ui/src/views/erp/cashier-desk/components/order.vue:24`,
+		`  Source search returned 2 match(es): fanyi-cloud-ui/src/views/erp/cashier-desk/index.vue:81, fanyi-cloud-ui/src/views/erp/cashier-desk/components/order.vue:24`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("search rendering missing %q: %s", want, text)
@@ -375,7 +381,7 @@ func TestRenderTextShowsWorkspaceListResultInsteadOfOK(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"• Listed workspaces", "↳ Available workspaces: fyy (/workspaces/fyy)"} {
+	for _, want := range []string{"• Listed workspaces", "Available workspaces: fyy (/workspaces/fyy)"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("workspace list rendering missing %q: %s", want, text)
 		}
@@ -532,7 +538,7 @@ func TestRenderTextShowsFindCommandForContextList(t *testing.T) {
 	text := output.String()
 	for _, want := range []string{
 		`• Searched find fanyi-cloud-ui -type f -path "**/*.vue"`,
-		`↳ Source list returned 2 of 2 file(s): fanyi-cloud-ui/src/views/a.vue, fanyi-cloud-ui/src/views/b.vue`,
+		`  Source list returned 2 of 2 file(s): fanyi-cloud-ui/src/views/a.vue, fanyi-cloud-ui/src/views/b.vue`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("context list rendering missing %q: %s", want, text)
@@ -552,7 +558,7 @@ func TestRenderTextShowsToolOutputSummaryWithoutSourceBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"• Read src/Supplier.vue", "↳ Read 1 source item(s); 42 bytes returned."} {
+	for _, want := range []string{"• Read src/Supplier.vue", "Read 1 source item(s); 42 bytes returned."} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("tool completion missing %q: %s", want, text)
 		}
@@ -574,7 +580,7 @@ func TestRenderTextShowsExecutedCommandAndProgressSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"• Ran go test ./internal/...", "↳ progress: 已读取配置，下一步运行单元测试", "↳ Command completed with exit code 0."} {
+	for _, want := range []string{"• Ran go test ./internal/...", "progress: 已读取配置，下一步运行单元测试", "Command completed with exit code 0."} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("command rendering missing %q: %s", want, text)
 		}
@@ -597,10 +603,9 @@ func TestRenderTextColorsCommandAndStreams(t *testing.T) {
 	}
 	stdoutText := stdout.String()
 	for _, want := range []string{
-		ansiAmber + "Ran" + ansiReset,
-		ansiAmber + "go test ./..." + ansiReset,
+		ansiAmber + "Ran" + ansiReset + " go test ./...",
 		ansiGray + "stdout:" + ansiReset,
-		ansiDim + "  1 | ok" + ansiReset,
+		ansiGray + "  1 | " + ansiReset + ansiDim + "ok" + ansiReset,
 	} {
 		if !strings.Contains(stdoutText, want) {
 			t.Fatalf("stdout command color missing %q: %q", want, stdoutText)
@@ -620,7 +625,7 @@ func TestRenderTextColorsCommandAndStreams(t *testing.T) {
 	stderrText := stderr.String()
 	for _, want := range []string{
 		ansiYellow + "stderr:" + ansiReset,
-		ansiYellow + "  1 | failed" + ansiReset,
+		ansiGray + "  1 | " + ansiReset + ansiYellow + "failed" + ansiReset,
 	} {
 		if !strings.Contains(stderrText, want) {
 			t.Fatalf("stderr command color missing %q: %q", want, stderrText)
@@ -640,8 +645,7 @@ func TestRenderTextColorsCommandAndStreams(t *testing.T) {
 	}
 	failedText := failed.String()
 	for _, want := range []string{
-		ansiRed + "Command failed" + ansiReset,
-		ansiRed + "go test ./..." + ansiReset,
+		ansiRed + "Command failed" + ansiReset + " go test ./...",
 	} {
 		if !strings.Contains(failedText, want) {
 			t.Fatalf("failed command color missing %q: %q", want, failedText)
@@ -699,7 +703,7 @@ func TestRenderTextShowsMoveOutAsWorkspaceMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"• Removed src/old.go", "↳ Moved to quarantine", "↳ Moved 1 · failed 0 · reversible"} {
+	for _, want := range []string{"• Removed src/old.go", "Moved to quarantine", "Moved 1 · failed 0 · reversible"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("move_out rendering missing %q: %s", want, text)
 		}
@@ -837,5 +841,30 @@ func TestRenderJSONEmitsOneEventLine(t *testing.T) {
 	}
 	if !strings.HasSuffix(output.String(), "\n") || !strings.Contains(output.String(), `"sequence":7`) {
 		t.Fatalf("json rendering=%q", output.String())
+	}
+}
+
+func TestCommandOutputEllipsisStaysOnLine(t *testing.T) {
+	renderer := NewTextRendererWithWidth(false, 80)
+	var output bytes.Buffer
+	line := "SMOKE-007 FAIL http=200 code=401 msg=请求访问：/api/getInfo，认证失败，无法访问系统资源 trace."
+	if err := renderer.RenderEvent(&output, Event{
+		Tool: "command_execute", Type: TypeCommandOutput, Stream: "stdout",
+		Command: "python3 -i",
+		Output:  []byte(`{"text":"` + line + `\n"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	if strings.Contains(text, "\n      ..\n") {
+		t.Fatalf("stray wrapped ellipsis line: %q", text)
+	}
+	for _, outputLine := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
+		if width := displayWidth(outputLine); width > 80 {
+			t.Fatalf("line over budget width=%d: %q", width, outputLine)
+		}
+	}
+	if !strings.HasSuffix(strings.TrimSpace(text), "...") {
+		t.Fatalf("ellipsis not kept on the content line: %q", text)
 	}
 }

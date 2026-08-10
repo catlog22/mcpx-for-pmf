@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 )
 
 // TextRenderer renders a compact, line-oriented terminal stream. It remains
@@ -34,6 +35,8 @@ type interactionBlock struct {
 	key              string
 	opened           bool
 	closed           bool
+	tool             string
+	failed           bool
 	pendingEvent     Event
 	pendingLines     []string
 	pendingStarted   bool
@@ -42,6 +45,7 @@ type interactionBlock struct {
 	commandOutput    bool
 	fileChanged      bool
 	outputLines      map[string]int
+	streamHeaders    map[string]bool
 	lastOutputStream string
 	contextShown     bool
 }
@@ -161,6 +165,15 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 		return r.renderDuplicateNotice(w, event, count)
 	}
 	key := r.eventKey(event)
+	// Command output without its own request/operation identity belongs to the
+	// interaction that is currently open, so interleaved stdout/stderr events
+	// share one block (and one set of stream headers) instead of becoming
+	// separate interactions per event.
+	if event.Type == TypeCommandOutput && r.activeKey != "" {
+		if active := r.blocks[r.activeKey]; active != nil && !active.closed {
+			key = r.activeKey
+		}
+	}
 	block := r.blocks[key]
 	if block == nil || block.closed {
 		block = &interactionBlock{
@@ -192,7 +205,14 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 	suppressOutputAction := false
 	if event.Type == TypeCommandOutput {
 		outputLineStart = block.outputLines[stream] + 1
-		suppressOutputAction = wasCommandOutput && block.lastOutputStream == stream
+		// Show each stream header at most once per interaction block even when
+		// stdout/stderr interleave, so alternating output does not repeat the
+		// "stdout:"/"stderr:" label on every line.
+		if block.streamHeaders == nil {
+			block.streamHeaders = make(map[string]bool)
+		}
+		suppressOutputAction = block.streamHeaders[stream]
+		block.streamHeaders[stream] = true
 	}
 	if err := renderTextWithOptions(&rendered, event, renderOptions{
 		colorMode:            r.colorMode,
@@ -336,8 +356,8 @@ func deduplicableTool(tool string) bool {
 
 func (r *TextRenderer) renderDuplicateNotice(w io.Writer, event Event, count int) error {
 	_, label := toolAction(event.Tool, event.Input)
-	color := eventActionColor(event, actionColor(event.Tool, false))
-	_, err := fmt.Fprintf(w, "  %s %s %s x%d\n", paint("↳", color, r.colorMode != ColorModeNone), paint("Repeated", color, r.colorMode != ColorModeNone), compactLine(label), count)
+	color := eventActionColor(event, actionColor(event.Tool, false, r.colorMode), r.colorMode)
+	_, err := fmt.Fprintf(w, "  %s %s x%d\n", paint("Repeated", color, r.colorMode != ColorModeNone), compactLine(label), count)
 	return err
 }
 
@@ -436,6 +456,8 @@ func eventPath(event Event) string {
 }
 
 func (r *TextRenderer) activate(w io.Writer, block *interactionBlock, event Event) error {
+	block.tool = event.toolOrType()
+	block.failed = eventFailed(event)
 	if r.activeKey != "" && r.activeKey != block.key {
 		if active := r.blocks[r.activeKey]; active != nil && !active.closed {
 			if err := r.close(w, active); err != nil {
@@ -530,6 +552,15 @@ func (r *TextRenderer) close(w io.Writer, block *interactionBlock) error {
 	if block == nil || block.closed {
 		return nil
 	}
+	// Separate interactions with a blank line, a colored rule, and another
+	// blank line. The rule inherits the block's tool color (or muted for
+	// unknown tools) and carries the completion time.
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	if err := r.writeActionSeparator(w, block); err != nil {
+		return err
+	}
 	if _, err := fmt.Fprintln(w); err != nil {
 		return err
 	}
@@ -560,20 +591,26 @@ func (r *TextRenderer) writeTranscriptContext(w io.Writer, event Event) error {
 	return writeSeparatorLine(w, line, ansiGray, r.colorMode)
 }
 
-func (r *TextRenderer) writeActionSeparator(w io.Writer) error {
-	width := 24
-	if r.width > 2 && r.width-2 < width {
-		width = r.width - 2
+func (r *TextRenderer) writeActionSeparator(w io.Writer, block *interactionBlock) error {
+	// Timestamp the separator so a completed interaction shows when it finished.
+	now := time.Now().Format("15:04:05")
+	trailing := 12
+	if r.width > 2 && r.width-15 < trailing {
+		trailing = r.width - 15
 	}
-	if width < 2 {
-		width = 2
+	if trailing < 2 {
+		trailing = 2
 	}
-	return writeSeparatorLine(w, "  "+strings.Repeat("─", width), ansiGray, r.colorMode)
+	color := mutedColor(r.colorMode)
+	if block != nil && strings.TrimSpace(block.tool) != "" {
+		color = actionColor(block.tool, block.failed, r.colorMode)
+	}
+	return writeSeparatorLine(w, "  ── "+now+" "+strings.Repeat("─", trailing), color, r.colorMode)
 }
 
 func (r *TextRenderer) writeOperationSeparator(w io.Writer, event Event) error {
 	line := "  ── " + operationSeparatorLabel(event) + " " + strings.Repeat("─", 12)
-	color := eventActionColor(event, actionColor(event.toolOrType(), false))
+	color := eventActionColor(event, actionColor(event.toolOrType(), false, r.colorMode), r.colorMode)
 	return writeSeparatorLine(w, line, color, r.colorMode)
 }
 

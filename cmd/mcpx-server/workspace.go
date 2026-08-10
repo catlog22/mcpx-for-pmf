@@ -164,18 +164,6 @@ func runObserver(args []string, commandName string) int {
 	request := observation.SubscribeRequest{
 		Type: "subscribe", Workspace: options.Workspace, HistoryLimit: options.History, Format: options.Format,
 	}
-	if options.Format == "text" {
-		if !isTTY || !stdinIsTTY() {
-			fmt.Fprintf(os.Stderr, "%s: text format requires a terminal; use --format json for pipes or redirected output\n", commandName)
-			return 2
-		}
-		if err := runWorkspaceTUI(ctx, client, request, options.Workspace, textRenderer, color); err != nil {
-			fmt.Fprintf(os.Stderr, "%s: terminal UI: %v\n", commandName, err)
-			return 1
-		}
-		return 0
-	}
-
 	err = client.Run(ctx, request, func(frame observation.Frame) error {
 		return renderWorkspaceFrameWithRenderer(os.Stdout, frame, options.Format, color, textRenderer)
 	})
@@ -185,8 +173,6 @@ func runObserver(args []string, commandName string) int {
 	}
 	return 0
 }
-
-const defaultTerminalRows = 24
 
 func terminalColorMode(isTTY bool, noColor, colorTerm string) observation.ColorMode {
 	if !isTTY || strings.TrimSpace(noColor) != "" {
@@ -249,7 +235,7 @@ func renderWorkspaceFrameWithRendererAtWidth(w io.Writer, frame observation.Fram
 		if _, err := fmt.Fprintln(w, "• Reconnected"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintf(w, "  ↳ recovered events %d-%d\n", frame.Gap.FromSequence, frame.Gap.ToSequence); err != nil {
+		if _, err := fmt.Fprintf(w, "  recovered events %d-%d\n", frame.Gap.FromSequence, frame.Gap.ToSequence); err != nil {
 			return err
 		}
 		if renderer != nil {
@@ -262,7 +248,7 @@ func renderWorkspaceFrameWithRendererAtWidth(w io.Writer, frame observation.Fram
 		if _, err := fmt.Fprintf(w, "• Failed to observe %s\n", frame.Code); err != nil {
 			return err
 		}
-		_, err := fmt.Fprintf(w, "  ↳ %s\n", frame.Message)
+		_, err := fmt.Fprintf(w, "  %s\n", frame.Message)
 		return err
 	default:
 		_, err := fmt.Fprintf(w, "• Observed %s\n", frame.Type)
@@ -309,22 +295,9 @@ func stdoutIsTTY() bool {
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
-func stdinIsTTY() bool {
-	info, err := os.Stdin.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
-}
-
 func terminalColumns() int {
 	columns, _ := terminalSize()
 	return columns
-}
-
-func terminalRows() int {
-	_, rows := terminalSize()
-	if rows <= 0 {
-		return defaultTerminalRows
-	}
-	return rows
 }
 
 func terminalSize() (columns, rows int) {

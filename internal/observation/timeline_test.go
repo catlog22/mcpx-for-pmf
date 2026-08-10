@@ -51,11 +51,11 @@ func TestTextRendererGroupsInteractionIntoBoundedBlock(t *testing.T) {
 	if strings.Contains(text, "╭─") || strings.Contains(text, "╰") || strings.Contains(text, "│ ") {
 		t.Fatalf("compact renderer leaked framed timeline: %q", text)
 	}
-	if strings.Count(text, "Ran go test ./internal/auth") != 1 || !strings.Contains(text, "↳ stdout:") || !strings.Contains(text, "output truncated") {
+	if strings.Count(text, "Ran go test ./internal/auth") != 1 || !strings.Contains(text, "stdout:") || !strings.Contains(text, "output truncated") {
 		t.Fatalf("command-centric compact output or overflow marker missing: %q", text)
 	}
-	if !strings.HasSuffix(text, "\n\n") {
-		t.Fatalf("footer is not followed by blank line: %q", text)
+	if !strings.HasSuffix(text, "─\n\n") {
+		t.Fatalf("footer is not followed by interaction separator: %q", text)
 	}
 }
 
@@ -113,7 +113,7 @@ func TestTextRendererDefaultShowsTranscriptContextActionSeparatorAndRunDuration(
 		}
 	}
 	text := output.String()
-	for _, want := range []string{"Workspace demo · Session rs_demo", "• Read a.go (full)", "↳ tool: read", "• Ran go test ./...", "↳ tool: execute · exit 0 · time 2.1s"} {
+	for _, want := range []string{"Workspace demo · Session rs_demo", "• Read a.go (full)", "• Ran go test ./...", "exit 0 · time 2.1s"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("default transcript context/action fact missing %q: %q", want, text)
 		}
@@ -121,7 +121,10 @@ func TestTextRendererDefaultShowsTranscriptContextActionSeparatorAndRunDuration(
 	if strings.Count(text, "Workspace demo") != 1 || strings.Count(text, "Session rs_demo") != 1 {
 		t.Fatalf("transcript context repeated: %q", text)
 	}
-	for _, forbidden := range []string{"operation=op_secret", "duration=2100ms", "── execute", "────────────────────────"} {
+	if !strings.Contains(text, "── ") {
+		t.Fatalf("interaction separator missing: %q", text)
+	}
+	for _, forbidden := range []string{"operation=op_secret", "duration=2100ms", "── execute"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("default telemetry leaked %q: %q", forbidden, text)
 		}
@@ -220,7 +223,7 @@ func TestTextRendererMergesCommandOutputChunksAndStreams(t *testing.T) {
 		}
 	}
 	text := output.String()
-	if strings.Count(text, "Ran go test ./...") != 1 || strings.Count(text, "↳ stdout:") != 1 || strings.Count(text, "↳ stderr:") != 1 {
+	if strings.Count(text, "Ran go test ./...") != 1 || strings.Count(text, "stdout:") != 1 || strings.Count(text, "stderr:") != 1 {
 		t.Fatalf("command/stream headers were not merged into one block: %q", text)
 	}
 	for _, want := range []string{"1 | first", "2 | second", "1 | warning"} {
@@ -285,10 +288,10 @@ func TestTextRendererShowsProgressBeforeCompletionOnce(t *testing.T) {
 	metadataLine := "reasoning: 先验证最小闭环 · plan: pl_progress · plan task: pt_progress · execution task: task_progress"
 	primaryIndex := strings.Index(text, primaryLine)
 	metadataIndex := strings.Index(text, metadataLine)
-	if primaryIndex < 0 || metadataIndex <= primaryIndex || !strings.Contains(text, "• Ran go test ./...") || !strings.Contains(text, "↳ tool: execute · time 27ms") {
+	if primaryIndex < 0 || metadataIndex <= primaryIndex || !strings.Contains(text, "• Ran go test ./...") || !strings.Contains(text, "time 27ms") {
 		t.Fatalf("semantic context hierarchy, compact layout, command, or run duration was not grouped: %q", text)
 	}
-	for _, forbidden := range []string{"goal:", "operation=op_progress", "duration=27ms", "↳ operation: op_progress"} {
+	for _, forbidden := range []string{"goal:", "operation=op_progress", "duration=27ms", "operation: op_progress"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("default telemetry leaked %q: %q", forbidden, text)
 		}
@@ -310,7 +313,7 @@ func TestTextRendererDefaultAuditSnapshotKeepsDiffWithoutGoal(t *testing.T) {
 	text := output.String()
 	for _, want := range []string{
 		"Ran go test ./...",
-		"tool: execute · time 21ms",
+		"time 21ms",
 		"purpose: 验证 ARC renderer · progress: 代码已修改 · next: 检查 diff",
 		"reasoning: 运行最小测试闭环 · plan: pl_audit · plan task: pt_audit · execution task: task_audit",
 		"Edited audit.go [-1,+1]",
@@ -364,7 +367,7 @@ func TestTextRendererAllowsFiftyBodyLinesBeforeEllipsis(t *testing.T) {
 	if strings.Contains(text, "output truncated") {
 		t.Fatalf("exactly fifty body lines should not truncate: %q", text)
 	}
-	if strings.Count(text, "line-") != maxInteractionBodyLines || !strings.HasSuffix(text, "\n\n") {
+	if strings.Count(text, "line-") != maxInteractionBodyLines || !strings.HasSuffix(text, "─\n\n") {
 		t.Fatalf("body/footer budget output=%q", text)
 	}
 }

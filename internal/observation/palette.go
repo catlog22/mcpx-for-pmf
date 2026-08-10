@@ -34,6 +34,18 @@ const (
 	ansiDiffRemovedForeground = "\033[38;2;255;143;143m"
 	ansiDiffRemovedBackground = "\033[48;2;59;32;37m"
 	ansiDiffHunkForeground    = "\033[38;2;121;192;255m"
+
+	// True-color semantic palette used when ColorModeTrueColor is active. It
+	// keeps the same tool/status meaning as the ANSI16 palette with finer,
+	// lower-emission colors for dark terminals.
+	ansiTrueMuted   = "\033[38;2;148;163;184m" // slate-400: secondary labels
+	ansiTrueCyan    = "\033[38;2;34;211;238m"  // cyan-400: reads/searches
+	ansiTrueBlue    = "\033[38;2;96;165;250m"  // blue-400: files/artifacts/running
+	ansiTrueGreen   = "\033[38;2;52;211;153m"  // emerald-400: edits/changes
+	ansiTrueAmber   = "\033[38;2;251;191;36m"  // amber-400: command execution
+	ansiTrueYellow  = "\033[38;2;253;224;71m"  // yellow-300: plans/confirmation
+	ansiTrueMagenta = "\033[38;2;232;121;249m" // fuchsia-400: sessions/mcp
+	ansiTrueRed     = "\033[38;2;248;113;113m" // red-400: failures
 )
 
 const (
@@ -41,35 +53,38 @@ const (
 	defaultTerminalWidth    = 120
 )
 
+// pickColor resolves an ANSI16 code or its true-color counterpart based on the
+// active color mode. ColorModeNone callers never reach this path.
+func pickColor(ansi16, trueColor string, mode ColorMode) string {
+	if mode == ColorModeTrueColor {
+		return trueColor
+	}
+	return ansi16
+}
+
 // actionColor assigns a stable color to the semantic operation rather than
 // inspecting shell command text. A failed tool call always takes precedence.
-func actionColor(tool string, failed bool) string {
+func actionColor(tool string, failed bool, mode ColorMode) string {
 	if failed {
-		return ansiRed
+		return pickColor(ansiRed, ansiTrueRed, mode)
 	}
 	switch strings.ToLower(strings.TrimSpace(tool)) {
 	case "execute", "command_execute", "command_run":
-		return ansiAmber
-	case "read", "context_query", "source_read", "discover", "skill_call":
-		return ansiCyan
-	case "file_read":
-		return ansiBlue
+		return pickColor(ansiAmber, ansiTrueAmber, mode)
+	case "read", "context_query", "source_read", "discover", "skill_call", "observe", "runtime_read", "progress":
+		return pickColor(ansiCyan, ansiTrueCyan, mode)
+	case "file_read", "artifact":
+		return pickColor(ansiBlue, ansiTrueBlue, mode)
 	case "edit", "file.changed":
-		return ansiGreen
-	case "observe", "runtime_read":
-		return ansiCyan
+		return pickColor(ansiGreen, ansiTrueGreen, mode)
 	case "plan":
-		return ansiYellow
+		return pickColor(ansiYellow, ansiTrueYellow, mode)
 	case "session", "session_open", "workspace_list", "session.lifecycle", "mcp_call":
-		return ansiMagenta
-	case "artifact":
-		return ansiBlue
-	case "progress":
-		return ansiCyan
+		return pickColor(ansiMagenta, ansiTrueMagenta, mode)
 	case "observer.notice":
-		return ansiGray
+		return pickColor(ansiGray, ansiTrueMuted, mode)
 	default:
-		return ansiGray
+		return pickColor(ansiGray, ansiTrueMuted, mode)
 	}
 }
 
@@ -89,22 +104,28 @@ func eventStatus(event Event) string {
 	return status
 }
 
-func eventActionColor(event Event, fallback string) string {
+func eventActionColor(event Event, fallback string, mode ColorMode) string {
 	switch eventStatus(event) {
 	case "failed", "error", "cancelled", "canceled", "interrupted":
-		return ansiRed
+		return pickColor(ansiRed, ansiTrueRed, mode)
 	case "need_confirmation", "needs_confirmation", "waiting_confirmation", "blocked":
-		return ansiYellow
+		return pickColor(ansiYellow, ansiTrueYellow, mode)
 	case "queued", "running", "accepted", "in_progress":
-		return ansiBlue
+		return pickColor(ansiBlue, ansiTrueBlue, mode)
 	case "succeeded", "success", "ok", "applied":
 		return fallback
 	default:
 		if fallback != "" {
 			return fallback
 		}
-		return actionColor(event.toolOrType(), false)
+		return actionColor(event.toolOrType(), false, mode)
 	}
+}
+
+// mutedColor returns the secondary-text color for the active mode. It is used
+// for fact labels, command line numbers, and interaction separators.
+func mutedColor(mode ColorMode) string {
+	return pickColor(ansiGray, ansiTrueMuted, mode)
 }
 
 func operationSeparatorLabel(event Event) string {
