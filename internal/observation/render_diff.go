@@ -33,14 +33,28 @@ func renderDiffDocument(w io.Writer, document diffDocument, options renderOption
 		prefix := diffLinePrefix(line)
 		value := compactCodeLine(sanitizeTerminalText(prefix + line.text))
 		value = styleRenderedDiffLine(value, line.kind, options.colorMode)
-		if width := options.terminalWidth - 8; width > 0 {
-			value = truncateRenderedLine(value, width)
-		}
-		if _, err := fmt.Fprintf(w, "    %s\n", value); err != nil {
+		rendered := truncateDiffLine("    "+value, options.terminalWidth)
+		if _, err := fmt.Fprintln(w, rendered); err != nil {
 			return false, err
 		}
 	}
 	return false, nil
+}
+
+// truncateDiffLine applies the same width budget that timeline.flushBodyLine
+// uses when it wraps the final rendered line. Keeping the fixed indentation in
+// the value being truncated prevents a trailing ellipsis from being split onto
+// a continuation line.
+func truncateDiffLine(value string, terminalWidth int) string {
+	if terminalWidth <= 0 {
+		return value
+	}
+	continuationIndent := strings.Repeat(" ", leadingSpaceWidth(value)+2)
+	bodyWidth := terminalWidth - displayWidth(continuationIndent)
+	if bodyWidth < 1 {
+		bodyWidth = 1
+	}
+	return truncateRenderedLine(value, bodyWidth)
 }
 
 // visibleDiffLines removes transport-only unified-diff headers and keeps at

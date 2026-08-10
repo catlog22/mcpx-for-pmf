@@ -868,3 +868,30 @@ func TestCommandOutputEllipsisStaysOnLine(t *testing.T) {
 		t.Fatalf("ellipsis not kept on the content line: %q", text)
 	}
 }
+
+func TestDiffEllipsisStaysOnContentLine(t *testing.T) {
+	renderer := NewTextRendererWithWidth(false, 80)
+	var output bytes.Buffer
+	line := strings.Repeat("回归验证日志内容", 12)
+	diff := "--- a/report.md\n+++ b/report.md\n@@ -1 +1 @@\n-old\n+" + line + "\n"
+	payload := []byte(`{"results":[{"path":"report.md","operation":"update","diff":` + strconv.Quote(diff) + `}]}`)
+	if err := renderer.RenderEvent(&output, Event{
+		Tool:   "edit",
+		Type:   TypeFileChanged,
+		Output: payload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, outputLine := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
+		if width := displayWidth(outputLine); width > 80 {
+			t.Fatalf("line over budget width=%d: %q", width, outputLine)
+		}
+		if strings.Contains(outputLine, "...") && !strings.Contains(outputLine, "|") {
+			t.Fatalf("diff ellipsis was wrapped away from its content line: %q", text)
+		}
+	}
+	if !strings.Contains(text, "...") {
+		t.Fatalf("long diff was not truncated: %q", text)
+	}
+}
