@@ -206,7 +206,7 @@ mcpx update [flags]              从 GitHub Release 检查并安装新版本
 ```bash
 ./bin/mcpx update --check
 ./bin/mcpx update
-./bin/mcpx update --version 0.8.5
+./bin/mcpx update --version 0.8.6
 ```
 
 `update` 会选择当前平台对应的 GitHub Release 产物，校验 `checksums.txt` 中的 SHA-256，
@@ -729,14 +729,13 @@ ARC 2.0 的 `structuredContent.context` 保持精简，只携带当前结果真�
 - 事件行：状态标记（`•` / `!` / `?`）+ 语义动作（`Read`、`Edited`、`Ran`、`Searched`）+ 目标标签；
 - 事实与结果：2 空格缩进的子行，展示耗时、退出码、结果摘要与失败原因；
 - 命令输出：4 空格缩进、行首带行号，并按 stdout / stderr 区分着色。
-- Activity 使用单行紧凑格式 `◇ Kind ── 内容 ── HH:mm:ss ──`，状态、彩色分隔符和事件时间保持在同一行；连续 Activity 不插空行。进入 Activity flow 后，后续工具交互之间只保留一个空行，不再输出独立分隔线或墙钟时间；未进入 Activity flow 的独立工具交互仍保留原有完成分隔线。超过终端宽度自动软换行。
+- Activity 使用单行紧凑格式 `◇ Kind 内容`，不显示事件时间或额外分隔符；连续 Activity 不插空行。工具调用的 `purpose` 使用同样的 `◇ Purpose 内容` 单行格式，并在对应工具块之前只显示一次。所有工具交互之间统一只保留一个空行，不输出独立分隔线或墙钟时间；超过终端宽度自动软换行。
 
 颜色层级（ui-ux-pro-max 语义色规范）：
 
 - 状态标记使用状态色（失败红 / 等待确认黄 / 运行中蓝 / 成功回退工具色）；
 - 动作动词使用工具语义色（`Read` 青、`Edited` 绿、`Ran` 琥珀、`Plan` 黄、`Session` 品红）；
 - 目标标签与结果值保持默认前景色，事实 key（`time`、`path`、`exit_code` 等）使用 muted 次级色；
-- 交互分隔线继承当前交互的工具色，失败交互为红色；
 - 命令输出行号使用 muted 色，stdout 弱化（dim）、stderr 黄色；
 - 支持真彩色终端时全部语义色升级为 true-color 变体，普通终端降级 ANSI 16 色，`NO_COLOR=1` 或非终端完全无色。
 

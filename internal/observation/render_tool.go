@@ -69,6 +69,12 @@ func renderToolCompleted(w io.Writer, event Event, options renderOptions, suppre
 	}
 	wroteDetail := len(details) > 0
 	if !options.suppressContext && hasSemanticContext(event) {
+		if strings.TrimSpace(event.Purpose) != "" {
+			if err := renderPurposeBanner(w, event, options.colorMode); err != nil {
+				return err
+			}
+			wroteDetail = true
+		}
 		contextLines := semanticContextLines(event, options.detail)
 		if len(contextLines) > 0 {
 			if err := writeChildren(w, contextLines, options.colorMode); err != nil {

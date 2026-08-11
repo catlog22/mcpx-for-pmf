@@ -16,17 +16,7 @@ func renderAgentActivity(w io.Writer, event Event, options renderOptions) error 
 	if summary == "" {
 		summary = "activity update"
 	}
-	kind = sanitizeTerminalText(kind)
-	summary = sanitizeTerminalText(summary)
-	color := options.colorMode != ColorModeNone
-	semanticColor := pickColor(ansiMagenta, ansiTrueMagenta, options.colorMode)
-	separator := paint("──", semanticColor, color)
-	clock := eventClock(event)
-	if clock == "" {
-		if _, err := fmt.Fprintf(w, "%s %s %s %s %s\n", paint("◇", semanticColor, color), paint(kind, semanticColor, color), separator, summary, separator); err != nil {
-			return err
-		}
-	} else if _, err := fmt.Fprintf(w, "%s %s %s %s %s %s %s\n", paint("◇", semanticColor, color), paint(kind, semanticColor, color), separator, summary, separator, paint(clock, semanticColor, color), separator); err != nil {
+	if err := renderSemanticBanner(w, kind, summary, eventClock(event), options.colorMode); err != nil {
 		return err
 	}
 	if !options.detail {
@@ -49,6 +39,18 @@ func renderAgentActivity(w io.Writer, event Event, options renderOptions) error 
 		return nil
 	}
 	return writeChildren(w, []string{strings.Join(parts, " · ")}, options.colorMode)
+}
+
+func renderSemanticBanner(w io.Writer, label, summary, clock string, mode ColorMode) error {
+	label = sanitizeTerminalText(label)
+	summary = strings.TrimSpace(sanitizeTerminalText(summary))
+	if summary == "" {
+		return nil
+	}
+	enabled := mode != ColorModeNone
+	semanticColor := pickColor(ansiMagenta, ansiTrueMagenta, mode)
+	_, err := fmt.Fprintf(w, "%s %s %s\n", paint("◇", semanticColor, enabled), paint(label, semanticColor, enabled), summary)
+	return err
 }
 
 func agentActivityKindLabel(kind string) string {

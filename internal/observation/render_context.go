@@ -1,6 +1,7 @@
 package observation
 
 import (
+	"io"
 	"strings"
 )
 
@@ -11,10 +12,17 @@ func hasSemanticContext(event Event) bool {
 		strings.TrimSpace(event.ExecutionTaskID) != ""
 }
 
+func renderPurposeBanner(w io.Writer, event Event, mode ColorMode) error {
+	purpose := strings.TrimSpace(event.Purpose)
+	if purpose == "" {
+		return nil
+	}
+	return renderSemanticBanner(w, "Purpose", purpose, eventClock(event), mode)
+}
+
 func semanticContextLines(event Event, detail bool) []string {
 	groups := []semanticContextGroup{
 		{
-			{label: "purpose", value: event.Purpose},
 			{label: "progress", value: event.ProgressSummary},
 			{label: "next", value: event.NextStep},
 		},

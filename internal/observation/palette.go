@@ -2,7 +2,6 @@ package observation
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 )
 
@@ -123,31 +122,9 @@ func eventActionColor(event Event, fallback string, mode ColorMode) string {
 }
 
 // mutedColor returns the secondary-text color for the active mode. It is used
-// for fact labels, command line numbers, and interaction separators.
+// for fact labels and command line numbers.
 func mutedColor(mode ColorMode) string {
 	return pickColor(ansiGray, ansiTrueMuted, mode)
-}
-
-func operationSeparatorLabel(event Event) string {
-	label := strings.TrimSpace(event.toolOrType())
-	if label == "" {
-		label = "operation"
-	}
-	label = strings.ReplaceAll(label, "_", " ")
-	status := eventStatus(event)
-	if status == "" && event.Type == TypeToolStarted {
-		status = "started"
-	}
-	if status != "" {
-		label += " · " + strings.ReplaceAll(status, "_", " ")
-	}
-	if operationID := strings.TrimSpace(event.OperationID); operationID != "" {
-		label += " · operation=" + operationID
-	}
-	if event.DurationMs > 0 {
-		label += fmt.Sprintf(" · duration=%dms", event.DurationMs)
-	}
-	return label
 }
 
 func eventMarker(event Event) string {

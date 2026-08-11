@@ -7,6 +7,9 @@ import (
 )
 
 func renderProgressSummary(w io.Writer, event Event, options renderOptions) error {
+	if err := renderPurposeBanner(w, event, options.colorMode); err != nil {
+		return err
+	}
 	return writeChildren(w, semanticContextLines(event, options.detail), options.colorMode)
 }
 

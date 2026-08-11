@@ -56,8 +56,8 @@ func TestTextRendererGroupsInteractionIntoBoundedBlock(t *testing.T) {
 	if strings.Count(text, "Ran go test ./internal/auth") != 1 || !strings.Contains(text, "stdout:") || !strings.Contains(text, "output truncated") {
 		t.Fatalf("command-centric compact output or overflow marker missing: %q", text)
 	}
-	if !strings.HasSuffix(text, "─\n\n") {
-		t.Fatalf("footer is not followed by interaction separator: %q", text)
+	if !strings.HasSuffix(text, "\n\n") || strings.Contains(text, "\n  ── ") {
+		t.Fatalf("tool interaction must end with one blank line and no separator: %q", text)
 	}
 }
 
@@ -78,7 +78,7 @@ func TestTextRendererStartsContinuationAfterCompletion(t *testing.T) {
 	}
 }
 
-func TestTextRendererSeparatesAdjacentOperationsWithToolAndStatus(t *testing.T) {
+func TestTextRendererSeparatesAdjacentOperationsWithBlankLine(t *testing.T) {
 	renderer := NewTextRendererWithMode(ColorModeANSI16, 80)
 	renderer.SetDetail(true)
 	var output bytes.Buffer
@@ -91,8 +91,8 @@ func TestTextRendererSeparatesAdjacentOperationsWithToolAndStatus(t *testing.T) 
 		}
 	}
 	text := output.String()
-	if !strings.Contains(text, "── edit · failed") {
-		t.Fatalf("operation separator missing tool/status: %q", text)
+	if strings.Contains(text, "\n  ── ") || !strings.Contains(text, "\n\n") {
+		t.Fatalf("adjacent operations must use one blank line and no separator: %q", text)
 	}
 	if !strings.Contains(text, ansiRed) {
 		t.Fatalf("failed operation did not use error color: %q", text)
@@ -102,7 +102,7 @@ func TestTextRendererSeparatesAdjacentOperationsWithToolAndStatus(t *testing.T) 
 	}
 }
 
-func TestTextRendererDefaultShowsTranscriptContextActionSeparatorAndRunDuration(t *testing.T) {
+func TestTextRendererDefaultShowsTranscriptContextAndRunDuration(t *testing.T) {
 	renderer := NewTextRenderer(false)
 	var output bytes.Buffer
 	exitCode := 0
@@ -123,8 +123,8 @@ func TestTextRendererDefaultShowsTranscriptContextActionSeparatorAndRunDuration(
 	if strings.Count(text, "Workspace demo") != 1 || strings.Count(text, "Session rs_demo") != 1 {
 		t.Fatalf("transcript context repeated: %q", text)
 	}
-	if !strings.Contains(text, "── ") {
-		t.Fatalf("interaction separator missing: %q", text)
+	if strings.Contains(text, "\n  ── ") {
+		t.Fatalf("default tool flow must not render separators: %q", text)
 	}
 	for _, forbidden := range []string{"operation=op_secret", "duration=2100ms", "── execute"} {
 		if strings.Contains(text, forbidden) {
@@ -153,10 +153,10 @@ func TestTextRendererRendersIntentAsActivityLine(t *testing.T) {
 		}
 	}
 	text := output.String()
-	if !strings.Contains(text, "◇ Intent ── 追踪利润分成配置到结算计算的完整链路 ──") {
+	if !strings.Contains(text, "◇ Intent 追踪利润分成配置到结算计算的完整链路") {
 		t.Fatalf("intent activity line missing: %q", text)
 	}
-	if !strings.Contains(text, "◇ Evidence ── 已确认 profit_sharing_percentage 直接参与结算金额计算 ──") {
+	if !strings.Contains(text, "◇ Evidence 已确认 profit_sharing_percentage 直接参与结算金额计算") {
 		t.Fatalf("evidence activity line missing: %q", text)
 	}
 	intentIndex := strings.Index(text, "◇ Intent")
@@ -295,10 +295,11 @@ func TestTextRendererShowsProgressBeforeCompletionOnce(t *testing.T) {
 	renderer := NewTextRenderer(false)
 	var output bytes.Buffer
 	progress := "已完成定位，下一步运行测试"
+	startedAt := time.Date(2026, 8, 12, 2, 9, 1, 0, time.Local)
 	for _, event := range []Event{
 		{Sequence: 0, RequestID: "req_previous", Tool: "read", Type: TypeToolCompleted, Status: "succeeded", Output: []byte(`{"status":"succeeded"}`)},
-		{Sequence: 1, RequestID: "req_progress", Tool: "execute", Type: TypeToolStarted, Purpose: "运行测试", ReasoningSummary: "先验证最小闭环", ProgressSummary: progress, NextStep: "检查失败日志", PlanID: "pl_progress", PlanTaskID: "pt_progress", ExecutionTaskID: "task_progress", OperationID: "op_progress"},
-		{Sequence: 2, RequestID: "req_progress", Tool: "execute", Type: TypeToolCompleted, Status: "succeeded", DurationMs: 27, Purpose: "运行测试", ReasoningSummary: "先验证最小闭环", ProgressSummary: progress, NextStep: "检查失败日志", PlanID: "pl_progress", PlanTaskID: "pt_progress", ExecutionTaskID: "task_progress", OperationID: "op_progress", Command: "go test ./...", Input: []byte(`{"command":"go test ./..."}`), Output: []byte(`{"status":"succeeded"}`)},
+		{Sequence: 1, RequestID: "req_progress", Tool: "execute", Type: TypeToolStarted, Purpose: "运行测试", ReasoningSummary: "先验证最小闭环", ProgressSummary: progress, NextStep: "检查失败日志", PlanID: "pl_progress", PlanTaskID: "pt_progress", ExecutionTaskID: "task_progress", OperationID: "op_progress", CreatedAt: startedAt},
+		{Sequence: 2, RequestID: "req_progress", Tool: "execute", Type: TypeToolCompleted, Status: "succeeded", DurationMs: 27, Purpose: "运行测试", ReasoningSummary: "先验证最小闭环", ProgressSummary: progress, NextStep: "检查失败日志", PlanID: "pl_progress", PlanTaskID: "pt_progress", ExecutionTaskID: "task_progress", OperationID: "op_progress", Command: "go test ./...", Input: []byte(`{"command":"go test ./..."}`), Output: []byte(`{"status":"succeeded"}`), CreatedAt: startedAt.Add(27 * time.Millisecond)},
 	} {
 		if err := renderer.RenderEvent(&output, event); err != nil {
 			t.Fatal(err)
@@ -309,7 +310,7 @@ func TestTextRendererShowsProgressBeforeCompletionOnce(t *testing.T) {
 		t.Fatalf("progress rendering=%q", text)
 	}
 	for _, want := range []string{
-		"purpose: 运行测试",
+		"◇ Purpose 运行测试",
 		"progress: 已完成定位，下一步运行测试",
 		"next: 检查失败日志",
 		"reasoning: 先验证最小闭环",
@@ -319,11 +320,13 @@ func TestTextRendererShowsProgressBeforeCompletionOnce(t *testing.T) {
 			t.Fatalf("semantic context missing %q: %q", want, text)
 		}
 	}
-	primaryLine := "purpose: 运行测试 · progress: 已完成定位，下一步运行测试 · next: 检查失败日志"
+	purposeLine := "◇ Purpose 运行测试"
+	primaryLine := "progress: 已完成定位，下一步运行测试 · next: 检查失败日志"
 	metadataLine := "reasoning: 先验证最小闭环 · plan: pl_progress · plan task: pt_progress · execution task: task_progress"
+	purposeIndex := strings.Index(text, purposeLine)
 	primaryIndex := strings.Index(text, primaryLine)
 	metadataIndex := strings.Index(text, metadataLine)
-	if primaryIndex < 0 || metadataIndex <= primaryIndex || !strings.Contains(text, "• Ran go test ./...") || !strings.Contains(text, "time 27ms") {
+	if purposeIndex < 0 || primaryIndex <= purposeIndex || metadataIndex <= primaryIndex || strings.Count(text, purposeLine) != 1 || !strings.Contains(text, "• Ran go test ./...") || !strings.Contains(text, "time 27ms") {
 		t.Fatalf("semantic context hierarchy, compact layout, command, or run duration was not grouped: %q", text)
 	}
 	for _, forbidden := range []string{"goal:", "operation=op_progress", "duration=27ms", "operation: op_progress"} {
@@ -336,9 +339,10 @@ func TestTextRendererShowsProgressBeforeCompletionOnce(t *testing.T) {
 func TestTextRendererDefaultAuditSnapshotKeepsDiffWithoutGoal(t *testing.T) {
 	renderer := NewTextRenderer(false)
 	var output bytes.Buffer
+	startedAt := time.Date(2026, 8, 12, 2, 9, 2, 0, time.Local)
 	for _, event := range []Event{
-		{Sequence: 1, RequestID: "req_audit", Tool: "execute", Type: TypeToolStarted, Purpose: "验证 ARC renderer", ReasoningSummary: "运行最小测试闭环", ProgressSummary: "代码已修改", NextStep: "检查 diff", PlanID: "pl_audit", PlanTaskID: "pt_audit", ExecutionTaskID: "task_audit"},
-		{Sequence: 2, RequestID: "req_audit", Tool: "execute", Type: TypeToolCompleted, Status: "succeeded", DurationMs: 21, Command: "go test ./...", Purpose: "验证 ARC renderer", ReasoningSummary: "运行最小测试闭环", ProgressSummary: "代码已修改", NextStep: "检查 diff", PlanID: "pl_audit", PlanTaskID: "pt_audit", ExecutionTaskID: "task_audit", Input: []byte(`{"command":"go test ./...","goal":"legacy ignored"}`), Output: []byte(`{"status":"succeeded"}`)},
+		{Sequence: 1, RequestID: "req_audit", Tool: "execute", Type: TypeToolStarted, Purpose: "验证 ARC renderer", ReasoningSummary: "运行最小测试闭环", ProgressSummary: "代码已修改", NextStep: "检查 diff", PlanID: "pl_audit", PlanTaskID: "pt_audit", ExecutionTaskID: "task_audit", CreatedAt: startedAt},
+		{Sequence: 2, RequestID: "req_audit", Tool: "execute", Type: TypeToolCompleted, Status: "succeeded", DurationMs: 21, Command: "go test ./...", Purpose: "验证 ARC renderer", ReasoningSummary: "运行最小测试闭环", ProgressSummary: "代码已修改", NextStep: "检查 diff", PlanID: "pl_audit", PlanTaskID: "pt_audit", ExecutionTaskID: "task_audit", Input: []byte(`{"command":"go test ./...","goal":"legacy ignored"}`), Output: []byte(`{"status":"succeeded"}`), CreatedAt: startedAt.Add(21 * time.Millisecond)},
 		{Sequence: 3, RequestID: "req_edit", Tool: "edit", Type: TypeFileChanged, Status: "succeeded", Output: []byte(`{"results":[{"path":"audit.go","operation":"update","diff":"--- a/audit.go\n+++ b/audit.go\n@@ -1 +1 @@\n-old\n+new\n"}]}`)},
 	} {
 		if err := renderer.RenderEvent(&output, event); err != nil {
@@ -349,7 +353,8 @@ func TestTextRendererDefaultAuditSnapshotKeepsDiffWithoutGoal(t *testing.T) {
 	for _, want := range []string{
 		"Ran go test ./...",
 		"time 21ms",
-		"purpose: 验证 ARC renderer · progress: 代码已修改 · next: 检查 diff",
+		"◇ Purpose 验证 ARC renderer",
+		"progress: 代码已修改 · next: 检查 diff",
 		"reasoning: 运行最小测试闭环 · plan: pl_audit · plan task: pt_audit · execution task: task_audit",
 		"Edited audit.go [-1,+1]",
 		"1 | -old",
@@ -402,7 +407,7 @@ func TestTextRendererAllowsFiftyBodyLinesBeforeEllipsis(t *testing.T) {
 	if strings.Contains(text, "output truncated") {
 		t.Fatalf("exactly fifty body lines should not truncate: %q", text)
 	}
-	if strings.Count(text, "line-") != maxInteractionBodyLines || !strings.HasSuffix(text, "─\n\n") {
+	if strings.Count(text, "line-") != maxInteractionBodyLines || !strings.HasSuffix(text, "\n\n") || strings.Contains(text, "\n  ── ") {
 		t.Fatalf("body/footer budget output=%q", text)
 	}
 }
@@ -577,8 +582,8 @@ func TestTextRendererCompactsActivityFlowWithInlineTime(t *testing.T) {
 	}
 	text := output.String()
 	for _, want := range []string{
-		"◇ Intent ── 恢复模型结束时的最终 progress 汇报 ── 01:32:22 ──",
-		"◇ Next ── 运行全仓测试并检查最终工作区状态。 ── 01:32:23 ──",
+		"◇ Intent 恢复模型结束时的最终 progress 汇报",
+		"◇ Next 运行全仓测试并检查最终工作区状态。",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("activity line missing %q: %q", want, text)
@@ -589,7 +594,7 @@ func TestTextRendererCompactsActivityFlowWithInlineTime(t *testing.T) {
 	if intentIndex < 0 || nextIndex <= intentIndex || strings.Contains(text[intentIndex:nextIndex], "\n\n") {
 		t.Fatalf("consecutive Activity events must stay compact: %q", text)
 	}
-	if !strings.Contains(text, "◇ Next ── 运行全仓测试并检查最终工作区状态。 ── 01:32:23 ──\n\n• Read") {
+	if !strings.Contains(text, "◇ Next 运行全仓测试并检查最终工作区状态。\n\n• Read") {
 		t.Fatalf("Activity to first tool must use exactly one blank line: %q", text)
 	}
 	firstRead := strings.Index(text, "• Read")
@@ -597,8 +602,8 @@ func TestTextRendererCompactsActivityFlowWithInlineTime(t *testing.T) {
 	if firstRead < 0 || secondRead <= firstRead || !strings.Contains(text[firstRead:secondRead], "\n\n") {
 		t.Fatalf("tools after Activity must be separated by one blank line: %q", text)
 	}
-	if strings.Contains(text, "\n  ── 01:") || strings.Contains(text, "────────────────────────") {
-		t.Fatalf("Activity flow must not emit standalone separator rules: %q", text)
+	if strings.Contains(text, "──") || strings.Contains(text, "────────────────────────") {
+		t.Fatalf("Activity flow must not emit rule separators: %q", text)
 	}
 
 	colored := NewTextRendererWithMode(ColorModeANSI16, 80)
@@ -606,8 +611,8 @@ func TestTextRendererCompactsActivityFlowWithInlineTime(t *testing.T) {
 	if err := colored.RenderEvent(&coloredOutput, Event{Sequence: 5, Type: TypeAgentActivity, ActivityKind: "next", ProgressSummary: "运行全仓测试并检查最终工作区状态。", CreatedAt: nextAt}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(coloredOutput.String(), ansiMagenta+"──"+ansiReset) || !strings.Contains(coloredOutput.String(), ansiMagenta+"01:32:23"+ansiReset) {
-		t.Fatalf("Activity separators and time must use the semantic color: %q", coloredOutput.String())
+	if !strings.Contains(coloredOutput.String(), ansiMagenta+"Next"+ansiReset) || strings.Contains(coloredOutput.String(), "·") || strings.Contains(coloredOutput.String(), "01:32:23") {
+		t.Fatalf("Activity label must use the semantic color while separator and time stay hidden: %q", coloredOutput.String())
 	}
 }
 

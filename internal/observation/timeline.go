@@ -24,9 +24,7 @@ type TextRenderer struct {
 	fallbackSeq              uint64
 	lastProgressFingerprint  string
 	lastSemanticFingerprint  string
-	lastClosedKey            string
 	pendingActivitySeparator bool
-	compactActivityFlow      bool
 	duplicateCount           int
 	detail                   bool
 	lastWorkspace            string
@@ -38,7 +36,6 @@ type interactionBlock struct {
 	opened           bool
 	closed           bool
 	tool             string
-	failed           bool
 	pendingEvent     Event
 	pendingLines     []string
 	pendingStarted   bool
@@ -156,7 +153,6 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 		return err
 	}
 	if isAgentActivityIntent(event) {
-		r.compactActivityFlow = true
 		if r.activeKey != "" {
 			if active := r.blocks[r.activeKey]; active != nil && !active.closed {
 				if err := r.close(w, active); err != nil {
@@ -164,9 +160,6 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 				}
 			}
 		}
-	}
-	if event.Type == TypeAgentActivity {
-		r.compactActivityFlow = true
 	}
 	if event.Type != TypeAgentActivity && event.Type != TypeToolStarted && r.pendingActivitySeparator {
 		if _, err := fmt.Fprintln(w); err != nil {
@@ -313,9 +306,7 @@ func (r *TextRenderer) ResetAfterGap() {
 	r.fallbackSeq = 0
 	r.lastProgressFingerprint = ""
 	r.lastSemanticFingerprint = ""
-	r.lastClosedKey = ""
 	r.pendingActivitySeparator = false
-	r.compactActivityFlow = false
 	r.duplicateCount = 0
 }
 
@@ -482,17 +473,11 @@ func eventPath(event Event) string {
 
 func (r *TextRenderer) activate(w io.Writer, block *interactionBlock, event Event) error {
 	block.tool = event.toolOrType()
-	block.failed = eventFailed(event)
 	if r.activeKey != "" && r.activeKey != block.key {
 		if active := r.blocks[r.activeKey]; active != nil && !active.closed {
 			if err := r.close(w, active); err != nil {
 				return err
 			}
-		}
-	}
-	if !block.opened && r.lastClosedKey != "" && r.lastClosedKey != block.key && r.detail {
-		if err := r.writeOperationSeparator(w, event); err != nil {
-			return err
 		}
 	}
 	if block.opened {
@@ -579,33 +564,18 @@ func (r *TextRenderer) close(w io.Writer, block *interactionBlock) error {
 	}
 	if block.tool == TypeAgentActivity {
 		block.closed = true
-		r.lastClosedKey = block.key
 		r.pendingActivitySeparator = true
 		if r.activeKey == block.key {
 			r.activeKey = ""
 		}
 		return nil
 	}
-	if r.compactActivityFlow {
-		// Once an Activity turn is visible, keep subsequent tool interactions
-		// compact: one blank line only, with no rule or wall-clock separator.
-		if _, err := fmt.Fprintln(w); err != nil {
-			return err
-		}
-	} else {
-		// Legacy standalone tool interactions keep the colored completion rule.
-		if _, err := fmt.Fprintln(w); err != nil {
-			return err
-		}
-		if err := r.writeActionSeparator(w, block); err != nil {
-			return err
-		}
-		if _, err := fmt.Fprintln(w); err != nil {
-			return err
-		}
+	// Tool interactions are separated only by one blank line. Activity owns
+	// the only decorative rule/time treatment in the text renderer.
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
 	}
 	block.closed = true
-	r.lastClosedKey = block.key
 	if r.activeKey == block.key {
 		r.activeKey = ""
 	}
@@ -640,29 +610,6 @@ func eventClock(event Event) string {
 		return ""
 	}
 	return event.CreatedAt.In(time.Local).Format("15:04:05")
-}
-
-func (r *TextRenderer) writeActionSeparator(w io.Writer, block *interactionBlock) error {
-	// Timestamp the separator so a completed interaction shows when it finished.
-	now := time.Now().Format("15:04:05")
-	trailing := 12
-	if r.width > 2 && r.width-15 < trailing {
-		trailing = r.width - 15
-	}
-	if trailing < 2 {
-		trailing = 2
-	}
-	color := mutedColor(r.colorMode)
-	if block != nil && strings.TrimSpace(block.tool) != "" {
-		color = actionColor(block.tool, block.failed, r.colorMode)
-	}
-	return writeSeparatorLine(w, "  ── "+now+" "+strings.Repeat("─", trailing), color, r.colorMode)
-}
-
-func (r *TextRenderer) writeOperationSeparator(w io.Writer, event Event) error {
-	line := "  ── " + operationSeparatorLabel(event) + " " + strings.Repeat("─", 12)
-	color := eventActionColor(event, actionColor(event.toolOrType(), false, r.colorMode), r.colorMode)
-	return writeSeparatorLine(w, line, color, r.colorMode)
 }
 
 func writeSeparatorLine(w io.Writer, line, color string, mode ColorMode) error {
