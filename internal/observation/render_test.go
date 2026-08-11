@@ -484,6 +484,30 @@ func TestRenderTextSummarizesScreenshotRuntimeAndWorkspaceMemoryEnvelopes(t *tes
 	}
 }
 
+func TestRenderTextShowsAgentActivitySemanticTimeline(t *testing.T) {
+	var output bytes.Buffer
+	if err := RenderText(&output, Event{
+		Type:             TypeAgentActivity,
+		Status:           "reviewing_result",
+		TurnID:           "turn-42",
+		ActivitySequence: 18,
+		ActivityKind:     "evidence",
+		ProgressSummary:  "已确认 profit_sharing_percentage 直接参与结算金额计算。",
+		RelatedCallID:    "call-read-1",
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	if !strings.Contains(text, "◇ Evidence") || !strings.Contains(text, "已确认 profit_sharing_percentage 直接参与结算金额计算。") {
+		t.Fatalf("activity semantic timeline missing: %s", text)
+	}
+	for _, forbidden := range []string{"Observed", "REVIEWING RESULT", "call-read-1"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("compact activity leaked %q: %s", forbidden, text)
+		}
+	}
+}
+
 func TestRenderTextHidesObserverMetadataObject(t *testing.T) {
 	var output bytes.Buffer
 	if err := RenderText(&output, Event{

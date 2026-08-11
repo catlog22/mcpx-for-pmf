@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -146,7 +145,11 @@ func (r *Runtime) toolObserveStatus(ctx context.Context, req *mcp.CallToolReques
 		"workspace":         session.WorkspaceName,
 		"session_status":    session.Status,
 	}
-	if activity := r.agentActivitySnapshot(session.ID, time.Now().UTC()); activity != nil {
+	activity, err := r.agentActivitySnapshot(ctx, session.ID)
+	if err != nil {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "observe_status_error", err.Error())
+	}
+	if activity != nil {
 		data["agent_activity"] = activity
 	}
 	if r.observation != nil && r.observation.store != nil {

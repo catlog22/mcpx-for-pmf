@@ -134,6 +134,10 @@ func TestCapabilityListIncludesInstructionsSkillsAndRoleState(t *testing.T) {
 	if clientProtocol["version"] != clientProtocolVersion || activityProtocol["version"] != agentActivityProtocolVersion || activityProtocol["path"] != "/mcp/activity" {
 		t.Fatalf("client protocol capability missing: %+v", clientProtocol)
 	}
+	kinds, _ := activityProtocol["kinds"].([]any)
+	if len(kinds) != len(agentActivityKindNames) {
+		t.Fatalf("activity kinds missing from capability: %+v", activityProtocol)
+	}
 	revisions := data["revisions"].(map[string]any)
 	if revisions["client_protocol_revision"] == "" {
 		t.Fatalf("client protocol revision missing: %+v", revisions)

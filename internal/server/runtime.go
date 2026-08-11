@@ -78,7 +78,6 @@ type Runtime struct {
 	operations      *operation.Service
 	observerSocket  *observation.SocketServer
 	activityMu      sync.Mutex
-	activityLast    map[string]agentActivityState
 	closeOnce       sync.Once
 	closeErr        error
 
@@ -221,7 +220,6 @@ func New(opts Options) (*Runtime, error) {
 		idempotency:    idempotency.NewStore(stateStore.DB()),
 		discoveries:    map[string]discoveryLease{},
 		projectConfigs: map[string]projectConfigCacheEntry{},
-		activityLast:   map[string]agentActivityState{},
 		build: BuildInfo{
 			Version: firstNonEmpty(opts.Version, buildversion.Current),
 			Commit:  firstNonEmpty(opts.Commit, "none"),

@@ -62,6 +62,8 @@ func renderTextWithOptions(w io.Writer, event Event, options renderOptions, supp
 		return renderSummaryEvent(w, event, lifecycleVerb(event.Summary), event.Summary, event.Output, options.colorMode)
 	case TypeObserverNotice:
 		return renderSummaryEvent(w, event, "Observed", event.Summary, event.Output, options.colorMode)
+	case TypeAgentActivity:
+		return renderAgentActivity(w, event, options)
 	default:
 		summary := event.Summary
 		if strings.TrimSpace(summary) == "" {

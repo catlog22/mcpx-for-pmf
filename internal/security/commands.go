@@ -116,8 +116,10 @@ func matchSegment(rules config.CommandRules, segment string) Decision {
 }
 
 // HasUnsafeShellOperator reports active shell syntax that cannot be safely
-// preflighted. &&, ||, and ; are supported separators; pipes, redirections,
-// background operators, newlines, and command substitution remain rejected.
+// preflighted. &&, ||, and ; are supported separators. A quoted heredoc whose
+// terminator closes the command is treated as literal stdin and can be audited
+// as one segment. Pipes, ordinary redirections, background operators, arbitrary
+// multiline shell, and command substitution remain rejected.
 // Operators inside quotes or escaped with a backslash are literal content.
 func HasUnsafeShellOperator(command string) bool {
 	_, unsafe := commandSegments(command)
@@ -190,7 +192,15 @@ func commandSegments(command string) ([]commandSegment, bool) {
 				continue
 			}
 			return nil, true
-		case '<', '>', '`', '\n', '\r':
+		case '<':
+			if end, ok := quotedHeredocCommandEnd(command, index); ok {
+				if !appendSegment(end, "") {
+					return nil, true
+				}
+				return segments, false
+			}
+			return nil, true
+		case '>', '`', '\n', '\r':
 			return nil, true
 		case '$':
 			if index+1 < len(command) && command[index+1] == '(' {
@@ -217,6 +227,79 @@ func commandSegments(command string) ([]commandSegment, bool) {
 		return nil, true
 	}
 	return segments, false
+}
+
+// quotedHeredocCommandEnd recognizes the narrow heredoc form that can be
+// treated as literal stdin without parsing a full shell grammar:
+//
+//	command <<'TAG'\n...literal body...\nTAG
+//	command <<"TAG"\n...literal body...\nTAG
+//
+// Quoting the delimiter disables shell expansion in the heredoc body. To keep
+// the scanner deterministic, the terminator must close the entire command;
+// arbitrary commands after the terminator still fail closed as multiline shell.
+func quotedHeredocCommandEnd(command string, operatorIndex int) (int, bool) {
+	if operatorIndex+3 >= len(command) || command[operatorIndex] != '<' || command[operatorIndex+1] != '<' {
+		return 0, false
+	}
+	quote := command[operatorIndex+2]
+	if quote != '\'' && quote != '"' {
+		return 0, false
+	}
+	delimiterStart := operatorIndex + 3
+	delimiterEnd := delimiterStart
+	for delimiterEnd < len(command) && command[delimiterEnd] != quote {
+		if command[delimiterEnd] == '\n' || command[delimiterEnd] == '\r' {
+			return 0, false
+		}
+		delimiterEnd++
+	}
+	if delimiterEnd == delimiterStart || delimiterEnd >= len(command) {
+		return 0, false
+	}
+	delimiter := command[delimiterStart:delimiterEnd]
+	cursor := delimiterEnd + 1
+	for cursor < len(command) && (command[cursor] == ' ' || command[cursor] == '\t') {
+		cursor++
+	}
+	if cursor >= len(command) {
+		return 0, false
+	}
+	switch command[cursor] {
+	case '\n':
+		cursor++
+	case '\r':
+		if cursor+1 >= len(command) || command[cursor+1] != '\n' {
+			return 0, false
+		}
+		cursor += 2
+	default:
+		return 0, false
+	}
+
+	for cursor <= len(command) {
+		lineStart := cursor
+		lineEnd := strings.IndexByte(command[lineStart:], '\n')
+		next := len(command)
+		if lineEnd >= 0 {
+			lineEnd += lineStart
+			next = lineEnd + 1
+		} else {
+			lineEnd = len(command)
+		}
+		line := strings.TrimSuffix(command[lineStart:lineEnd], "\r")
+		if line == delimiter {
+			if strings.TrimSpace(command[next:]) != "" {
+				return 0, false
+			}
+			return len(command), true
+		}
+		if lineEnd == len(command) {
+			break
+		}
+		cursor = next
+	}
+	return 0, false
 }
 
 func autoAllowReadonlyEnabled(rules config.CommandRules) bool {

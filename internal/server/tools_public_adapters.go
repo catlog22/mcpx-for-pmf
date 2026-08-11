@@ -113,7 +113,8 @@ func (r *Runtime) toolWorkspaceHistoryRead(ctx context.Context, req *mcp.CallToo
 func historyEventView(event observation.Event) map[string]any {
 	view := map[string]any{
 		"event_id": event.EventID, "sequence": event.Sequence, "workspace": event.Workspace,
-		"remote_session_id": event.RemoteSessionID, "request_id": event.RequestID, "call_id": event.CallID, "operation_id": event.OperationID,
+		"remote_session_id": event.RemoteSessionID, "request_id": event.RequestID, "call_id": event.CallID,
+		"turn_id": event.TurnID, "activity_sequence": event.ActivitySequence, "activity_kind": event.ActivityKind, "related_call_id": event.RelatedCallID, "operation_id": event.OperationID,
 		"parent_operation_id": event.ParentOperationID, "step_id": event.StepID, "kind": event.Type, "type": event.Type,
 		"name": event.Tool, "tool": event.Tool, "phase": event.Phase, "status": event.Status,
 		"purpose": event.Purpose, "reasoning_summary": event.ReasoningSummary,

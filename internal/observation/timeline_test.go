@@ -131,6 +131,37 @@ func TestTextRendererDefaultShowsTranscriptContextActionSeparatorAndRunDuration(
 	}
 }
 
+func TestTextRendererRendersIntentOnSeparator(t *testing.T) {
+	renderer := NewTextRenderer(false)
+	var output bytes.Buffer
+	for _, event := range []Event{
+		{
+			Sequence: 1, Workspace: "demo", RemoteSessionID: "rs_demo", Type: TypeAgentActivity,
+			TurnID: "turn-1", ActivitySequence: 1, ActivityKind: "intent", Status: "thinking",
+			ProgressSummary: "追踪利润分成配置到结算计算的完整链路",
+		},
+		{
+			Sequence: 2, Workspace: "demo", RemoteSessionID: "rs_demo", Type: TypeAgentActivity,
+			TurnID: "turn-1", ActivitySequence: 2, ActivityKind: "evidence", Status: "reviewing_result",
+			ProgressSummary: "已确认 profit_sharing_percentage 直接参与结算金额计算",
+		},
+	} {
+		if err := renderer.RenderEvent(&output, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	text := output.String()
+	if !strings.Contains(text, "── Intent 追踪利润分成配置到结算计算的完整链路") {
+		t.Fatalf("intent separator missing: %q", text)
+	}
+	if strings.Contains(text, "◇ Intent") {
+		t.Fatalf("intent should not be rendered as a body activity: %q", text)
+	}
+	if !strings.Contains(text, "◇ Evidence 已确认 profit_sharing_percentage 直接参与结算金额计算") {
+		t.Fatalf("non-intent activity should remain semantic body output: %q", text)
+	}
+}
+
 func TestTextRendererSuppressesConsecutiveDuplicateProgressUpdates(t *testing.T) {
 	renderer := NewTextRenderer(false)
 	var output bytes.Buffer

@@ -152,6 +152,9 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 	if err := r.writeTranscriptContext(w, event); err != nil {
 		return err
 	}
+	if isAgentActivityIntent(event) {
+		return r.renderIntentSeparator(w, event)
+	}
 	if isProgressTool(event.Tool) && event.Type == TypeToolCompleted {
 		fingerprint := progressFingerprint(event)
 		if fingerprint != "" && fingerprint == r.lastProgressFingerprint {
@@ -589,6 +592,50 @@ func (r *TextRenderer) writeTranscriptContext(w io.Writer, event Event) error {
 	}
 	line := "  " + strings.Join(parts, " · ")
 	return writeSeparatorLine(w, line, ansiGray, r.colorMode)
+}
+
+func isAgentActivityIntent(event Event) bool {
+	return event.Type == TypeAgentActivity && strings.EqualFold(strings.TrimSpace(event.ActivityKind), "intent")
+}
+
+func (r *TextRenderer) renderIntentSeparator(w io.Writer, event Event) error {
+	if r.activeKey != "" {
+		if active := r.blocks[r.activeKey]; active != nil && !active.closed {
+			if err := r.close(w, active); err != nil {
+				return err
+			}
+		}
+	}
+
+	summary := strings.TrimSpace(event.ProgressSummary)
+	if summary == "" {
+		summary = strings.TrimSpace(event.Summary)
+	}
+	summary = sanitizeTerminalText(summary)
+	line := "  ── Intent"
+	if summary != "" {
+		line += " " + summary
+	}
+
+	trailing := 12
+	available := r.width - displayWidth(line) - 1
+	if available < trailing {
+		trailing = available
+	}
+	if trailing < 2 {
+		trailing = 2
+		maxLabelWidth := r.width - trailing - 1
+		if maxLabelWidth > 0 {
+			line = truncateRenderedLine(line, maxLabelWidth)
+		}
+	}
+	line += " " + strings.Repeat("─", trailing)
+	semanticColor := pickColor(ansiMagenta, ansiTrueMagenta, r.colorMode)
+	if err := writeSeparatorLine(w, line, semanticColor, r.colorMode); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintln(w)
+	return err
 }
 
 func (r *TextRenderer) writeActionSeparator(w io.Writer, block *interactionBlock) error {

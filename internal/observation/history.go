@@ -90,7 +90,7 @@ func (s *Store) Query(ctx context.Context, query HistoryQuery) ([]Event, string,
 	}
 
 	statement := `SELECT sequence, workspace_name,
-	        remote_session_id, request_id, call_id, operation_id, tool_name, event_type, phase,
+	        remote_session_id, request_id, call_id, turn_id, activity_sequence, activity_kind, related_call_id, operation_id, tool_name, event_type, phase,
 		intent, progress_summary, input_json, output_json, summary, status, purpose, goal, reasoning_summary, next_step, plan_id, plan_task_id, execution_task_id, parent_operation_id, step_id,
         command, working_directory, exit_code, duration_ms, skill_name, mcp_server, mcp_tool, path,
         resource_uri, stream, stream_offset, truncated, created_at

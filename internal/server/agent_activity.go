@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,11 +16,9 @@ import (
 )
 
 const (
-	agentActivityProtocolVersion   = "1"
+	agentActivityProtocolVersion   = "2"
 	maxAgentActivityBodyBytes      = 16 << 10
 	agentActivityHeartbeatInterval = 25 * time.Second
-	agentActivityStateRetention    = time.Hour
-	maxTrackedAgentActivityTurns   = 1024
 )
 
 var agentActivityStateNames = []string{
@@ -34,22 +34,34 @@ var agentActivityStateNames = []string{
 	"turn_failed",
 }
 
-var agentActivityStates = func() map[string]bool {
-	states := make(map[string]bool, len(agentActivityStateNames))
-	for _, state := range agentActivityStateNames {
-		states[state] = true
+var agentActivityKindNames = []string{
+	"intent",
+	"hypothesis",
+	"evidence",
+	"conclusion",
+	"next",
+	"status",
+}
+
+var agentActivityStates = stringSet(agentActivityStateNames)
+var agentActivityKinds = stringSet(agentActivityKindNames)
+
+func stringSet(values []string) map[string]bool {
+	set := make(map[string]bool, len(values))
+	for _, value := range values {
+		set[value] = true
 	}
-	return states
-}()
+	return set
+}
 
 type agentActivityRequest struct {
-	Version         string `json:"version"`
 	RemoteSessionID string `json:"remote_session_id"`
 	TurnID          string `json:"turn_id"`
 	Sequence        int64  `json:"sequence"`
 	State           string `json:"state"`
-	Summary         string `json:"summary,omitempty"`
-	LastCallID      string `json:"last_call_id,omitempty"`
+	Kind            string `json:"kind"`
+	Summary         string `json:"summary"`
+	RelatedCallID   string `json:"related_call_id,omitempty"`
 }
 
 type agentActivityState struct {
@@ -57,8 +69,9 @@ type agentActivityState struct {
 	TurnID          string
 	Sequence        int64
 	State           string
+	Kind            string
 	Summary         string
-	LastCallID      string
+	RelatedCallID   string
 	PersistedAt     time.Time
 	StateSince      time.Time
 	SeenAt          time.Time
@@ -81,7 +94,7 @@ func (r *Runtime) handleAgentActivity(w http.ResponseWriter, req *http.Request) 
 		writeAgentActivityError(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST is required")
 		return
 	}
-	if r == nil || r.remote == nil || r.observation == nil {
+	if r == nil || r.remote == nil || r.observation == nil || r.state == nil {
 		writeAgentActivityError(w, http.StatusServiceUnavailable, "activity_unavailable", "activity observation is unavailable")
 		return
 	}
@@ -100,18 +113,14 @@ func (r *Runtime) handleAgentActivity(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	input.Version = strings.TrimSpace(input.Version)
 	input.RemoteSessionID = strings.TrimSpace(input.RemoteSessionID)
 	input.TurnID = strings.TrimSpace(input.TurnID)
 	input.State = strings.ToLower(strings.TrimSpace(input.State))
+	input.Kind = strings.ToLower(strings.TrimSpace(input.Kind))
 	input.Summary = observation.SanitizeIntent(input.Summary)
-	input.LastCallID = strings.TrimSpace(input.LastCallID)
-	if input.Version != agentActivityProtocolVersion {
-		writeAgentActivityError(w, http.StatusUpgradeRequired, "unsupported_protocol_version", "activity version must be "+agentActivityProtocolVersion)
-		return
-	}
-	if input.RemoteSessionID == "" || input.TurnID == "" || input.Sequence <= 0 || !agentActivityStates[input.State] {
-		writeAgentActivityError(w, http.StatusBadRequest, "invalid_activity", "remote_session_id, turn_id, positive sequence and a supported state are required")
+	input.RelatedCallID = strings.TrimSpace(input.RelatedCallID)
+	if input.RemoteSessionID == "" || input.TurnID == "" || input.Sequence <= 0 || input.Summary == "" || !agentActivityStates[input.State] || !agentActivityKinds[input.Kind] {
+		writeAgentActivityError(w, http.StatusBadRequest, "invalid_activity", "remote_session_id, turn_id, positive sequence, supported state, supported kind and summary are required")
 		return
 	}
 
@@ -134,7 +143,7 @@ func (r *Runtime) handleAgentActivity(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	persisted, reason, err := r.acceptAgentActivity(req, session, input, time.Now().UTC())
+	persisted, reason, err := r.acceptAgentActivity(req.Context(), session, input, time.Now().UTC())
 	if err != nil {
 		var conflict *agentActivityConflict
 		if errors.As(err, &conflict) {
@@ -147,7 +156,6 @@ func (r *Runtime) handleAgentActivity(w http.ResponseWriter, req *http.Request) 
 
 	writeAgentActivityJSON(w, http.StatusAccepted, map[string]any{
 		"status":            "accepted",
-		"version":           agentActivityProtocolVersion,
 		"persisted":         persisted,
 		"reason":            reason,
 		"remote_session_id": session.ID,
@@ -155,35 +163,45 @@ func (r *Runtime) handleAgentActivity(w http.ResponseWriter, req *http.Request) 
 		"turn_id":           input.TurnID,
 		"sequence":          input.Sequence,
 		"state":             input.State,
+		"kind":              input.Kind,
+		"related_call_id":   input.RelatedCallID,
 	})
 }
 
-func (r *Runtime) acceptAgentActivity(req *http.Request, session remotesession.Session, input agentActivityRequest, now time.Time) (bool, string, error) {
-	key := input.RemoteSessionID + "\x00" + input.TurnID
+func (r *Runtime) acceptAgentActivity(ctx context.Context, session remotesession.Session, input agentActivityRequest, now time.Time) (bool, string, error) {
+	if r == nil || r.state == nil || r.state.DB() == nil {
+		return false, "", fmt.Errorf("activity state store is unavailable")
+	}
 	r.activityMu.Lock()
 	defer r.activityMu.Unlock()
-	if r.activityLast == nil {
-		r.activityLast = map[string]agentActivityState{}
+
+	tx, err := r.state.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return false, "", err
 	}
-	r.pruneAgentActivityLocked(now)
-	previous, exists := r.activityLast[key]
+	defer tx.Rollback()
+
+	previous, exists, err := loadAgentActivityState(ctx, tx, session.ID, input.TurnID)
+	if err != nil {
+		return false, "", err
+	}
 	if exists {
 		if input.Sequence < previous.Sequence {
 			return false, "", &agentActivityConflict{Code: "stale_sequence", Message: "activity sequence is older than the latest accepted sequence"}
 		}
 		if input.Sequence == previous.Sequence {
-			if input.State == previous.State && input.Summary == previous.Summary && input.LastCallID == previous.LastCallID {
+			if input.State == previous.State && input.Kind == previous.Kind && input.Summary == previous.Summary && input.RelatedCallID == previous.RelatedCallID {
 				return false, "duplicate", nil
 			}
 			return false, "", &agentActivityConflict{Code: "sequence_conflict", Message: "activity sequence was already used with different content"}
 		}
-		if previous.State == "turn_completed" || previous.State == "turn_failed" {
+		if isTerminalAgentActivityState(previous.State) {
 			return false, "", &agentActivityConflict{Code: "turn_closed", Message: "terminal activity state already closed this turn"}
 		}
 	}
 
-	changed := !exists || input.State != previous.State || input.Summary != previous.Summary || input.LastCallID != previous.LastCallID
-	persist := changed || previous.PersistedAt.IsZero() || now.Sub(previous.PersistedAt) >= agentActivityHeartbeatInterval
+	semanticUpdate := !exists || input.State != previous.State || input.Kind != previous.Kind || input.Summary != previous.Summary || input.RelatedCallID != previous.RelatedCallID
+	persistTimeline := semanticUpdate || previous.PersistedAt.IsZero() || now.Sub(previous.PersistedAt) >= agentActivityHeartbeatInterval
 	stateSince := previous.StateSince
 	if !exists || input.State != previous.State || stateSince.IsZero() {
 		stateSince = now
@@ -193,106 +211,130 @@ func (r *Runtime) acceptAgentActivity(req *http.Request, session remotesession.S
 		TurnID:          input.TurnID,
 		Sequence:        input.Sequence,
 		State:           input.State,
+		Kind:            input.Kind,
 		Summary:         input.Summary,
-		LastCallID:      input.LastCallID,
+		RelatedCallID:   input.RelatedCallID,
 		PersistedAt:     previous.PersistedAt,
 		StateSince:      stateSince,
 		SeenAt:          now,
 	}
-	if persist {
-		summary := agentActivitySummary(input.State, input.Summary)
-		encoded, _ := json.Marshal(map[string]any{
-			"source_type":  "agent.activity.v1",
-			"version":      agentActivityProtocolVersion,
-			"turn_id":      input.TurnID,
-			"sequence":     input.Sequence,
-			"state":        input.State,
-			"summary":      input.Summary,
-			"last_call_id": input.LastCallID,
-		})
-		if err := r.observation.Record(req.Context(), observation.Event{
-			Workspace:       session.WorkspaceName,
-			RemoteSessionID: session.ID,
-			CallID:          input.LastCallID,
-			Type:            observation.TypeObserverNotice,
-			Phase:           observation.PhaseThoughtSummary,
-			Status:          input.State,
-			ProgressSummary: input.Summary,
-			Summary:         summary,
-			Output:          encoded,
-			CreatedAt:       now,
+	if persistTimeline {
+		state.PersistedAt = now
+	}
+	if err := saveAgentActivityState(ctx, tx, state); err != nil {
+		return false, "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, "", err
+	}
+
+	if persistTimeline {
+		if err := r.observation.Record(ctx, observation.Event{
+			Workspace:        session.WorkspaceName,
+			RemoteSessionID:  session.ID,
+			TurnID:           input.TurnID,
+			ActivitySequence: input.Sequence,
+			ActivityKind:     input.Kind,
+			RelatedCallID:    input.RelatedCallID,
+			Type:             observation.TypeAgentActivity,
+			Phase:            observation.PhaseThoughtSummary,
+			Status:           input.State,
+			ProgressSummary:  input.Summary,
+			Summary:          input.Summary,
+			CreatedAt:        now,
 		}); err != nil {
 			return false, "", err
 		}
-		state.PersistedAt = now
-	}
-	r.activityLast[key] = state
-	if persist {
-		return true, "state_changed", nil
+		if semanticUpdate {
+			return true, "semantic_update", nil
+		}
+		return true, "heartbeat_interval", nil
 	}
 	return false, "heartbeat_throttled", nil
 }
 
-func (r *Runtime) pruneAgentActivityLocked(now time.Time) {
-	for key, state := range r.activityLast {
-		if now.Sub(state.SeenAt) > agentActivityStateRetention {
-			delete(r.activityLast, key)
-		}
+func loadAgentActivityState(ctx context.Context, tx *sql.Tx, remoteSessionID, turnID string) (agentActivityState, bool, error) {
+	var state agentActivityState
+	var persistedAt, stateSince, seenAt int64
+	err := tx.QueryRowContext(ctx, `SELECT remote_session_id, turn_id, sequence, state, kind, summary, related_call_id, persisted_at, state_since, seen_at
+		FROM agent_activity_turns WHERE remote_session_id = ? AND turn_id = ?`, remoteSessionID, turnID).Scan(
+		&state.RemoteSessionID, &state.TurnID, &state.Sequence, &state.State, &state.Kind, &state.Summary, &state.RelatedCallID,
+		&persistedAt, &stateSince, &seenAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return agentActivityState{}, false, nil
 	}
-	if len(r.activityLast) < maxTrackedAgentActivityTurns {
-		return
+	if err != nil {
+		return agentActivityState{}, false, err
 	}
-	var oldestKey string
-	var oldest time.Time
-	for key, state := range r.activityLast {
-		if oldestKey == "" || state.SeenAt.Before(oldest) {
-			oldestKey, oldest = key, state.SeenAt
-		}
-	}
-	if oldestKey != "" {
-		delete(r.activityLast, oldestKey)
-	}
+	state.PersistedAt = activityTime(persistedAt)
+	state.StateSince = activityTime(stateSince)
+	state.SeenAt = activityTime(seenAt)
+	return state, true, nil
 }
 
-func (r *Runtime) agentActivitySnapshot(remoteSessionID string, now time.Time) map[string]any {
+func saveAgentActivityState(ctx context.Context, tx *sql.Tx, state agentActivityState) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO agent_activity_turns
+		(remote_session_id, turn_id, sequence, state, kind, summary, related_call_id, persisted_at, state_since, seen_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(remote_session_id, turn_id) DO UPDATE SET
+			sequence = excluded.sequence,
+			state = excluded.state,
+			kind = excluded.kind,
+			summary = excluded.summary,
+			related_call_id = excluded.related_call_id,
+			persisted_at = excluded.persisted_at,
+			state_since = excluded.state_since,
+			seen_at = excluded.seen_at`,
+		state.RemoteSessionID, state.TurnID, state.Sequence, state.State, state.Kind, state.Summary, state.RelatedCallID,
+		activityMillis(state.PersistedAt), activityMillis(state.StateSince), activityMillis(state.SeenAt),
+	)
+	return err
+}
+
+func (r *Runtime) agentActivitySnapshot(ctx context.Context, remoteSessionID string) (map[string]any, error) {
+	if r == nil || r.state == nil || r.state.DB() == nil {
+		return nil, nil
+	}
 	r.activityMu.Lock()
 	defer r.activityMu.Unlock()
-	if r.activityLast == nil {
-		return nil
+	var state agentActivityState
+	err := r.state.DB().QueryRowContext(ctx, `SELECT turn_id, sequence, state, kind, summary, related_call_id
+		FROM agent_activity_turns WHERE remote_session_id = ? ORDER BY seen_at DESC, turn_id DESC LIMIT 1`, remoteSessionID).Scan(
+		&state.TurnID, &state.Sequence, &state.State, &state.Kind, &state.Summary, &state.RelatedCallID,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
 	}
-	r.pruneAgentActivityLocked(now)
-	var latest agentActivityState
-	found := false
-	for _, state := range r.activityLast {
-		if state.RemoteSessionID != remoteSessionID {
-			continue
-		}
-		if !found || state.SeenAt.After(latest.SeenAt) {
-			latest, found = state, true
-		}
-	}
-	if !found {
-		return nil
+	if err != nil {
+		return nil, err
 	}
 	return map[string]any{
-		"version":      agentActivityProtocolVersion,
-		"turn_id":      latest.TurnID,
-		"sequence":     latest.Sequence,
-		"state":        latest.State,
-		"summary":      latest.Summary,
-		"last_call_id": latest.LastCallID,
-		"state_since":  latest.StateSince.UTC().Format(time.RFC3339Nano),
-		"seen_at":      latest.SeenAt.UTC().Format(time.RFC3339Nano),
-		"duration_ms":  now.Sub(latest.StateSince).Milliseconds(),
-	}
+		"turn_id":         state.TurnID,
+		"sequence":        state.Sequence,
+		"state":           state.State,
+		"kind":            state.Kind,
+		"summary":         state.Summary,
+		"related_call_id": state.RelatedCallID,
+	}, nil
 }
 
-func agentActivitySummary(state, summary string) string {
-	label := strings.ToUpper(strings.ReplaceAll(state, "_", " "))
-	if strings.TrimSpace(summary) == "" {
-		return "Agent " + label
+func isTerminalAgentActivityState(state string) bool {
+	return state == "turn_completed" || state == "turn_failed"
+}
+
+func activityMillis(value time.Time) int64 {
+	if value.IsZero() {
+		return 0
 	}
-	return fmt.Sprintf("Agent %s: %s", label, strings.TrimSpace(summary))
+	return value.UTC().UnixMilli()
+}
+
+func activityTime(value int64) time.Time {
+	if value <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(value).UTC()
 }
 
 func writeAgentActivityError(w http.ResponseWriter, status int, code, message string) {

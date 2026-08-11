@@ -11,7 +11,7 @@ rules:
   - 删除、移除或清理只使用 move_out 的 prepare → 用户确认 → submit 协议；confirmation_uuid 和冻结参数由服务端绑定，submit 只按服务端返回的确认动作继续，不要改用 execute 删除。
   - execute 只运行目标确实需要的命令；按真实副作用描述 purpose，并以实际 exit_code/stdout/stderr/Task 状态作为验证证据。长任务返回 execution_task_id 后，用 observe(task/logs) 或 execute(attach) 继续。
   - observe 可省略 view：无目标参数默认 session，execution_task_id 推导 task，plan_task_id 推导 plan，history 过滤条件推导 history，edit_id 推导 diff；存在歧义时显式指定 view。
-  - 客户端支持 Client Protocol activity 时，用 activity channel 报告 thinking/preparing/reviewing/responding 等公开工作状态；summary 只能是可展示的工作摘要，不是隐藏推理链。工具运行心跳和上游 MCP 心跳由各自运行层负责。
+  - 客户端支持 Client Protocol activity 时，用 activity channel 报告公开工作轨迹：state 表示生命周期，kind 使用 intent/hypothesis/evidence/conclusion/next/status 表示语义。实质工作 turn 应优先给出 Intent，调查过程中在公开理解发生变化时给出 Hypothesis/Evidence，形成判断时给出 Conclusion，有明确后续时给出 Next；summary 只能是可展示的工作摘要，不是隐藏推理链。纯 heartbeat 可重复发送但不应代替语义 Activity。
   - progress 只用于有业务意义的用户可见里程碑、等待用户、阻塞或失败，不作为每次工具调用的 bookkeeping，也不要求普通任务在结束前额外调用一次 progress。
   - 验证遵循“最小充分证据”：优先运行与改动直接相关的检查，再按风险扩大；明确区分已验证事实、未验证事项和服务端报告的限制。
 tool_routing:

@@ -39,7 +39,7 @@ func (s *Store) Append(ctx context.Context, event Event) (Event, error) {
 	if len(event.ProgressSummary) > MaxIntentBytes {
 		return Event{}, fmt.Errorf("observation progress summary exceeds %d bytes", MaxIntentBytes)
 	}
-	if len(event.CallID) > MaxIntentBytes {
+	if len(event.CallID) > MaxIntentBytes || len(event.TurnID) > MaxIntentBytes || len(event.ActivityKind) > MaxIntentBytes || len(event.RelatedCallID) > MaxIntentBytes {
 		return Event{}, fmt.Errorf("observation correlation field exceeds %d bytes", MaxIntentBytes)
 	}
 	if len(event.Input) > MaxEventBytes || len(event.Output) > MaxEventBytes {
@@ -67,14 +67,14 @@ func (s *Store) Append(ctx context.Context, event Event) (Event, error) {
 		exitCode = *event.ExitCode
 	}
 	result, err := s.db.ExecContext(ctx, `INSERT INTO observation_events
-		 (workspace_name, remote_session_id, request_id, call_id, operation_id, tool_name, event_type, phase,
+		 (workspace_name, remote_session_id, request_id, call_id, turn_id, activity_sequence, activity_kind, related_call_id, operation_id, tool_name, event_type, phase,
 		 intent, progress_summary, input_json, output_json, summary, status, purpose, goal, reasoning_summary, next_step, plan_id, plan_task_id, execution_task_id, parent_operation_id, step_id,
 		 command, working_directory, exit_code, duration_ms, skill_name, mcp_server, mcp_tool, path,
 		 resource_uri, stream, stream_offset, truncated, created_at)
 		VALUES (
-			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		)`,
-		event.Workspace, event.RemoteSessionID, event.RequestID, event.CallID, event.OperationID, event.Tool,
+		event.Workspace, event.RemoteSessionID, event.RequestID, event.CallID, event.TurnID, event.ActivitySequence, event.ActivityKind, event.RelatedCallID, event.OperationID, event.Tool,
 		event.Type, event.Phase, event.Intent, event.ProgressSummary, string(event.Input), string(event.Output), event.Summary,
 		event.Status, event.Purpose, event.Goal, event.ReasoningSummary, event.NextStep, event.PlanID, event.PlanTaskID, event.ExecutionTaskID, event.ParentOperationID, event.StepID, event.Command, event.WorkingDirectory, exitCode,
 		event.DurationMs, event.SkillName, event.MCPServer, event.MCPTool, event.Path,
@@ -103,7 +103,7 @@ func (s *Store) List(ctx context.Context, workspace string, afterSequence int64,
 		limit = MaxHistory
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT sequence, workspace_name,
-		remote_session_id, request_id, call_id, operation_id, tool_name, event_type, phase,
+		remote_session_id, request_id, call_id, turn_id, activity_sequence, activity_kind, related_call_id, operation_id, tool_name, event_type, phase,
 		intent, progress_summary, input_json, output_json, summary, status, purpose, goal, reasoning_summary, next_step, plan_id, plan_task_id, execution_task_id, parent_operation_id, step_id,
         command, working_directory, exit_code, duration_ms, skill_name, mcp_server, mcp_tool, path,
         resource_uri, stream, stream_offset, truncated, created_at
@@ -134,7 +134,7 @@ func (s *Store) History(ctx context.Context, workspace string, afterSequence int
 		limit = MaxHistory
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT sequence, workspace_name,
-		remote_session_id, request_id, call_id, operation_id, tool_name, event_type, phase,
+		remote_session_id, request_id, call_id, turn_id, activity_sequence, activity_kind, related_call_id, operation_id, tool_name, event_type, phase,
 	        intent, progress_summary, input_json, output_json, summary, status, purpose, goal, reasoning_summary, next_step, plan_id, plan_task_id, execution_task_id, parent_operation_id, step_id,
         command, working_directory, exit_code, duration_ms, skill_name, mcp_server, mcp_tool, path,
         resource_uri, stream, stream_offset, truncated, created_at
@@ -164,7 +164,7 @@ func scanEvents(rows *sql.Rows, capacity int) ([]Event, error) {
 		var exitCode sql.NullInt64
 		var createdAt int64
 		if err := rows.Scan(&event.Sequence, &event.Workspace, &event.RemoteSessionID,
-			&event.RequestID, &event.CallID, &event.OperationID, &event.Tool, &event.Type, &event.Phase, &event.Intent,
+			&event.RequestID, &event.CallID, &event.TurnID, &event.ActivitySequence, &event.ActivityKind, &event.RelatedCallID, &event.OperationID, &event.Tool, &event.Type, &event.Phase, &event.Intent,
 			&event.ProgressSummary, &input, &output, &event.Summary, &event.Status, &event.Purpose, &event.Goal, &event.ReasoningSummary, &event.NextStep, &event.PlanID, &event.PlanTaskID, &event.ExecutionTaskID, &event.ParentOperationID, &event.StepID,
 			&event.Command, &event.WorkingDirectory, &exitCode, &event.DurationMs, &event.SkillName, &event.MCPServer, &event.MCPTool, &event.Path,
 			&event.ResourceURI, &event.Stream, &event.Offset, &truncated, &createdAt); err != nil {

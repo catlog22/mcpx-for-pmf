@@ -85,6 +85,51 @@ func TestMatchCommandRejectsUnsafeOperators(t *testing.T) {
 	}
 }
 
+func TestMatchCommandAllowsQuotedHeredocAfterAudit(t *testing.T) {
+	command := "python3 - <<'PY'\nprint('body may contain | ; && || $(literal) `literal`')\nPY"
+	rules := config.DefaultConfig().Security.Commands
+	analysis := AnalyzeCommand(rules, command)
+	if analysis.Unsafe || analysis.Decision != Allow || len(analysis.Segments) != 1 {
+		t.Fatalf("quoted heredoc analysis=%+v", analysis)
+	}
+	if HasUnsafeShellOperator(command) {
+		t.Fatalf("quoted heredoc reported unsafe")
+	}
+
+	confirmRules := config.CommandRules{Default: "allow", Confirm: []string{`^python3\b`}}
+	if got := MatchCommand(confirmRules, command); got != Confirm {
+		t.Fatalf("quoted heredoc confirm policy got %s", got)
+	}
+	denyRules := config.CommandRules{Default: "allow", Deny: []string{`^python3\b`}}
+	if got := MatchCommand(denyRules, command); got != Deny {
+		t.Fatalf("quoted heredoc deny policy got %s", got)
+	}
+}
+
+func TestMatchCommandAllowsQuotedHeredocAsFinalCompoundSegment(t *testing.T) {
+	command := "git status && python3 - <<\"PY\"\nprint('sample')\nPY"
+	analysis := AnalyzeCommand(config.DefaultConfig().Security.Commands, command)
+	if analysis.Unsafe || analysis.Decision != Allow || len(analysis.Segments) != 2 {
+		t.Fatalf("compound heredoc analysis=%+v", analysis)
+	}
+	if analysis.Segments[0].Operator != "&&" || analysis.Segments[1].Operator != "" {
+		t.Fatalf("compound heredoc operators=%+v", analysis.Segments)
+	}
+}
+
+func TestMatchCommandRejectsUnquotedOrTrailingHeredocShell(t *testing.T) {
+	rules := config.DefaultConfig().Security.Commands
+	for _, command := range []string{
+		"python3 - <<PY\nprint('expanded')\nPY",
+		"python3 - <<'PY'\nprint('missing terminator')",
+		"python3 - <<'PY'\nprint('ok')\nPY\ngit status",
+	} {
+		if got := MatchCommand(rules, command); got != Deny {
+			t.Fatalf("unsupported heredoc %q: got %s, want deny", command, got)
+		}
+	}
+}
+
 func TestMatchCommandTreatsQuotedAndEscapedOperatorsAsLiterals(t *testing.T) {
 	rules := config.DefaultConfig().Security.Commands
 	for _, command := range []string{

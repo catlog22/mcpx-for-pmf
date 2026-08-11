@@ -26,6 +26,7 @@ const (
 	TypeFileChanged            = "file.changed"
 	TypeSessionLifecycle       = "session.lifecycle"
 	TypeObserverNotice         = "observer.notice"
+	TypeAgentActivity          = "agent.activity"
 	TypeOperationStarted       = "operation.started"
 	TypeOperationStepStarted   = "operation.step.started"
 	TypeOperationStepCompleted = "operation.step.completed"
@@ -51,6 +52,10 @@ type Event struct {
 	RemoteSessionID   string          `json:"remote_session_id,omitempty"`
 	RequestID         string          `json:"request_id,omitempty"`
 	CallID            string          `json:"call_id,omitempty"`
+	TurnID            string          `json:"turn_id,omitempty"`
+	ActivitySequence  int64           `json:"activity_sequence,omitempty"`
+	ActivityKind      string          `json:"activity_kind,omitempty"`
+	RelatedCallID     string          `json:"related_call_id,omitempty"`
 	OperationID       string          `json:"operation_id,omitempty"`
 	ParentOperationID string          `json:"parent_operation_id,omitempty"`
 	StepID            string          `json:"step_id,omitempty"`
@@ -123,7 +128,7 @@ func PhaseForEvent(eventType, status string) string {
 		return PhaseActionStarted
 	case TypeCommandOutput:
 		return PhaseOutput
-	case TypeToolCompleted, TypeOperationCompleted, TypeOperationStepCompleted, TypeFileChanged, TypeSessionLifecycle, TypeObserverNotice:
+	case TypeToolCompleted, TypeOperationCompleted, TypeOperationStepCompleted, TypeFileChanged, TypeSessionLifecycle, TypeObserverNotice, TypeAgentActivity:
 		if isErrorStatus(status) {
 			return PhaseError
 		}

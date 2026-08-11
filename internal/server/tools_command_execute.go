@@ -63,7 +63,7 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolReque
 		r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "command_execute", Command: command, Status: "denied", Detail: commandExecutionDetail(purpose, scope, commandDigest, analysis)})
 		message := "command denied by policy after auditing all command segments"
 		if containsUnsafeShellFeature(command) {
-			message += "；命令包含不支持的 shell 特性。&&、|| 和 ; 可以组合并会先分段审计；管道、重定向、单个 &、换行、$() 和反引号命令替换仍会被拒绝。对于这些不支持的特性，请改用可独立审计的简单命令，例如 git fetch && git rev-parse HEAD && git status。"
+			message += "；命令包含无法独立审计的 shell 特性。&&、|| 和 ; 会拆分后逐段审计；quoted heredoc（如 <<'PY'）会作为 literal stdin 随所属命令一起审计。管道、普通重定向、单个 &、任意多行 shell、$() 和反引号命令替换仍会拒绝；遇到这些情况请改用可独立审计的简单命令，例如 git fetch && git rev-parse HEAD && git status。"
 		}
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "denied", message)
 	case security.Confirm:

@@ -18,21 +18,24 @@ const clientProtocolVersion = "1"
 
 func clientProtocolCapabilities() map[string]any {
 	states := append([]string(nil), agentActivityStateNames...)
+	kinds := append([]string(nil), agentActivityKindNames...)
 	return map[string]any{
 		"version": clientProtocolVersion,
 		"activity": map[string]any{
-			"version":               agentActivityProtocolVersion,
-			"transport":             "http",
-			"method":                "POST",
-			"path":                  "/mcp/activity",
-			"auth":                  "same_as_mcp",
-			"content_type":          "application/json",
-			"max_body_bytes":        maxAgentActivityBodyBytes,
-			"heartbeat_interval_ms": agentActivityHeartbeatInterval.Milliseconds(),
-			"sequence":              "required_monotonic_per_turn",
-			"states":                states,
-			"terminal_states":       []string{"turn_completed", "turn_failed"},
-			"summary_semantics":     "public_work_summary_not_chain_of_thought",
+			"version":                agentActivityProtocolVersion,
+			"transport":              "http",
+			"method":                 "POST",
+			"path":                   "/mcp/activity",
+			"auth":                   "same_as_mcp",
+			"content_type":           "application/json",
+			"max_body_bytes":         maxAgentActivityBodyBytes,
+			"heartbeat_interval_ms":  agentActivityHeartbeatInterval.Milliseconds(),
+			"sequence":               "required_monotonic_per_turn_durable",
+			"states":                 states,
+			"kinds":                  kinds,
+			"semantic_update_fields": []string{"state", "kind", "summary", "related_call_id"},
+			"terminal_states":        []string{"turn_completed", "turn_failed"},
+			"summary_semantics":      "public_work_summary_not_chain_of_thought",
 			"current_state": map[string]any{
 				"tool": "observe", "arguments": map[string]any{"view": "session"}, "field": "agent_activity",
 			},
