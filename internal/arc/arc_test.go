@@ -201,24 +201,25 @@ func TestWrapToolResultKeepsHumanTextAndModelStructuredContent(t *testing.T) {
 	}
 }
 
-func TestWrapToolResultExposesSemanticContextToARCAndHumanText(t *testing.T) {
+func TestWrapToolResultExposesActivityV2ContextToARCAndHumanText(t *testing.T) {
 	raw := mcpresult.NewStructured(map[string]any{
 		"status": "succeeded",
 		"data": map[string]any{
-			"next_step": "运行单元测试",
+			"reasoning_summary": "legacy reasoning must stay out of ARC V2",
+			"progress_summary":  "legacy progress must stay out of ARC V2",
+			"next_step":         "legacy next must stay out of ARC V2",
+			"activity":          map[string]any{"kind": "fake", "summary": "handler must not inject activity"},
 		},
 	}, "已完成文件读取")
 	written := WrapToolResult("file_read", ResultContext{
 		RequestID: "req_context",
 		Context: Context{
-			Purpose:          "读取目标文件",
-			ReasoningSummary: "先确认当前实现和格式",
-			ProgressSummary:  "已定位相关渲染入口",
-			NextStep:         "运行单元测试",
-			PlanID:           "pl_context",
-			PlanTaskID:       "pt_context",
-			ExecutionTaskID:  "task_context",
-			OperationID:      "op_context",
+			Purpose: "读取目标文件",
+			Activity: &Activity{
+				TurnID: "turn-42", Sequence: 7, State: "reviewing_result", Kind: "evidence",
+				Summary: "已确认 ARC 仍使用旧 narration 字段", RelatedCallID: "call-read-1",
+			},
+			PlanID: "pl_context", PlanTaskID: "pt_context", ExecutionTaskID: "task_context", OperationID: "op_context",
 		},
 	}, raw)
 
@@ -231,27 +232,37 @@ func TestWrapToolResultExposesSemanticContextToARCAndHumanText(t *testing.T) {
 		t.Fatalf("context=%#v", structured["context"])
 	}
 	for key, want := range map[string]string{
-		"purpose":           "读取目标文件",
-		"reasoning_summary": "先确认当前实现和格式",
-		"progress_summary":  "已定位相关渲染入口",
-		"next_step":         "运行单元测试",
-		"plan_id":           "pl_context",
-		"plan_task_id":      "pt_context",
-		"execution_task_id": "task_context",
-		"operation_id":      "op_context",
+		"purpose": "读取目标文件", "plan_id": "pl_context", "plan_task_id": "pt_context",
+		"execution_task_id": "task_context", "operation_id": "op_context",
 	} {
 		if context[key] != want {
 			t.Fatalf("context[%q]=%v, want %q", key, context[key], want)
 		}
 	}
+	activity, ok := context["activity"].(map[string]any)
+	if !ok {
+		t.Fatalf("activity=%#v", context["activity"])
+	}
+	for key, want := range map[string]any{
+		"turn_id": "turn-42", "sequence": int64(7), "state": "reviewing_result", "kind": "evidence",
+		"summary": "已确认 ARC 仍使用旧 narration 字段", "related_call_id": "call-read-1",
+	} {
+		if activity[key] != want {
+			t.Fatalf("activity[%q]=%v, want %v", key, activity[key], want)
+		}
+	}
+	for _, forbidden := range []string{"goal", "task_id", "reasoning_summary", "progress_summary", "next_step"} {
+		if _, exists := context[forbidden]; exists {
+			t.Fatalf("ARC V2 context must not expose %q: %+v", forbidden, context)
+		}
+	}
 	text := written.Content[0].(*mcp.TextContent).Text
-	if _, exists := context["goal"]; exists {
-		t.Fatalf("goal must not appear in ARC context: %+v", context)
+	for _, forbidden := range []string{"legacy reasoning", "legacy progress", "legacy next", "handler must not inject activity"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("human text leaked legacy/fake context %q: %s", forbidden, text)
+		}
 	}
-	if _, exists := context["task_id"]; exists {
-		t.Fatalf("ambiguous task_id must not appear in ARC context: %+v", context)
-	}
-	for _, want := range []string{"Context:", "- purpose: 读取目标文件", "next: 运行单元测试", "- plan: pl_context · plan task: pt_context · execution task: task_context · operation: op_context"} {
+	for _, want := range []string{"Context:", "- purpose: 读取目标文件", "activity: Evidence 已确认 ARC 仍使用旧 narration 字段", "- plan: pl_context · plan task: pt_context · execution task: task_context · operation: op_context"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("human text missing %q: %s", want, text)
 		}
@@ -339,7 +350,7 @@ func TestOutputSchemaAndRegistry(t *testing.T) {
 	if err := json.Unmarshal(rawOutputSchema, &schema); err != nil {
 		t.Fatal(err)
 	}
-	if schema["$id"] != "mcpx.structured_content.v1.5" {
+	if schema["$id"] != "mcpx.structured_content.v2.0" {
 		t.Fatalf("schema id = %v", schema["$id"])
 	}
 	required, _ := schema["required"].([]any)
@@ -351,6 +362,17 @@ func TestOutputSchemaAndRegistry(t *testing.T) {
 	properties, _ := schema["properties"].(map[string]any)
 	if properties["context"] == nil || properties["timing"] == nil || properties["data"] == nil {
 		t.Fatalf("structured output schema missing context/timing/data: %+v", properties)
+	}
+	contextSchema, _ := properties["context"].(map[string]any)
+	contextProperties, _ := contextSchema["properties"].(map[string]any)
+	activitySchema, _ := contextProperties["activity"].(map[string]any)
+	if activitySchema == nil {
+		t.Fatalf("ARC V2 context schema must expose activity: %+v", contextSchema)
+	}
+	for _, forbidden := range []string{"reasoning_summary", "progress_summary", "next_step"} {
+		if contextProperties[forbidden] != nil {
+			t.Fatalf("ARC V2 context schema must not expose %q: %+v", forbidden, contextProperties)
+		}
 	}
 	if schema["additionalProperties"] != false {
 		t.Fatalf("structured output schema must reject unknown envelope fields: %+v", schema)

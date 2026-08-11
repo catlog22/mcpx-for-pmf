@@ -381,13 +381,10 @@ curl -sS -m 5 \
 5. 后续 `session(action="open")` 或 `runtime_read` 传 `known_revisions`，已知版本未变化时
    直接复用本地缓存。
 
-每次重要调用通常可以提供统一的语义上下文：`purpose` 表示本次操作作用，
-`reasoning_summary` 表示可公开的简短判断依据，`progress_summary` 表示已验证进展，
-`next_step` 表示下一项具体计划；`plan_id`、`plan_task_id`、`execution_task_id`、`operation_id` 用于绑定执行上下文。
-`move_out(action="submit")` 的参数只有 `action`、`remote_session_id`、`confirmation_uuid`，
-所有业务语义继续使用 prepare 时由服务端冻结的值。`reasoning_summary` 不是隐藏思维链，不得写入私有推理过程。上述字段会原样进入 ARC
-`structuredContent.context`、`_meta["mcpx.result"].mcpx.result.context` 和持久化观测事件。
-准备停止工具调用、需要等待用户或发生阻塞时，使用 `progress` 写入对应终态及下一步，再向用户回复。
+ARC V2 将工具 effect 与 Agent 语义轨迹分开：`purpose` 只描述本次工具操作的作用，
+`plan_id`、`plan_task_id`、`execution_task_id`、`operation_id` 用于绑定执行上下文；公开的 Intent、Hypothesis、Evidence、Conclusion、Next 和 Status 通过 Client Protocol Activity V2 上报。服务端只在收到真实 Activity 后，才会把工具结果生成时该 Remote Session 的最新 snapshot 作为 `structuredContent.context.activity` 和 `_meta["mcpx.result"].mcpx.result.context.activity` 返回；不会从工具参数或结果反推、伪造 Activity。`reasoning_summary`、`progress_summary`、`next_step` 不再属于 ARC context。
+`move_out(action="submit")` 的参数只有 `action`、`remote_session_id`、`confirmation_uuid`，所有业务语义继续使用 prepare 时由服务端冻结的值。
+需要发布有业务意义的里程碑、等待用户、阻塞或失败状态时，使用 `progress`；它不是 Activity heartbeat，也不要求每个普通工具调用额外执行一次。
 
 终端观测使用普通 stdout/stderr pipe，不依赖 PTY、tmux 或 ConPTY。观测事件先写入
 durable Store，再通过本地 JSONL 帧推送；`observe --format=json`、终端 text 渲染和

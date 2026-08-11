@@ -311,6 +311,23 @@ func (r *Runtime) observeCleanEdit(ctx context.Context, envReq envelope.Request,
 	for _, item := range result.Results {
 		paths = append(paths, item.Path)
 	}
+	observationResults := make([]map[string]any, 0, len(result.Results))
+	for _, item := range result.Results {
+		file := map[string]any{
+			"path":            item.Path,
+			"new_path":        item.NewPath,
+			"operation":       item.Operation,
+			"original_sha256": item.OriginalSHA256,
+			"new_sha256":      item.NewSHA256,
+			"changed_lines":   item.ChangedLines,
+			"deleted":         item.Deleted,
+			"diff_bytes":      len(item.Diff),
+		}
+		if item.Diff != "" {
+			file["diff"] = item.Diff
+		}
+		observationResults = append(observationResults, file)
+	}
 	payload, _ := json.Marshal(map[string]any{
 		"edit_id":             editID,
 		"diff_summary":        boundedDiffPreview(result.DiffSummary, cleanDiffTotalPreviewMaxBytes).Text,
@@ -318,7 +335,7 @@ func (r *Runtime) observeCleanEdit(ctx context.Context, envReq envelope.Request,
 		"diff_truncated":      len(result.DiffSummary) > cleanDiffTotalPreviewMaxBytes,
 		"total_changed_lines": result.TotalChangedLines,
 		"paths":               paths,
-		"results":             editResponseData(session.ID, editID, result, false)["results"],
+		"results":             observationResults,
 	})
 	summary := fmt.Sprintf("edit %d file(s), %d changed lines", len(result.Results), result.TotalChangedLines)
 	_ = r.observation.Record(ctx, observation.Event{

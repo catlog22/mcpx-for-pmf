@@ -44,6 +44,7 @@ type interactionBlock struct {
 	ellipsis         bool
 	commandOutput    bool
 	fileChanged      bool
+	unlimitedBody    bool
 	outputLines      map[string]int
 	streamHeaders    map[string]bool
 	lastOutputStream string
@@ -197,6 +198,7 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 	}
 	if event.Type == TypeFileChanged {
 		block.fileChanged = true
+		block.unlimitedBody = r.diffMode == DiffModeFull
 	}
 
 	var rendered bytes.Buffer
@@ -486,10 +488,10 @@ func (r *TextRenderer) writeBodyLine(w io.Writer, block *interactionBlock, line 
 	if strings.TrimSpace(stripANSI(line)) == "" {
 		return nil
 	}
-	if block.ellipsis {
+	if !block.unlimitedBody && block.ellipsis {
 		return nil
 	}
-	if block.bodyLines >= maxInteractionBodyLines {
+	if !block.unlimitedBody && block.bodyLines >= maxInteractionBodyLines {
 		return r.writeBodyEllipsis(w, block)
 	}
 	return r.flushBodyLine(w, block, line)
@@ -504,10 +506,10 @@ func (r *TextRenderer) flushBodyLine(w io.Writer, block *interactionBlock, line 
 	}
 	segments := wrapRenderedLine(line, bodyWidth)
 	for index, segment := range segments {
-		if block.bodyLines >= maxInteractionBodyLines {
+		if !block.unlimitedBody && block.bodyLines >= maxInteractionBodyLines {
 			return r.writeBodyEllipsis(w, block)
 		}
-		if block.bodyLines == maxInteractionBodyLines-1 && index < len(segments)-1 {
+		if !block.unlimitedBody && block.bodyLines == maxInteractionBodyLines-1 && index < len(segments)-1 {
 			return r.writeBodyEllipsis(w, block)
 		}
 		if index > 0 {

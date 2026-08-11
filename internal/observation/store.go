@@ -42,8 +42,12 @@ func (s *Store) Append(ctx context.Context, event Event) (Event, error) {
 	if len(event.CallID) > MaxIntentBytes || len(event.TurnID) > MaxIntentBytes || len(event.ActivityKind) > MaxIntentBytes || len(event.RelatedCallID) > MaxIntentBytes {
 		return Event{}, fmt.Errorf("observation correlation field exceeds %d bytes", MaxIntentBytes)
 	}
-	if len(event.Input) > MaxEventBytes || len(event.Output) > MaxEventBytes {
-		return Event{}, fmt.Errorf("observation event payload exceeds %d bytes", MaxEventBytes)
+	outputLimit := MaxEventBytes
+	if event.Type == TypeFileChanged {
+		outputLimit = MaxFileChangeEventBytes
+	}
+	if len(event.Input) > MaxEventBytes || len(event.Output) > outputLimit {
+		return Event{}, fmt.Errorf("observation event payload exceeds input=%d/output=%d byte limits", MaxEventBytes, outputLimit)
 	}
 	if len(event.Input) > 0 && !json.Valid(event.Input) {
 		return Event{}, fmt.Errorf("observation input is not valid JSON")

@@ -171,12 +171,13 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 		}
 		// Wrap first so host-visible content is the human summary; observation
 		// then snapshots that text only (never full structuredContent dump).
+		// ARC V2 semantic narration comes only from the durable Activity channel;
+		// legacy request/result bookkeeping cannot synthesize Activity.
+		activity := r.arcActivityContext(callCtx, observationRequest.RemoteSessionID)
 		result = arc.WrapToolResult(name, arc.ResultContext{
 			RequestID: runtime.RequestID, TraceID: runtime.TraceID, SpanID: runtime.SpanID,
 			Context: arc.Context{
-				Purpose:          firstSemanticPurpose(observationRequest),
-				ReasoningSummary: observationRequest.ReasoningSummary,
-				ProgressSummary:  observationRequest.ProgressSummary, NextStep: observationRequest.NextStep,
+				Purpose: firstSemanticPurpose(observationRequest), Activity: activity,
 				PlanID: observationRequest.PlanID, PlanTaskID: observationRequest.PlanTaskID, ExecutionTaskID: observationRequest.ExecutionTaskID, OperationID: observationRequest.OperationID,
 			},
 			Timing: arc.Timing{
@@ -200,6 +201,21 @@ func firstSemanticPurpose(req envelope.Request) string {
 		return req.Purpose
 	}
 	return req.Intent
+}
+
+func (r *Runtime) arcActivityContext(ctx context.Context, remoteSessionID string) *arc.Activity {
+	state, err := r.currentAgentActivity(ctx, remoteSessionID)
+	if err != nil {
+		logging.With("component", "arc").Error("activity snapshot unavailable", "remote_session_id", remoteSessionID, "error", err)
+		return nil
+	}
+	if state == nil {
+		return nil
+	}
+	return &arc.Activity{
+		TurnID: state.TurnID, Sequence: state.Sequence, State: state.State, Kind: state.Kind,
+		Summary: state.Summary, RelatedCallID: state.RelatedCallID,
+	}
 }
 
 // callToolSafely keeps a handler panic inside the MCP tool error contract. A

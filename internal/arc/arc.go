@@ -15,7 +15,7 @@ import (
 	"mcpx/internal/mcpresult"
 )
 
-const Version = "1.5"
+const Version = "2.0"
 
 // ResultMetadataKey identifies the hidden response metadata that carries the
 // complete ARC envelope. Keeping the envelope in _meta prevents MCP hosts
@@ -56,18 +56,28 @@ type ResultContext struct {
 	Timing    Timing
 }
 
-// Context is the concise, operator-visible semantic context for one tool
-// operation. ReasoningSummary is intentionally a short rationale supplied by
-// the model; it must never contain hidden chain-of-thought.
+// Activity is the latest accepted Client Protocol Activity V2 snapshot for the
+// Remote Session at tool-result time. It is server-sourced only: handlers and
+// raw result data must never synthesize or override it.
+type Activity struct {
+	TurnID        string `json:"turn_id"`
+	Sequence      int64  `json:"sequence"`
+	State         string `json:"state"`
+	Kind          string `json:"kind"`
+	Summary       string `json:"summary"`
+	RelatedCallID string `json:"related_call_id,omitempty"`
+}
+
+// Context is the concise public execution context for one ARC result. Purpose
+// describes the effect of this tool call; Activity carries semantic narration.
+// Planning/execution IDs remain correlation fields, not narration.
 type Context struct {
-	Purpose          string `json:"purpose,omitempty"`
-	ReasoningSummary string `json:"reasoning_summary,omitempty"`
-	ProgressSummary  string `json:"progress_summary,omitempty"`
-	NextStep         string `json:"next_step,omitempty"`
-	PlanID           string `json:"plan_id,omitempty"`
-	PlanTaskID       string `json:"plan_task_id,omitempty"`
-	ExecutionTaskID  string `json:"execution_task_id,omitempty"`
-	OperationID      string `json:"operation_id,omitempty"`
+	Purpose         string    `json:"purpose,omitempty"`
+	Activity        *Activity `json:"activity,omitempty"`
+	PlanID          string    `json:"plan_id,omitempty"`
+	PlanTaskID      string    `json:"plan_task_id,omitempty"`
+	ExecutionTaskID string    `json:"execution_task_id,omitempty"`
+	OperationID     string    `json:"operation_id,omitempty"`
 }
 
 type Trace struct {
@@ -210,9 +220,6 @@ func contextData(context Context) map[string]any {
 	data := map[string]any{}
 	for key, value := range map[string]string{
 		"purpose":           context.Purpose,
-		"reasoning_summary": context.ReasoningSummary,
-		"progress_summary":  context.ProgressSummary,
-		"next_step":         context.NextStep,
 		"plan_id":           context.PlanID,
 		"plan_task_id":      context.PlanTaskID,
 		"execution_task_id": context.ExecutionTaskID,
@@ -221,6 +228,27 @@ func contextData(context Context) map[string]any {
 		if value != "" {
 			data[key] = value
 		}
+	}
+	if activity := activityData(context.Activity); activity != nil {
+		data["activity"] = activity
+	}
+	return data
+}
+
+func activityData(activity *Activity) map[string]any {
+	activity = normalizeActivity(activity)
+	if activity == nil {
+		return nil
+	}
+	data := map[string]any{
+		"turn_id":  activity.TurnID,
+		"sequence": activity.Sequence,
+		"state":    activity.State,
+		"kind":     activity.Kind,
+		"summary":  activity.Summary,
+	}
+	if activity.RelatedCallID != "" {
+		data["related_call_id"] = activity.RelatedCallID
 	}
 	return data
 }
@@ -250,15 +278,6 @@ func mergeContextMap(context *Context, values map[string]any) {
 	if context.Purpose == "" {
 		context.Purpose = stringValue(values, "purpose")
 	}
-	if context.ReasoningSummary == "" {
-		context.ReasoningSummary = stringValue(values, "reasoning_summary")
-	}
-	if context.ProgressSummary == "" {
-		context.ProgressSummary = stringValue(values, "progress_summary")
-	}
-	if context.NextStep == "" {
-		context.NextStep = stringValue(values, "next_step")
-	}
 	if context.PlanID == "" {
 		context.PlanID = stringValue(values, "plan_id")
 	}
@@ -275,14 +294,46 @@ func mergeContextMap(context *Context, values map[string]any) {
 
 func normalizeContext(context Context) Context {
 	context.Purpose = strings.TrimSpace(context.Purpose)
-	context.ReasoningSummary = strings.TrimSpace(context.ReasoningSummary)
-	context.ProgressSummary = strings.TrimSpace(context.ProgressSummary)
-	context.NextStep = strings.TrimSpace(context.NextStep)
+	context.Activity = normalizeActivity(context.Activity)
 	context.PlanID = strings.TrimSpace(context.PlanID)
 	context.PlanTaskID = strings.TrimSpace(context.PlanTaskID)
 	context.ExecutionTaskID = strings.TrimSpace(context.ExecutionTaskID)
 	context.OperationID = strings.TrimSpace(context.OperationID)
 	return context
+}
+
+func normalizeActivity(activity *Activity) *Activity {
+	if activity == nil {
+		return nil
+	}
+	normalized := *activity
+	normalized.TurnID = strings.TrimSpace(normalized.TurnID)
+	normalized.State = strings.ToLower(strings.TrimSpace(normalized.State))
+	normalized.Kind = strings.ToLower(strings.TrimSpace(normalized.Kind))
+	normalized.Summary = strings.TrimSpace(normalized.Summary)
+	normalized.RelatedCallID = strings.TrimSpace(normalized.RelatedCallID)
+	if normalized.TurnID == "" || normalized.Sequence <= 0 || normalized.Summary == "" || !validActivityState(normalized.State) || !validActivityKind(normalized.Kind) {
+		return nil
+	}
+	return &normalized
+}
+
+func validActivityState(state string) bool {
+	switch state {
+	case "turn_started", "thinking", "preparing_action", "waiting_tool", "reviewing_result", "responding", "waiting_user", "blocked", "turn_completed", "turn_failed":
+		return true
+	default:
+		return false
+	}
+}
+
+func validActivityKind(kind string) bool {
+	switch kind {
+	case "intent", "hypothesis", "evidence", "conclusion", "next", "status":
+		return true
+	default:
+		return false
+	}
 }
 
 func buildTrace(tool string, runtime ResultContext, timing Timing) Trace {
@@ -790,12 +841,21 @@ func buildOutputSchema() json.RawMessage {
 			"status": map[string]any{"type": "string", "enum": []string{"succeeded", "accepted", "waiting_confirmation", "interrupted", "failed"}},
 			"type":   map[string]any{"type": "string", "enum": typeValues},
 			"context": map[string]any{
-				"type": "object", "additionalProperties": false, "description": "模型公开的作用、判断依据、进展和下一步；不是隐藏思维链",
+				"type": "object", "additionalProperties": false, "description": "ARC V2 公开执行上下文；语义轨迹只引用真实 Client Protocol Activity V2，不承载隐藏推理链",
 				"properties": map[string]any{
-					"purpose":           map[string]any{"type": "string"},
-					"reasoning_summary": map[string]any{"type": "string"}, "progress_summary": map[string]any{"type": "string"},
-					"next_step": map[string]any{"type": "string"}, "plan_id": map[string]any{"type": "string"},
-					"plan_task_id": map[string]any{"type": "string"}, "execution_task_id": map[string]any{"type": "string"}, "operation_id": map[string]any{"type": "string"},
+					"purpose": map[string]any{"type": "string", "description": "本次工具 effect 的用户目标或作用"},
+					"activity": map[string]any{
+						"type": "object", "additionalProperties": false, "description": "工具结果生成时该 Remote Session 最新接受的 Activity V2 snapshot",
+						"required": []string{"turn_id", "sequence", "state", "kind", "summary"},
+						"properties": map[string]any{
+							"turn_id": map[string]any{"type": "string"}, "sequence": map[string]any{"type": "integer", "minimum": 1},
+							"state":   map[string]any{"type": "string", "enum": []string{"turn_started", "thinking", "preparing_action", "waiting_tool", "reviewing_result", "responding", "waiting_user", "blocked", "turn_completed", "turn_failed"}},
+							"kind":    map[string]any{"type": "string", "enum": []string{"intent", "hypothesis", "evidence", "conclusion", "next", "status"}},
+							"summary": map[string]any{"type": "string"}, "related_call_id": map[string]any{"type": "string"},
+						},
+					},
+					"plan_id": map[string]any{"type": "string"}, "plan_task_id": map[string]any{"type": "string"},
+					"execution_task_id": map[string]any{"type": "string"}, "operation_id": map[string]any{"type": "string"},
 				},
 			},
 			"timing": map[string]any{

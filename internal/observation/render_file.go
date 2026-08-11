@@ -52,7 +52,7 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 		return err
 	}
 	for index, file := range files {
-		if index >= maxChangedFiles {
+		if options.diffMode != DiffModeFull && index >= maxChangedFiles {
 			break
 		}
 		path := file.Path
@@ -78,7 +78,11 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 					return err
 				}
 				if truncated || file.DiffTruncated {
-					if err := writeChild(w, "diff preview truncated; use -diff full for complete output", options.colorMode); err != nil {
+					message := "diff preview truncated; use -diff full for complete output"
+					if options.diffMode == DiffModeFull {
+						message = "stored diff is incomplete; use observe(view=diff) to read the durable edit record"
+					}
+					if err := writeChild(w, message, options.colorMode); err != nil {
 						return err
 					}
 				}
@@ -108,13 +112,17 @@ func renderFileChanged(w io.Writer, event Event, options renderOptions) error {
 				return err
 			}
 			if truncated || file.DiffTruncated {
-				if err := writeChild(w, "diff preview truncated; use -diff full for complete output", options.colorMode); err != nil {
+				message := "diff preview truncated; use -diff full for complete output"
+				if options.diffMode == DiffModeFull {
+					message = "stored diff is incomplete; use observe(view=diff) to read the durable edit record"
+				}
+				if err := writeChild(w, message, options.colorMode); err != nil {
 					return err
 				}
 			}
 		}
 	}
-	if len(files) > maxChangedFiles {
+	if options.diffMode != DiffModeFull && len(files) > maxChangedFiles {
 		if err := writeChild(w, fmt.Sprintf("... and %d more files", len(files)-maxChangedFiles), options.colorMode); err != nil {
 			return err
 		}

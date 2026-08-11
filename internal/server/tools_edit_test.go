@@ -296,6 +296,36 @@ func TestCleanCoreEditBoundsLargeDiffAndPaginatesFullDiff(t *testing.T) {
 	if pageData["eof"] == true || pageData["next_offset"] == nil || pageData["diff"] == "" {
 		t.Fatalf("diff page did not expose continuation: %+v", pageData)
 	}
+
+	events, _, err := rt.observation.store.Query(context.Background(), observation.HistoryQuery{
+		Workspace: "demo", SessionID: remoteID, Kinds: []string{observation.TypeFileChanged}, Limit: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observed map[string]any
+	for _, event := range events {
+		var payload map[string]any
+		if json.Unmarshal(event.Output, &payload) == nil && payload["edit_id"] == editID {
+			observed = payload
+			if event.Truncated {
+				t.Fatalf("file.changed observation was truncated: bytes=%d", len(event.Output))
+			}
+			break
+		}
+	}
+	if observed == nil {
+		t.Fatalf("file.changed observation for %s not found", editID)
+	}
+	results, _ := observed["results"].([]any)
+	if len(results) != 1 {
+		t.Fatalf("observed results=%+v", observed["results"])
+	}
+	file, _ := results[0].(map[string]any)
+	fullDiff, _ := file["diff"].(string)
+	if len(fullDiff) <= cleanDiffFilePreviewMaxBytes || !strings.Contains(fullDiff, strings.TrimSpace(newText)) {
+		t.Fatalf("observation did not retain full diff: bytes=%d", len(fullDiff))
+	}
 }
 
 func TestCleanCoreEditRejectsIdempotencyFingerprintConflict(t *testing.T) {

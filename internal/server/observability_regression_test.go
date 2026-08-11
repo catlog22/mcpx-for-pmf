@@ -143,17 +143,28 @@ func TestInstrumentToolSendsNativeProgressHeartbeat(t *testing.T) {
 	}
 }
 
-func TestInstrumentToolCarriesSemanticContextToARC(t *testing.T) {
+func TestInstrumentToolCarriesLatestRealActivityToARCV2(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
+	remoteID := opened["remote_session_id"].(string)
+	body := []byte(fmt.Sprintf(`{"remote_session_id":%q,"turn_id":"turn-arc","sequence":3,"state":"reviewing_result","kind":"evidence","summary":"已确认服务端读取真实 Activity snapshot","related_call_id":"call-read-3"}`, remoteID))
+	req := httptest.NewRequest(http.MethodPost, "/mcp/activity", bytes.NewReader(body))
+	res := httptest.NewRecorder()
+	rt.agentActivityHandler().ServeHTTP(res, req)
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("activity status=%d body=%s", res.Code, res.Body.String())
+	}
+
 	handler := func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return mcpresult.NewStructured(map[string]any{"status": "succeeded"}, "ok"), nil
 	}
-	instrumented := (&Runtime{}).instrumentTool("observability_context", handler)
+	instrumented := rt.instrumentTool("observability_context", handler)
 	request := mcpresult.Request(map[string]any{
-		"goal":              "提升观测体验",
-		"purpose":           "验证 ARC 语义上下文",
-		"reasoning_summary": "先验证请求到结果的透传",
-		"progress_summary":  "工具调用已完成",
-		"next_step":         "检查终端渲染",
+		"remote_session_id": remoteID,
+		"purpose":           "验证 ARC V2 Activity bridge",
+		"reasoning_summary": "legacy request field",
+		"progress_summary":  "legacy request progress",
+		"next_step":         "legacy request next",
 		"plan_id":           "pl_context",
 		"plan_task_id":      "pt_context",
 		"execution_task_id": "task_context",
@@ -171,21 +182,23 @@ func TestInstrumentToolCarriesSemanticContextToARC(t *testing.T) {
 		t.Fatalf("context=%#v", structured["context"])
 	}
 	for key, want := range map[string]string{
-		"purpose": "验证 ARC 语义上下文", "reasoning_summary": "先验证请求到结果的透传",
-		"progress_summary": "工具调用已完成", "next_step": "检查终端渲染", "plan_id": "pl_context", "plan_task_id": "pt_context", "execution_task_id": "task_context",
+		"purpose": "验证 ARC V2 Activity bridge", "plan_id": "pl_context", "plan_task_id": "pt_context", "execution_task_id": "task_context",
 	} {
 		if semantic[key] != want {
 			t.Fatalf("context[%q]=%v, want %q", key, semantic[key], want)
 		}
 	}
-	if _, exists := semantic["goal"]; exists {
-		t.Fatalf("legacy goal must be ignored by ARC context: %+v", semantic)
+	activity, ok := semantic["activity"].(map[string]any)
+	if !ok || activity["turn_id"] != "turn-arc" || activity["kind"] != "evidence" || activity["summary"] != "已确认服务端读取真实 Activity snapshot" || activity["related_call_id"] != "call-read-3" {
+		t.Fatalf("ARC activity=%+v context=%+v", activity, semantic)
 	}
-	if _, exists := semantic["task_id"]; exists {
-		t.Fatalf("ambiguous task_id leaked into ARC context: %+v", semantic)
+	for _, forbidden := range []string{"goal", "task_id", "reasoning_summary", "progress_summary", "next_step"} {
+		if _, exists := semantic[forbidden]; exists {
+			t.Fatalf("ARC V2 context leaked %q: %+v", forbidden, semantic)
+		}
 	}
 	text := result.Content[0].(*mcp.TextContent).Text
-	if strings.Contains(text, "goal:") || !strings.Contains(text, "Context:") || !strings.Contains(text, "next: 检查终端渲染") {
+	if strings.Contains(text, "legacy request") || !strings.Contains(text, "activity: Evidence 已确认服务端读取真实 Activity snapshot") {
 		t.Fatalf("human ARC text=%q", text)
 	}
 }

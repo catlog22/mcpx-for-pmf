@@ -779,7 +779,7 @@ func TestRenderTextTruncatesLargeFileDiff(t *testing.T) {
 	}
 }
 
-func TestRenderFileChangedKeepsFiveContextLinesAndDropsHeaders(t *testing.T) {
+func TestRenderFileChangedFullKeepsAllContentWithoutTransportHeaders(t *testing.T) {
 	diff := "--- a/context.go\n+++ b/context.go\n@@ -1,13 +1,13 @@\n" +
 		" before-1\n before-2\n before-3\n before-4\n before-5\n before-6\n" +
 		"-old\n+new\n" +
@@ -789,12 +789,14 @@ func TestRenderFileChangedKeepsFiveContextLinesAndDropsHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	if strings.Contains(text, "before-1") || strings.Contains(text, "after-6") || strings.Contains(text, "--- ") || strings.Contains(text, "@@") {
-		t.Fatalf("diff context window/header rendering=%q", text)
-	}
-	for _, want := range []string{"before-2", "before-6", "old", "new", "after-1", "after-5"} {
+	for _, want := range []string{"before-1", "before-6", "-old", "+new", "after-1", "after-6"} {
 		if !strings.Contains(text, want) {
-			t.Fatalf("diff context missing %q: %q", want, text)
+			t.Fatalf("full diff missing %q: %q", want, text)
+		}
+	}
+	for _, header := range []string{"--- a/context.go", "+++ b/context.go", "@@ -1,13 +1,13 @@"} {
+		if strings.Contains(text, header) {
+			t.Fatalf("full diff leaked transport header %q: %q", header, text)
 		}
 	}
 }
@@ -893,10 +895,10 @@ func TestCommandOutputEllipsisStaysOnLine(t *testing.T) {
 	}
 }
 
-func TestDiffEllipsisStaysOnContentLine(t *testing.T) {
+func TestFullDiffWrapsWithoutTruncatingContent(t *testing.T) {
 	renderer := NewTextRendererWithWidth(false, 80)
 	var output bytes.Buffer
-	line := strings.Repeat("回归验证日志内容", 12)
+	line := strings.Repeat("回归验证日志内容", 12) + "TAIL-MARKER"
 	diff := "--- a/report.md\n+++ b/report.md\n@@ -1 +1 @@\n-old\n+" + line + "\n"
 	payload := []byte(`{"results":[{"path":"report.md","operation":"update","diff":` + strconv.Quote(diff) + `}]}`)
 	if err := renderer.RenderEvent(&output, Event{
@@ -911,11 +913,8 @@ func TestDiffEllipsisStaysOnContentLine(t *testing.T) {
 		if width := displayWidth(outputLine); width > 80 {
 			t.Fatalf("line over budget width=%d: %q", width, outputLine)
 		}
-		if strings.Contains(outputLine, "...") && !strings.Contains(outputLine, "|") {
-			t.Fatalf("diff ellipsis was wrapped away from its content line: %q", text)
-		}
 	}
-	if !strings.Contains(text, "...") {
-		t.Fatalf("long diff was not truncated: %q", text)
+	if strings.Contains(text, "output truncated") || strings.Contains(text, "...") || !strings.Contains(text, "TAIL-MARKER") {
+		t.Fatalf("full diff lost content: %q", text)
 	}
 }

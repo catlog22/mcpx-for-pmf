@@ -16,7 +16,10 @@ func renderFullDiffWithContext(w io.Writer, diff string, options renderOptions) 
 }
 
 func renderDiffDocument(w io.Writer, document diffDocument, options renderOptions, limit int) (bool, error) {
-	lines := visibleDiffLines(document)
+	lines := fullDiffLines(document)
+	if options.diffMode != DiffModeFull {
+		lines = visibleDiffLines(document)
+	}
 	if len(lines) == 0 {
 		return false, nil
 	}
@@ -24,16 +27,22 @@ func renderDiffDocument(w io.Writer, document diffDocument, options renderOption
 		if limit > 0 && index >= limit {
 			return true, nil
 		}
-		if line.kind == diffLineMetadata {
+		if line.kind == diffLineMetadata && options.diffMode != DiffModeFull {
 			if err := writeCodeChild(w, "    | ...", options, options.terminalWidth-8); err != nil {
 				return false, err
 			}
 			continue
 		}
 		prefix := diffLinePrefix(line)
-		value := compactCodeLine(sanitizeTerminalText(prefix + line.text))
+		value := sanitizeTerminalText(prefix + line.text)
+		if options.diffMode != DiffModeFull {
+			value = compactCodeLine(value)
+		}
 		value = styleRenderedDiffLine(value, line.kind, options.colorMode)
-		rendered := truncateDiffLine("    "+value, options.terminalWidth)
+		rendered := "    " + value
+		if options.diffMode != DiffModeFull {
+			rendered = truncateDiffLine(rendered, options.terminalWidth)
+		}
 		if _, err := fmt.Fprintln(w, rendered); err != nil {
 			return false, err
 		}
@@ -57,15 +66,23 @@ func truncateDiffLine(value string, terminalWidth int) string {
 	return truncateRenderedLine(value, bodyWidth)
 }
 
-// visibleDiffLines removes transport-only unified-diff headers and keeps at
-// most five context lines around each changed line. The terminal already
-// prints the file path and change counts in the action row, so repeating
-// ---/+++/@@ makes human observation harder to scan without adding meaning.
+// fullDiffLines keeps every source-content line while omitting unified-diff
+// transport headers already represented by the action row and line numbers.
+func fullDiffLines(document diffDocument) []diffLine {
+	visible := make([]diffLine, 0, len(document.lines))
+	for _, line := range document.lines {
+		switch line.kind {
+		case diffLineFileHeader, diffLineHunkHeader, diffLineMetadata:
+			continue
+		default:
+			visible = append(visible, line)
+		}
+	}
+	return visible
+}
 
-// visibleDiffLines removes transport-only unified-diff headers and keeps at
-// most five context lines around each changed line. The terminal already
-// prints the file path and change counts in the action row, so repeating
-// ---/+++/@@ makes human observation harder to scan without adding meaning.
+// visibleDiffLines is the compact preview projection: it removes transport-only
+// unified-diff headers and keeps at most five context lines around each change.
 func visibleDiffLines(document diffDocument) []diffLine {
 	if len(document.lines) == 0 {
 		return nil

@@ -293,7 +293,22 @@ func saveAgentActivityState(ctx context.Context, tx *sql.Tx, state agentActivity
 }
 
 func (r *Runtime) agentActivitySnapshot(ctx context.Context, remoteSessionID string) (map[string]any, error) {
-	if r == nil || r.state == nil || r.state.DB() == nil {
+	state, err := r.currentAgentActivity(ctx, remoteSessionID)
+	if err != nil || state == nil {
+		return nil, err
+	}
+	return map[string]any{
+		"turn_id":         state.TurnID,
+		"sequence":        state.Sequence,
+		"state":           state.State,
+		"kind":            state.Kind,
+		"summary":         state.Summary,
+		"related_call_id": state.RelatedCallID,
+	}, nil
+}
+
+func (r *Runtime) currentAgentActivity(ctx context.Context, remoteSessionID string) (*agentActivityState, error) {
+	if r == nil || r.state == nil || r.state.DB() == nil || strings.TrimSpace(remoteSessionID) == "" {
 		return nil, nil
 	}
 	r.activityMu.Lock()
@@ -309,14 +324,7 @@ func (r *Runtime) agentActivitySnapshot(ctx context.Context, remoteSessionID str
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{
-		"turn_id":         state.TurnID,
-		"sequence":        state.Sequence,
-		"state":           state.State,
-		"kind":            state.Kind,
-		"summary":         state.Summary,
-		"related_call_id": state.RelatedCallID,
-	}, nil
+	return &state, nil
 }
 
 func isTerminalAgentActivityState(state string) bool {

@@ -237,7 +237,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 			t.Fatalf("decode %s: %v", name, err)
 		}
 		outputSchema, ok := listedTool["outputSchema"].(map[string]any)
-		if !ok || outputSchema["$id"] != "mcpx.structured_content.v1.5" {
+		if !ok || outputSchema["$id"] != "mcpx.structured_content.v2.0" {
 			t.Fatalf("%s must expose the ARC structuredContent OutputSchema: %+v", name, listedTool["outputSchema"])
 		}
 		inputSchema, err := json.Marshal(tool.InputSchema)

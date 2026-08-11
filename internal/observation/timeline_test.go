@@ -2,6 +2,7 @@ package observation
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -400,6 +401,27 @@ func TestTextRendererAllowsFiftyBodyLinesBeforeEllipsis(t *testing.T) {
 	}
 	if strings.Count(text, "line-") != maxInteractionBodyLines || !strings.HasSuffix(text, "─\n\n") {
 		t.Fatalf("body/footer budget output=%q", text)
+	}
+}
+
+func TestTextRendererFullDiffBypassesBodyLineLimit(t *testing.T) {
+	renderer := NewTextRendererWithWidth(false, 80)
+	var diff strings.Builder
+	diff.WriteString("--- a/full.go\n+++ b/full.go\n@@ -0,0 +1,70 @@\n")
+	for index := 1; index <= 70; index++ {
+		fmt.Fprintf(&diff, "+line-%02d\n", index)
+	}
+	payload, err := json.Marshal(map[string]any{"results": []any{map[string]any{"path": "full.go", "operation": "update", "diff": diff.String()}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := renderer.RenderEvent(&output, Event{Tool: "edit", Type: TypeFileChanged, Output: payload}); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	if strings.Contains(text, "output truncated") || !strings.Contains(text, "+line-70") {
+		t.Fatalf("full diff was truncated: %q", text)
 	}
 }
 

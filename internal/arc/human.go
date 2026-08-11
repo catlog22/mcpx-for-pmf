@@ -109,28 +109,28 @@ func renderEditConfirmation(summary string, data map[string]any) (string, bool) 
 	return strings.TrimSpace(builder.String()), true
 }
 
-// renderContextBlock keeps the semantic context visible in hosts that only
-// render content[0].text. The same values remain available in ARC
-// structuredContent.context for machines.
+// renderContextBlock keeps the compact ARC V2 execution context visible in
+// hosts that only render content[0].text. Activity remains server-sourced and
+// is shown as one semantic line rather than legacy reasoning/progress fields.
 func renderContextBlock(display string, context Context) string {
 	context = normalizeContext(context)
 	lines := make([]string, 0, 3)
-	hasNarrative := context.Purpose != "" || context.ReasoningSummary != "" || context.ProgressSummary != "" || context.NextStep != ""
-	for index, group := range [][]struct {
-		label string
-		value string
-	}{
-		{{label: "purpose", value: context.Purpose}},
-		{{label: "reasoning", value: context.ReasoningSummary}, {label: "progress", value: context.ProgressSummary}, {label: "next", value: context.NextStep}},
-		{{label: "plan", value: context.PlanID}, {label: "plan task", value: context.PlanTaskID}, {label: "execution task", value: context.ExecutionTaskID}, {label: "operation", value: context.OperationID}},
-	} {
-		if index == 2 && !hasNarrative {
-			// Internal IDs are useful alongside a model-authored context, but an
-			// operation ID alone must not turn a plain result into a context card.
-			break
-		}
-		parts := make([]string, 0, len(group))
-		for _, field := range group {
+	if purpose := compactHuman(context.Purpose); purpose != "" {
+		lines = append(lines, "- purpose: "+purpose)
+	}
+	if activity := context.Activity; activity != nil {
+		lines = append(lines, "- activity: "+activityKindLabel(activity.Kind)+" "+compactHuman(activity.Summary))
+	}
+	hasSemanticContext := context.Purpose != "" || context.Activity != nil
+	if hasSemanticContext {
+		parts := make([]string, 0, 4)
+		for _, field := range []struct {
+			label string
+			value string
+		}{
+			{label: "plan", value: context.PlanID}, {label: "plan task", value: context.PlanTaskID},
+			{label: "execution task", value: context.ExecutionTaskID}, {label: "operation", value: context.OperationID},
+		} {
 			if value := compactHuman(field.value); value != "" {
 				parts = append(parts, field.label+": "+value)
 			}
@@ -147,6 +147,25 @@ func renderContextBlock(display string, context Context) string {
 		return block
 	}
 	return block + "\n\n" + strings.TrimSpace(display)
+}
+
+func activityKindLabel(kind string) string {
+	switch kind {
+	case "intent":
+		return "Intent"
+	case "hypothesis":
+		return "Hypothesis"
+	case "evidence":
+		return "Evidence"
+	case "conclusion":
+		return "Conclusion"
+	case "next":
+		return "Next"
+	case "status":
+		return "Status"
+	default:
+		return "Activity"
+	}
 }
 
 // renderCommandConfirmation puts the confirmation_token into the model-facing

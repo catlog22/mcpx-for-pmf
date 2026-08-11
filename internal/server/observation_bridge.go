@@ -70,7 +70,11 @@ func (b *observationBridge) Record(ctx context.Context, event observation.Event)
 	}
 	if len(event.Output) > 0 {
 		var truncated bool
-		event.Output, truncated = observation.SanitizeJSON(event.Output, observation.MaxEventBytes)
+		outputLimit := observation.MaxEventBytes
+		if event.Type == observation.TypeFileChanged {
+			outputLimit = observation.MaxFileChangeEventBytes
+		}
+		event.Output, truncated = observation.SanitizeJSON(event.Output, outputLimit)
 		event.Truncated = event.Truncated || truncated
 	}
 	if event.CreatedAt.IsZero() {
