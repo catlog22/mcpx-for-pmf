@@ -99,6 +99,13 @@ MCPX 同时处理两类 Session：
 MCPX 只提供 Streamable HTTP 的 `/mcp` 端点，不提供旧版 HTTP+SSE 的 `/sse`
 或 `/message` 兼容端点。
 
+## 部署教程
+
+- [FRP + Caddy 原生部署：公网暴露 MCPX（非 Docker）](docs/frp-caddy-native.md)
+- [FRP + Caddy + Docker Compose：公网暴露 MCPX（MCPX 保持原生运行）](docs/frp-caddy-docker-compose.md)
+
+两篇教程都保持 MCPX 原生运行，保留对本地 Workspace、工具链、桌面和扩展能力的访问。原生版直接运行 Caddy/frps/frpc；Docker Compose 版只容器化 Caddy/frps/frpc。两篇文档均预留 OpenAI / ChatGPT 配置截图位置。
+
 ## 快速开始
 
 ### 环境要求
