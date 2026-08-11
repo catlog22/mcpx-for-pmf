@@ -1,7 +1,6 @@
 package server
 
 import (
-	"fmt"
 	"strings"
 	"sync"
 
@@ -9,7 +8,7 @@ import (
 	"mcpx/internal/server/guidance"
 )
 
-const agentGuidanceVersion = "1.26"
+const agentGuidanceVersion = "2.0"
 
 // agentGuidanceConfig mirrors guidance.Config for existing call sites.
 type agentGuidanceConfig = guidance.Config
@@ -30,31 +29,16 @@ func loadDefaultAgentGuidance() agentGuidanceConfig {
 	return defaultAgentGuidance
 }
 
-// agentGuidance is the short, stable routing contract shown after session（action=open）.
-// It deliberately contains no workspace path, secret, confirmation token, or
-// concrete tool argument value. It does include the compact edit
-// payload cheat-sheet so agents can construct valid calls even when a host
-// compresses or drops tool schemas from a long conversation context.
+// agentGuidance is the compact engineering contract shown at bootstrap.
+// Tool schemas, Runtime policy and structured recovery remain authoritative for
+// protocol details; guidance only carries stable decision principles.
 func agentGuidance() map[string]any {
 	config := loadDefaultAgentGuidance()
 	return map[string]any{
-		"version":  config.Version,
-		"priority": config.Priority,
-		"summary":  config.Summary,
-		"rules":    config.Rules,
-		"response_contract": map[string]any{
-			"required":         config.ResponseContract.Required,
-			"before_tool_call": config.ResponseContract.BeforeToolCall,
-			"after_tool_call":  config.ResponseContract.AfterToolCall,
-			"final_response":   config.ResponseContract.FinalResponse,
-			"evidence_rule":    config.ResponseContract.EvidenceRule,
-		},
-		"edit_payload": map[string]any{
-			"tool":      config.EditPayload.Tool,
-			"required":  config.EditPayload.Required,
-			"retry":     config.EditPayload.Retry,
-			"edit_item": config.EditPayload.EditItem,
-		},
+		"version":      config.Version,
+		"priority":     config.Priority,
+		"summary":      config.Summary,
+		"rules":        config.Rules,
 		"tool_routing": config.ToolRouting,
 	}
 }
@@ -63,34 +47,10 @@ func agentGuidanceRevision() string { return hashRevision(agentGuidance()) }
 
 func agentGuidanceInstructions() string {
 	config := loadDefaultAgentGuidance()
-	rules := config.Rules
-	lines := []string{
-		"MCPX Agent 指引（高优先级）：",
-		"每个意图都使用对应的 MCPX 工具；不要用 execute 替代文件或 Git 读取。",
-	}
-	for _, rule := range rules {
+	lines := []string{"MCPX Agent 指引（高优先级）："}
+	for _, rule := range config.Rules {
 		lines = append(lines, "- "+rule)
 	}
-	lines = append(lines, "", "用户可见响应契约：")
-	lines = append(lines, "- 重要工具调用前：")
-	for _, item := range config.ResponseContract.BeforeToolCall {
-		lines = append(lines, "  - "+item)
-	}
-	lines = append(lines, "- 每次工具调用后：")
-	for _, item := range config.ResponseContract.AfterToolCall {
-		lines = append(lines, "  - "+item)
-	}
-	lines = append(lines, "- 证据规则："+config.ResponseContract.EvidenceRule)
-	lines = append(lines, "", "edit 参数速查（工具 schema 不可用时使用）：")
-	lines = append(lines, "- 必填："+strings.Join(config.EditPayload.Required, "、"))
-	lines = append(lines, "- 重试："+config.EditPayload.Retry)
-	lines = append(lines, "- edit 项："+fmt.Sprint(config.EditPayload.EditItem["operation"]))
-	for _, key := range []string{"create", "update", "rename", "delete", "replacement", "limit"} {
-		if value, ok := config.EditPayload.EditItem[key].(string); ok {
-			lines = append(lines, "  - "+key+"："+value)
-		}
-	}
-	lines = append(lines, "- 其他模式：超出单批次上限时拆分为多个 edit 调用")
 	return strings.Join(lines, "\n")
 }
 
@@ -139,6 +99,10 @@ func normalizePublicAction(tool string, arguments map[string]any) (string, map[s
 		} else if action == "list" {
 			setView("list")
 		} else if action == "query" {
+			if mode, ok := result["mode"]; ok {
+				result["search_mode"] = mode
+				delete(result, "mode")
+			}
 			setView("context")
 		} else {
 			setView("search")
@@ -155,7 +119,11 @@ func normalizePublicAction(tool string, arguments map[string]any) (string, map[s
 			delete(result, "operation")
 		} else {
 			tool = "observe"
-			setView(action)
+			if action == "status" {
+				setView("task")
+			} else {
+				setView(action)
+			}
 		}
 	case "plan_manage":
 		switch action {
@@ -176,7 +144,7 @@ func normalizePublicAction(tool string, arguments map[string]any) (string, map[s
 	case "environment_inspect":
 		if value, ok := result["save_snapshot"].(bool); ok && value {
 			tool = "environment"
-			result["action"] = "snapshot_create"
+			delete(result, "action")
 			delete(result, "save_snapshot")
 		} else {
 			tool = "environment_read"

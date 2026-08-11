@@ -31,7 +31,7 @@ func TestProgressRecordsPauseStateAndPreviousResult(t *testing.T) {
 	}
 	request := mcpresult.Request(map[string]any{
 		"purpose": "告知用户当前进度并等待确认", "progress_summary": "已完成文件读取，当前不再继续调用工具",
-		"remote_session_id": created.Session.ID, "current": "已定位到供应商表单问题", "result": "read 返回了目标字段代码",
+		"remote_session_id": created.Session.ID, "current": "已定位到供应商表单问题", "result": []any{"read 返回了目标字段代码"},
 		"status": "waiting_for_user", "next": "请用户确认是否继续修改", "related_tool": "read",
 	})
 	wrapped := rt.instrumentTool("progress", rt.toolProgress)
@@ -92,7 +92,7 @@ func TestProgressAcceptsTerminalFailedStateAndRestoresLatestModelState(t *testin
 	wrapped := rt.instrumentTool("progress", rt.toolProgress)
 	result, err := wrapped(context.Background(), mcpresult.Request(map[string]any{
 		"purpose": "向用户汇报当前任务因验证失败而停止", "remote_session_id": created.Session.ID, "status": "failed",
-		"current": "全仓测试仍有两个失败", "result": "internal/server 两个 case 未通过", "next": "修复失败用例后重新验证", "phase": "verification",
+		"current": "全仓测试仍有两个失败", "result": []any{"internal/server 两个 case 未通过"}, "next": "修复失败用例后重新验证", "phase": "verification",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +101,7 @@ func TestProgressAcceptsTerminalFailedStateAndRestoresLatestModelState(t *testin
 		t.Fatalf("progress returned an error: %+v", result)
 	}
 	text, ok := result.Content[0].(*mcp.TextContent)
-	if !ok || !strings.Contains(text.Text, "全仓测试仍有两个失败") || !strings.Contains(text.Text, "internal/server 两个 case 未通过") {
+	if !ok || !strings.Contains(text.Text, "全仓测试仍有两个失败") || !strings.Contains(text.Text, "results: 1") {
 		t.Fatalf("progress display=%v", result.Content)
 	}
 	deadline := time.Now().Add(2 * time.Second)
@@ -118,7 +118,7 @@ func TestProgressAcceptsTerminalFailedStateAndRestoresLatestModelState(t *testin
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	attached := callEnvelope(t, rt.toolSessionOpen, context.Background(), map[string]any{"action": "attach", "remote_session_id": created.Session.ID})
+	attached := callEnvelope(t, rt.toolSessionOpen, context.Background(), map[string]any{"remote_session_id": created.Session.ID})
 	latest, ok := attached["data"].(map[string]any)["latest_model_state"].(map[string]any)
 	if !ok || latest["status"] != "failed" || latest["summary"] != "全仓测试仍有两个失败" {
 		t.Fatalf("latest model state=%+v", attached["data"])
@@ -142,7 +142,7 @@ func TestProgressAllowsResultUpToConfiguredLimit(t *testing.T) {
 	wrapped := rt.instrumentTool("progress", rt.toolProgress)
 	arguments := map[string]any{
 		"purpose": "验证 progress 结果长度限制", "remote_session_id": created.Session.ID, "current": "已完成长度限制验证",
-		"result": strings.Repeat("x", envelope.MaxResultSummaryBytes), "status": "completed",
+		"result": []any{strings.Repeat("x", envelope.MaxResultSummaryBytes)}, "status": "completed",
 	}
 	result, err := wrapped(context.Background(), mcpresult.Request(arguments))
 	if err != nil {
@@ -151,7 +151,7 @@ func TestProgressAllowsResultUpToConfiguredLimit(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("progress result at limit was rejected: %+v", result)
 	}
-	arguments["result"] = strings.Repeat("x", envelope.MaxResultSummaryBytes+1)
+	arguments["result"] = []any{strings.Repeat("x", envelope.MaxResultSummaryBytes+1)}
 	result, err = wrapped(context.Background(), mcpresult.Request(arguments))
 	if err != nil {
 		t.Fatal(err)

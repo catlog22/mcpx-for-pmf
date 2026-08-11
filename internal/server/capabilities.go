@@ -12,7 +12,35 @@ import (
 	"mcpx/internal/remotesession"
 )
 
-const cleanCoreCapabilityVersion = "clean-core-p8"
+const cleanCoreCapabilityVersion = "clean-core-p9"
+
+const clientProtocolVersion = "1"
+
+func clientProtocolCapabilities() map[string]any {
+	states := append([]string(nil), agentActivityStateNames...)
+	return map[string]any{
+		"version": clientProtocolVersion,
+		"activity": map[string]any{
+			"version":               agentActivityProtocolVersion,
+			"transport":             "http",
+			"method":                "POST",
+			"path":                  "/mcp/activity",
+			"auth":                  "same_as_mcp",
+			"content_type":          "application/json",
+			"max_body_bytes":        maxAgentActivityBodyBytes,
+			"heartbeat_interval_ms": agentActivityHeartbeatInterval.Milliseconds(),
+			"sequence":              "required_monotonic_per_turn",
+			"states":                states,
+			"terminal_states":       []string{"turn_completed", "turn_failed"},
+			"summary_semantics":     "public_work_summary_not_chain_of_thought",
+			"current_state": map[string]any{
+				"tool": "observe", "arguments": map[string]any{"view": "session"}, "field": "agent_activity",
+			},
+		},
+	}
+}
+
+func clientProtocolRevision() string { return hashRevision(clientProtocolCapabilities()) }
 
 func capabilityGroups() map[string][]string {
 	return map[string][]string{
@@ -146,10 +174,10 @@ func sessionCapabilityRevision(session *remotesession.Session) string {
 }
 
 // capabilityManifestRevision is independent of a single session role snapshot.
-func capabilityManifestRevision(tools, skills, servers, instructions, guidance any) string {
+func capabilityManifestRevision(tools, skills, servers, instructions, guidance, clientProtocol any) string {
 	return hashRevision(map[string]any{
 		"tools": tools, "skills": skills, "servers": servers, "instructions": instructions,
-		"guidance": guidance,
+		"guidance": guidance, "client_protocol": clientProtocol,
 	})
 }
 
@@ -171,20 +199,6 @@ func (r *Runtime) registeredToolManifest() []map[string]any {
 	return manifest
 }
 
-func summarizeToolManifest(manifest []map[string]any) []map[string]any {
-	result := make([]map[string]any, 0, len(manifest))
-	for _, tool := range manifest {
-		item := map[string]any{
-			"name": tool["name"], "description": tool["description"], "annotations": tool["annotations"],
-		}
-		if safety := toolSafetyMetadata(tool); safety != nil {
-			item["safety"] = safety
-		}
-		result = append(result, item)
-	}
-	return result
-}
-
 func toolSafetyMetadata(tool map[string]any) map[string]any {
 	switch meta := tool["_meta"].(type) {
 	case map[string]any:
@@ -198,7 +212,7 @@ func toolSafetyMetadata(tool map[string]any) map[string]any {
 	}
 }
 
-func (r *Runtime) runtimeToolCapabilities(effective config.Config, session *remotesession.Session, includeSchemas bool) []map[string]any {
+func (r *Runtime) runtimeToolCapabilities(effective config.Config, session *remotesession.Session) []map[string]any {
 	items := machineToolCapabilities(effective, session)
 	manifest := r.registeredToolManifest()
 	byName := make(map[string]map[string]any, len(manifest))
@@ -210,11 +224,6 @@ func (r *Runtime) runtimeToolCapabilities(effective config.Config, session *remo
 	for _, item := range items {
 		name, _ := item["name"].(string)
 		if tool := byName[name]; tool != nil {
-			item["description"] = tool["description"]
-			if includeSchemas {
-				item["input_schema"] = tool["inputSchema"]
-			}
-			item["annotations"] = tool["annotations"]
 			if safety := toolSafetyMetadata(tool); safety != nil {
 				item["safety"] = safety
 			}

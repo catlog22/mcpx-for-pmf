@@ -35,62 +35,131 @@ func TestMutatingRequestRejectsOversizedPurpose(t *testing.T) {
 	}
 }
 
-func TestEveryRegisteredToolExposesSemanticPurpose(t *testing.T) {
+func TestPublicToolSchemasExcludeObservationBookkeeping(t *testing.T) {
 	runtime := newWorkspaceRuntime(t, "demo")
 	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
 	runtime.registerTools(protocol)
+
+	forbidden := []string{"reasoning_summary", "progress_summary", "next_step", "goal", "task_id"}
 	for name, registered := range runtime.listedToolMap() {
-		var schema struct {
-			Properties map[string]any `json:"properties"`
+		schema := decodedToolSchema(t, registered)
+		assertNoSchemaFields(t, name, schema, forbidden)
+		if name != "observe" {
+			assertNoSchemaFields(t, name, schema, []string{"call_id"})
 		}
-		if len(mcpresult.ToolSchemaJSON(registered)) > 0 {
-			if err := json.Unmarshal(mcpresult.ToolSchemaJSON(registered), &schema); err != nil {
-				t.Errorf("tool %q schema: %v", name, err)
-				continue
-			}
+	}
+
+	for _, name := range []string{"workspace", "read", "observe", "runtime_read", "environment_read"} {
+		schema := decodedToolSchema(t, runtime.listedToolMap()[name])
+		properties, _ := schema["properties"].(map[string]any)
+		if properties["purpose"] != nil {
+			t.Errorf("read-only tool %q must not expose purpose: %+v", name, properties)
 		}
-		for _, field := range []string{"purpose", "reasoning_summary", "progress_summary", "next_step", "plan_id", "plan_task_id", "execution_task_id"} {
-			if schema.Properties[field] == nil {
-				t.Errorf("tool %q does not expose %s: %+v", name, field, schema.Properties)
-			}
+	}
+
+	read := decodedToolSchema(t, runtime.listedToolMap()["read"])
+	readProperties, _ := read["properties"].(map[string]any)
+	if readProperties["execution_mode"] != nil {
+		t.Fatalf("read must not expose generic execution_mode: %+v", readProperties)
+	}
+}
+
+func TestEffectfulToolsOwnPurposeContract(t *testing.T) {
+	runtime := newWorkspaceRuntime(t, "demo")
+	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
+	runtime.registerTools(protocol)
+	registered := runtime.listedToolMap()
+
+	for _, name := range []string{"edit", "operation_batch", "skill_call", "mcp_call", "screenshot_capture", "secret_provide"} {
+		schema := decodedToolSchema(t, registered[name])
+		properties, _ := schema["properties"].(map[string]any)
+		if properties["purpose"] == nil || !schemaRequires(schema, "purpose") {
+			t.Errorf("effectful tool %q must explicitly require purpose: %+v", name, schema)
 		}
-		if schema.Properties["goal"] != nil {
-			t.Errorf("tool %q must not expose deprecated goal: %+v", name, schema.Properties)
-		}
-		if schema.Properties["task_id"] != nil {
-			t.Errorf("tool %q must not expose ambiguous task_id: %+v", name, schema.Properties)
+	}
+
+	execute := decodedToolSchema(t, registered["execute"])
+	if branch := actionBranch(execute, "run"); branch == nil || !schemaRequires(branch, "purpose") {
+		t.Fatalf("execute(run) must require purpose: %+v", execute)
+	}
+	moveOut := decodedToolSchema(t, registered["move_out"])
+	if branch := actionBranch(moveOut, "prepare"); branch == nil || !schemaRequires(branch, "purpose") {
+		t.Fatalf("move_out(prepare) must require purpose: %+v", moveOut)
+	}
+	if branch := actionBranch(moveOut, "submit"); branch == nil || schemaRequires(branch, "purpose") {
+		t.Fatalf("move_out(submit) must use frozen server purpose, not client purpose: %+v", moveOut)
+	}
+}
+
+func TestPurposeDescriptionsAreLocalToEffect(t *testing.T) {
+	runtime := newWorkspaceRuntime(t, "demo")
+	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
+	runtime.registerTools(protocol)
+	registered := runtime.listedToolMap()
+
+	checks := map[string]string{
+		"execute":            "用户目标",
+		"edit":               "文件变更",
+		"screenshot_capture": "屏幕",
+		"secret_provide":     "Secret",
+	}
+	for name, fragment := range checks {
+		schema := decodedToolSchema(t, registered[name])
+		properties, _ := schema["properties"].(map[string]any)
+		purpose, _ := properties["purpose"].(map[string]any)
+		description, _ := purpose["description"].(string)
+		if !strings.Contains(description, fragment) {
+			t.Errorf("tool %q purpose description missing %q: %q", name, fragment, description)
 		}
 	}
 }
 
-func TestPurposeSchemaGuidesSafetyBoundariesAndAuthorization(t *testing.T) {
-	runtime := newWorkspaceRuntime(t, "demo")
-	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
-	runtime.registerTools(protocol)
-
-	checks := map[string][]string{
-		"read":     {"只读", "不修改 Workspace"},
-		"execute":  {"按命令真实副作用", "pytest", "npm/pnpm/yarn test", "cargo test", "mvn/gradle test", "dotnet test", "依赖", "用户已授权", "禁止"},
-		"edit":     {"用户已明确要求", "edit 不执行删除", "禁止虚构授权"},
-		"move_out": {"仅冻结/预览", "用户已授权", "confirmation_uuid", "禁止虚构授权"},
+func decodedToolSchema(t *testing.T, tool mcp.Tool) map[string]any {
+	t.Helper()
+	var schema map[string]any
+	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(tool), &schema); err != nil {
+		t.Fatalf("tool %q schema: %v", tool.Name, err)
 	}
-	registered := runtime.listedToolMap()
-	for name, wanted := range checks {
-		tool, ok := registered[name]
-		if !ok {
-			t.Fatalf("tool %q is not registered", name)
-		}
-		var schema struct {
-			Properties map[string]map[string]any `json:"properties"`
-		}
-		if err := json.Unmarshal(mcpresult.ToolSchemaJSON(tool), &schema); err != nil {
-			t.Fatalf("tool %q schema: %v", name, err)
-		}
-		description, _ := schema.Properties["purpose"]["description"].(string)
-		for _, fragment := range wanted {
-			if !strings.Contains(description, fragment) {
-				t.Errorf("tool %q purpose description missing %q: %q", name, fragment, description)
+	return schema
+}
+
+func assertNoSchemaFields(t *testing.T, toolName string, schema map[string]any, forbidden []string) {
+	t.Helper()
+	if properties, _ := schema["properties"].(map[string]any); properties != nil {
+		for _, field := range forbidden {
+			if properties[field] != nil {
+				t.Errorf("tool %q must not expose protocol bookkeeping %q: %+v", toolName, field, properties)
 			}
 		}
 	}
+	branches, _ := schema["oneOf"].([]any)
+	for _, raw := range branches {
+		branch, _ := raw.(map[string]any)
+		if branch != nil {
+			assertNoSchemaFields(t, toolName, branch, forbidden)
+		}
+	}
+}
+
+func schemaRequires(schema map[string]any, field string) bool {
+	required, _ := schema["required"].([]any)
+	for _, raw := range required {
+		if raw == field {
+			return true
+		}
+	}
+	return false
+}
+
+func actionBranch(schema map[string]any, action string) map[string]any {
+	branches, _ := schema["oneOf"].([]any)
+	for _, raw := range branches {
+		branch, _ := raw.(map[string]any)
+		properties, _ := branch["properties"].(map[string]any)
+		actionSchema, _ := properties["action"].(map[string]any)
+		if actionSchema["const"] == action {
+			return branch
+		}
+	}
+	return nil
 }

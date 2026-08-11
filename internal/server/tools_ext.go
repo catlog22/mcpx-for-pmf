@@ -88,9 +88,9 @@ func (r *Runtime) terminalErrorWithCleanMode(envReq envelope.Request, remoteSess
 	case "task_not_found", "task_list_error", "not_found":
 		if strings.Contains(strings.ToLower(code+" "+message), "task") {
 			if clean {
-				addRecoveryAction(&response, "observe", "refresh the available Task identifiers before retrying", map[string]any{
+				addRecoveryAction(&response, "runtime_read", "refresh the project task catalog before retrying", map[string]any{
 					"remote_session_id": remoteSessionID,
-					"view":              "status",
+					"view":              "project",
 				})
 			} else {
 				addRecoveryAction(&response, "task_manage", "refresh the available Task identifiers before retrying", map[string]any{
@@ -366,9 +366,11 @@ func skillItems(skills []skill.Skill) []map[string]any {
 			"priority":         (index + 1) * 10,
 			"required":         forced,
 			"trigger":          map[string]any{"kind": "explicit", "tool": "discover"},
-			"invocation": map[string]any{
-				"tool": "skill_call", "requires_remote_session": true,
-				"arguments": map[string]any{"name": s.Manifest.Name, "arguments": map[string]any{}, "discovery_required": true},
+			"invocation_template": map[string]any{
+				"tool":                   "skill_call",
+				"requires_discovery":     true,
+				"arguments":              map[string]any{"name": s.Manifest.Name, "arguments": map[string]any{}},
+				"required_client_fields": []string{"remote_session_id", "purpose", "discovery_id", "discovery_revision"},
 			},
 		})
 	}

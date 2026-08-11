@@ -129,6 +129,15 @@ func TestCapabilityListIncludesInstructionsSkillsAndRoleState(t *testing.T) {
 	if data["revision"] == "" || data["schema_source"] != "tools/list" {
 		t.Fatalf("capability metadata: %+v", data)
 	}
+	clientProtocol, _ := data["client_protocol"].(map[string]any)
+	activityProtocol, _ := clientProtocol["activity"].(map[string]any)
+	if clientProtocol["version"] != clientProtocolVersion || activityProtocol["version"] != agentActivityProtocolVersion || activityProtocol["path"] != "/mcp/activity" {
+		t.Fatalf("client protocol capability missing: %+v", clientProtocol)
+	}
+	revisions := data["revisions"].(map[string]any)
+	if revisions["client_protocol_revision"] == "" {
+		t.Fatalf("client protocol revision missing: %+v", revisions)
+	}
 	instructions := data["instructions"].(map[string]any)["documents"].([]any)
 	if len(instructions) != 2 {
 		t.Fatalf("instructions: %+v", instructions)
@@ -192,6 +201,9 @@ func TestRuntimeCapabilitiesPublishBuildProvenanceAndNoLegacyRevisionAliases(t *
 		t.Fatalf("runtime provenance missing: %+v", data)
 	}
 	revisions := data["revisions"].(map[string]any)
+	if revisions["client_protocol_revision"] == "" || metadata["client_protocol_revision"] != revisions["client_protocol_revision"] {
+		t.Fatalf("runtime client protocol revision=%+v revisions=%+v", metadata, revisions)
+	}
 	if metadata["version"] != "9.8.7-test" || metadata["build_commit"] != "abc123def" || metadata["build_time"] != "2026-08-09T00:00:00Z" {
 		t.Fatalf("build provenance=%+v", metadata)
 	}

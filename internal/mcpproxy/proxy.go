@@ -51,13 +51,6 @@ func (m *Manager) List() []map[string]any {
 		out = append(out, map[string]any{
 			"name": name, "type": typeName, "state": "configured",
 			"source": "merged_config",
-			"invocation": map[string]any{
-				"tool":      "mcp_call",
-				"arguments": map[string]any{"server": name, "tool": "<upstream_tool>", "arguments": map[string]any{}, "discovery_required": true},
-			},
-			"tool_discovery": map[string]any{
-				"tool": "discover", "arguments": map[string]any{"kind": "mcp", "view": "describe", "server": name, "include_tools": true},
-			},
 		})
 	}
 	return out

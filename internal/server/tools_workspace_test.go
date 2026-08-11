@@ -41,7 +41,7 @@ func TestWorkspaceListDoesNotRequireRemoteSession(t *testing.T) {
 	t.Cleanup(func() { _ = runtime.Close() })
 
 	ctx := auth.ContextWithAuthorization(context.Background(), "Bearer workspace-token")
-	response := callEnvelope(t, runtime.toolWorkspace, ctx, map[string]any{"action": "list"})
+	response := callEnvelope(t, runtime.toolWorkspace, ctx, map[string]any{})
 	if !statusOK(response) {
 		t.Fatalf("workspace list failed: %+v", response)
 	}

@@ -223,32 +223,19 @@ func (r *Runtime) editToolError(envReq envelope.Request, session remotesession.S
 			code = "EDIT_FAILED"
 		}
 		msg := ae.Error()
-		recovery := editRecovery(code, ae)
-		details["recovery"] = recovery
+		details["recovery"] = editRecovery(code, ae)
 		suggestedNext := editSuggestedNext(code, session.ID, ae)
-		details["suggested_next"] = suggestedNext
+		if suggestedNext != nil {
+			details["suggested_next"] = suggestedNext
+		}
 		response := envelope.Fail(envelope.StatusError, envReq.RequestID, session.WorkspaceName, nil, code, msg)
 		for key, value := range details {
 			response.Error.Details[key] = value
 		}
-		recoveryAction := suggestedNext["tool"].(string)
-		if action, ok := suggestedNext["action"].(string); ok && action != "" {
-			recoveryAction = action
-		}
-		arguments := map[string]any{
-			"remote_session_id": session.ID,
-			"path":              ae.Path,
-		}
-		if action, ok := suggestedNext["action"].(string); ok && action != "" {
-			arguments["action"] = action
-		}
-		if maxLines, ok := suggestedNext["max_changed_lines"]; ok {
-			arguments["max_changed_lines"] = maxLines
-		}
-		response.Error.Recovery = &envelope.Recovery{
-			Action:    recoveryAction,
-			Tool:      suggestedNext["tool"].(string),
-			Arguments: arguments,
+		if suggestedNext != nil {
+			tool, _ := suggestedNext["tool"].(string)
+			arguments, _ := suggestedNext["arguments"].(map[string]any)
+			response.Error.Recovery = &envelope.Recovery{Action: tool, Tool: tool, Arguments: argumentsOrEmpty(arguments)}
 		}
 		response.RemoteSessionID = session.ID
 		return r.resultJSON(response)
@@ -263,7 +250,9 @@ func editRecovery(code string, ae *edit.ApplyError) any {
 	case "STALE_REVISION":
 		return "re-read the file to get the latest sha256, update base_sha256, and retry with a new idempotency_key; the old key remains bound to the stale request"
 	case "MATCH_NOT_FOUND", "MATCH_AMBIGUOUS":
-		return "re-read the file and use a longer unique match snippet for the failed replacement"
+		return "re-read the file and use a longer unique match snippet, or use a revision-guarded line range when the target lines are known"
+	case "RANGE_OUT_OF_BOUNDS":
+		return "re-read the file to refresh its current line layout and sha256, then retry the range against that revision"
 	case "TOO_MANY_CHANGES":
 		return map[string]any{
 			"action":            "split_edit",
@@ -285,31 +274,33 @@ func editRecovery(code string, ae *edit.ApplyError) any {
 }
 
 func editSuggestedNext(code, remoteSessionID string, ae *edit.ApplyError) map[string]any {
-	next := map[string]any{
-		"remote_session_id": remoteSessionID,
+	if ae == nil || strings.TrimSpace(ae.Path) == "" {
+		return nil
+	}
+	refreshWindow := func(reason string) map[string]any {
+		return nextActionWithReason("read", reason, map[string]any{
+			"remote_session_id": remoteSessionID,
+			"view":              "file",
+			"path":              ae.Path,
+			"mode":              "window",
+			"offset":            0,
+			"limit":             1,
+		})
 	}
 	switch code {
 	case "STALE_REVISION":
-		next["tool"] = "read"
-		if ae != nil && ae.Path != "" {
-			next["path"] = ae.Path
-		}
-		if ae != nil && ae.Current != "" {
-			next["note"] = "use current_sha256 as base_sha256 and generate a new idempotency_key; the old key is bound to the stale request"
-		}
-	case "TOO_MANY_CHANGES":
-		next["tool"] = "edit"
-		next["action"] = "split_edit"
-		next["max_changed_lines"] = edit.MaxChangedLines
-		next["note"] = "split edits so total +/- lines <= 1000"
+		return refreshWindow("refresh the current file sha256 before regenerating the edit")
+	case "MATCH_NOT_FOUND", "MATCH_AMBIGUOUS", "RANGE_OUT_OF_BOUNDS":
+		return nextActionWithReason("read", "refresh the current file content before regenerating the update", map[string]any{
+			"remote_session_id": remoteSessionID,
+			"view":              "file",
+			"path":              ae.Path,
+		})
 	case "MOVE_OUT_REQUIRED":
-		next["tool"] = "move_out"
-		next["action"] = "prepare"
-		next["purpose"] = "prepare the user-requested workspace move to managed quarantine"
+		return refreshWindow("read the current file sha256 before preparing move_out")
 	default:
-		next["tool"] = "edit"
+		return nil
 	}
-	return next
 }
 
 func (r *Runtime) observeCleanEdit(ctx context.Context, envReq envelope.Request, session remotesession.Session, editID string, result edit.BatchResult) {

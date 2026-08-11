@@ -303,6 +303,13 @@ func projectMemoryEvent(row memoryEventRow, location *time.Location) (MemoryItem
 		item.Type = "progress"
 		item.Summary = firstMemoryString(input, result, "current")
 		item.Result = firstMemoryString(input, result, "result")
+		if item.Result == "" {
+			if items := progressResultStrings(input["result"]); len(items) > 0 {
+				item.Result = strings.Join(items, "\n")
+			} else if items := progressResultStrings(result["result"]); len(items) > 0 {
+				item.Result = strings.Join(items, "\n")
+			}
+		}
 		item.Status = firstMemoryString(input, result, "status")
 		item.Next = firstMemoryString(input, result, "next")
 		item.RelatedTool = firstMemoryString(input, result, "related_tool")

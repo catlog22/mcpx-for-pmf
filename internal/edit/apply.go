@@ -84,8 +84,8 @@ func ApplyBatchWithHook(req BatchRequest, beforeWrite func(BatchResult) error) (
 			} else if err != nil && !os.IsNotExist(err) {
 				return BatchResult{}, err
 			}
-			if len(item.Replacements) > 0 {
-				return BatchResult{}, &ApplyError{Code: "INVALID_INPUT", Message: "create requires content, not replacements", Path: path, Index: fileIndex, Err: ErrInvalidInput}
+			if len(item.Replacements) > 0 || item.Range != nil {
+				return BatchResult{}, &ApplyError{Code: "INVALID_INPUT", Message: "create requires content, not replacements or range", Path: path, Index: fileIndex, Err: ErrInvalidInput}
 			}
 			logical := stripUTF8BOM(normalizeNewlines(item.Content))
 			format := file.DetectFormat([]byte(item.Content))
@@ -284,6 +284,15 @@ func ApplyBatchWithHook(req BatchRequest, beforeWrite func(BatchResult) error) (
 }
 
 func applyUpdate(logical string, item FileEdit, path string, fileIndex int) (string, error) {
+	if item.Range != nil {
+		if len(item.Replacements) > 0 || strings.TrimSpace(item.Content) != "" {
+			return "", &ApplyError{Code: "INVALID_INPUT", Message: "range, content and replacements are mutually exclusive", Path: path, Index: fileIndex, Err: ErrInvalidInput}
+		}
+		if strings.TrimSpace(item.BaseSHA256) == "" {
+			return "", &ApplyError{Code: "INVALID_INPUT", Message: "range update requires base_sha256", Path: path, Index: fileIndex, Err: ErrInvalidInput}
+		}
+		return applyLineRange(logical, *item.Range, path, fileIndex)
+	}
 	if len(item.Replacements) > 0 {
 		if strings.TrimSpace(item.Content) != "" {
 			return "", &ApplyError{Code: "INVALID_INPUT", Message: "content and replacements are mutually exclusive", Path: path, Index: fileIndex, Err: ErrInvalidInput}
@@ -292,6 +301,48 @@ func applyUpdate(logical string, item FileEdit, path string, fileIndex int) (str
 	}
 	// Full content replace
 	return stripUTF8BOM(normalizeNewlines(item.Content)), nil
+}
+
+func applyLineRange(logical string, lineRange LineRange, path string, fileIndex int) (string, error) {
+	startLine, endLine := lineRange.StartLine, lineRange.EndLine
+	if startLine < 1 || endLine < startLine {
+		return "", &ApplyError{Code: "INVALID_INPUT", Message: "range requires 1-based start_line <= end_line", Path: path, Index: fileIndex, Err: ErrInvalidInput}
+	}
+	lineCount := strings.Count(logical, "\n")
+	if !strings.HasSuffix(logical, "\n") || logical == "" {
+		lineCount++
+	}
+	if endLine > lineCount {
+		return "", &ApplyError{Code: "RANGE_OUT_OF_BOUNDS", Message: fmt.Sprintf("range ends at line %d but file has %d line(s)", endLine, lineCount), Path: path, Index: fileIndex, Err: ErrInvalidInput}
+	}
+	startOffset, endOffset := 0, len(logical)
+	endHadNewline := false
+	lineStart := 0
+	for line := 1; line <= endLine; line++ {
+		relativeEnd := strings.IndexByte(logical[lineStart:], '\n')
+		lineEnd := len(logical)
+		hasNewline := relativeEnd >= 0
+		if hasNewline {
+			lineEnd = lineStart + relativeEnd
+		}
+		if line == startLine {
+			startOffset = lineStart
+		}
+		if line == endLine {
+			endOffset = lineEnd
+			endHadNewline = hasNewline
+			if hasNewline {
+				endOffset++
+			}
+			break
+		}
+		lineStart = lineEnd + 1
+	}
+	replacement := stripUTF8BOM(normalizeNewlines(lineRange.Replacement))
+	if endHadNewline && replacement != "" && !strings.HasSuffix(replacement, "\n") {
+		replacement += "\n"
+	}
+	return logical[:startOffset] + replacement + logical[endOffset:], nil
 }
 
 func applyReplacements(logical string, reps []Replacement, path string, fileIndex int) (string, error) {

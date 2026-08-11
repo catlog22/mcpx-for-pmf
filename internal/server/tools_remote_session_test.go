@@ -95,7 +95,7 @@ func TestWorkspaceRevisionSingleRootUnchanged(t *testing.T) {
 	}
 }
 
-func TestSessionAttachIncludesPendingConfirmations(t *testing.T) {
+func TestSessionResumeIncludesPendingConfirmations(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	rt.cfg.Security.Commands.Confirm = append(rt.cfg.Security.Commands.Confirm, `^echo\b`)
 	principal, err := rt.principalFromContext(context.Background())
@@ -126,12 +126,11 @@ func TestSessionAttachIncludesPendingConfirmations(t *testing.T) {
 		t.Fatalf("command confirmation = %+v", commandResponse)
 	}
 
-	attach := mcpresult.Request(map[string]any{
-		"intent":            "attach the existing session",
+	resume := mcpresult.Request(map[string]any{
+		"intent":            "resume the existing session",
 		"remote_session_id": created.Session.ID,
-		"action":            "attach",
 	})
-	attachResult, err := rt.toolSession(context.Background(), attach)
+	attachResult, err := rt.toolSession(context.Background(), resume)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +138,7 @@ func TestSessionAttachIncludesPendingConfirmations(t *testing.T) {
 	attachData, _ := attachResponse["data"].(map[string]any)
 	items, ok := attachData["pending_confirmations"].([]any)
 	if !ok || len(items) == 0 {
-		t.Fatalf("session attach must expose pending confirmations: %+v", attachData)
+		t.Fatalf("session resume must expose pending confirmations: %+v", attachData)
 	}
 	item := items[0].(map[string]any)
 	if item["command"] != "echo pending" || item["purpose"] != "inspect pending" || item["user_confirmed_required"] != true {
@@ -150,9 +149,8 @@ func TestSessionAttachIncludesPendingConfirmations(t *testing.T) {
 func TestRemoteSessionNotFoundExplainsExactCopy(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	request := mcpresult.Request(map[string]any{
-		"intent":            "attach a missing remote session",
+		"intent":            "resume a missing remote session",
 		"remote_session_id": "rs-does-not-exist",
-		"action":            "attach",
 	})
 
 	result, err := rt.toolSession(context.Background(), request)

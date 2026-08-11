@@ -84,16 +84,24 @@ func (r *Runtime) toolWorkspaceMoveOutPrepare(ctx context.Context, req *mcp.Call
 	if fail != nil {
 		return fail, nil
 	}
-	if workspace := strings.TrimSpace(stringPayload(envReq.Payload, "workspace")); workspace != "" && workspace != session.WorkspaceName {
-		return r.moveOutError(envReq, session, "WORKSPACE_MISMATCH", "workspace does not match the registered remote session", map[string]any{"requested_workspace": workspace, "session_workspace": session.WorkspaceName})
-	}
-	key := strings.TrimSpace(stringPayload(envReq.Payload, "idempotency_key"))
-	if key == "" {
-		return r.moveOutError(envReq, session, "INVALID_REQUEST", "idempotency_key is required", map[string]any{"field": "idempotency_key"})
-	}
 	targets, err := parseMoveOutTargets(envReq.Payload)
 	if err != nil {
 		return r.moveOutError(envReq, session, "INVALID_REQUEST", err.Error(), nil)
+	}
+	targets, err = r.inferMoveOutTargetKinds(session, targets)
+	if err != nil {
+		return r.moveOutError(envReq, session, moveOutErrorCode(err), moveOutErrorMessage(err), moveOutErrorDetails(err))
+	}
+	key := strings.TrimSpace(stringPayload(envReq.Payload, "idempotency_key"))
+	if key == "" {
+		key = "auto:" + strings.TrimSpace(envReq.RequestID)
+		if key == "auto:" {
+			generated, keyErr := deletion.NewUUID()
+			if keyErr != nil {
+				return r.moveOutError(envReq, session, "MOVE_OUT_ID_ERROR", keyErr.Error(), nil)
+			}
+			key = "auto:" + generated
+		}
 	}
 	if len(targets) > moveOutRequestMaxTargets {
 		return r.moveOutError(envReq, session, "LIMIT_EXCEEDED", fmt.Sprintf("move-out targets exceed maximum %d", moveOutRequestMaxTargets), map[string]any{"max_targets": moveOutRequestMaxTargets})
@@ -566,7 +574,7 @@ func parseMoveOutTargets(payload map[string]any) ([]deletion.Target, error) {
 	}
 	var targets []deletion.Target
 	if err := json.Unmarshal(b, &targets); err != nil || len(targets) == 0 {
-		return nil, errors.New("targets must contain at least one path, kind and expected_sha256")
+		return nil, errors.New("targets must contain at least one path")
 	}
 	seen := map[string]bool{}
 	for i := range targets {
@@ -575,19 +583,7 @@ func parseMoveOutTargets(payload map[string]any) ([]deletion.Target, error) {
 			return nil, fmt.Errorf("targets[%d]: %w", i, err)
 		}
 		targets[i].Path = canonical
-		switch targets[i].Kind {
-		case "file":
-			if targets[i].ExpectedSHA256 == "" {
-				return nil, fmt.Errorf("targets[%d].expected_sha256 is required for file", i)
-			}
-		case "directory":
-			if targets[i].ExpectedSHA256 != "" {
-				return nil, fmt.Errorf("targets[%d].expected_sha256 is not supported for directory; directory contents are intentionally not enumerated", i)
-			}
-		case "symlink":
-		default:
-			return nil, fmt.Errorf("targets[%d].kind must be file, directory or symlink", i)
-		}
+		targets[i].Kind = ""
 		targets[i].ExpectedSHA256 = normalizeSHA(targets[i].ExpectedSHA256)
 		if seen[canonical] {
 			return nil, fmt.Errorf("duplicate move-out target %q", canonical)
@@ -601,6 +597,34 @@ func parseMoveOutTargets(payload map[string]any) ([]deletion.Target, error) {
 		}
 	}
 	return targets, nil
+}
+
+func (r *Runtime) inferMoveOutTargetKinds(session remotesession.Session, targets []deletion.Target) ([]deletion.Target, error) {
+	cfg := r.effectiveConfig(session.WorkspacePath)
+	resolved := append([]deletion.Target(nil), targets...)
+	for i := range resolved {
+		_, info, err := lstatMoveOutTarget(session.WorkspacePath, resolved[i].Path, cfg)
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			resolved[i].Kind = "symlink"
+		case info.IsDir():
+			resolved[i].Kind = "directory"
+			if resolved[i].ExpectedSHA256 != "" {
+				return nil, &moveOutValidationError{Code: "INVALID_REQUEST", Message: "expected_sha256 is not supported for directory; directory contents are intentionally not enumerated", Path: resolved[i].Path}
+			}
+		case info.Mode().IsRegular():
+			resolved[i].Kind = "file"
+			if resolved[i].ExpectedSHA256 == "" {
+				return nil, &moveOutValidationError{Code: "INVALID_REQUEST", Message: "expected_sha256 from read is required for regular files", Path: resolved[i].Path}
+			}
+		default:
+			return nil, &moveOutValidationError{Code: "MOVE_OUT_FILE_ONLY", Message: "only regular files, directories or symlink entries can be moved out", Path: resolved[i].Path}
+		}
+	}
+	return resolved, nil
 }
 
 func (r *Runtime) freezeMoveOutManifest(session remotesession.Session, targets []deletion.Target) (deletion.Manifest, error) {
@@ -666,7 +690,7 @@ func validateFrozenMoveOutTarget(workspacePath string, target deletion.Target, c
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
 		if target.Kind != "symlink" {
-			return &moveOutValidationError{Code: "MOVE_OUT_SYMLINK_ONLY", Message: "target is a symlink; use kind=symlink so the link entry is explicitly approved", Path: target.Path}
+			return &moveOutValidationError{Code: "STALE_REVISION", Message: "target changed to a symlink after prepare type inference", Path: target.Path}
 		}
 		return nil
 	}

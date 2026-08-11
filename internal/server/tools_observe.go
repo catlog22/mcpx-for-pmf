@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -9,11 +10,10 @@ import (
 	"mcpx/internal/observation"
 )
 
-// toolObserve is the clean-core observation entry point. Plan Task IDs and
-// execution Task IDs are distinct public concepts and are never inferred from
-// an ambiguous task_id field.
+// toolObserve is the clean-core observation entry point. The Runtime infers a
+// view only when the target is unique; otherwise the client must choose one.
 func (r *Runtime) toolObserve(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	view := publicSelector(req, "view")
+	req, view := canonicalObserveRequest(req)
 	args := mcpresult.Arguments(req)
 	planTaskID := stringPayload(args, "plan_task_id")
 	executionTaskID := stringPayload(args, "execution_task_id")
@@ -23,14 +23,14 @@ func (r *Runtime) toolObserve(ctx context.Context, req *mcp.CallToolRequest) (*m
 	switch view {
 	case "session":
 		return r.toolObserveStatus(ctx, req)
-	case "status":
+	case "task":
 		if planTaskID != "" {
-			return r.observeTaskIDError(ctx, req, "EXECUTION_TASK_ID_REQUIRED", "view=status requires execution_task_id; use view=plan for plan_task_id")
+			return r.observeTaskIDError(ctx, req, "EXECUTION_TASK_ID_REQUIRED", "view=task requires execution_task_id; use view=plan for plan_task_id")
 		}
 		return r.toolObserveTask(ctx, req, "status")
 	case "plan":
 		if executionTaskID != "" {
-			return r.observeTaskIDError(ctx, req, "PLAN_TASK_ID_REQUIRED", "view=plan requires plan_task_id; use view=status for execution_task_id")
+			return r.observeTaskIDError(ctx, req, "PLAN_TASK_ID_REQUIRED", "view=plan requires plan_task_id; use view=task for execution_task_id")
 		}
 		return r.toolObservePlan(ctx, req)
 	case "history":
@@ -48,8 +48,68 @@ func (r *Runtime) toolObserve(ctx context.Context, req *mcp.CallToolRequest) (*m
 		}
 		return r.toolWorkspaceChanges(ctx, req)
 	default:
+		if view == "" {
+			envReq, _, fail := r.remoteRequest(ctx, req)
+			if fail != nil {
+				return fail, nil
+			}
+			return r.terminalError(envReq, envReq.RemoteSessionID, envReq.Workspace, "ambiguous_request", "observe view cannot be inferred uniquely; choose session, task, plan, history, changes, logs, or diff")
+		}
 		return r.invalidAction(ctx, req, "observe", view)
 	}
+}
+
+func canonicalObserveRequest(req *mcp.CallToolRequest) (*mcp.CallToolRequest, string) {
+	if view := publicSelector(req, "view"); view != "" {
+		return req, view
+	}
+	args := mcpresult.Arguments(req)
+	candidates := map[string]bool{}
+	if stringPayload(args, "execution_task_id") != "" {
+		candidates["task"] = true
+	}
+	if stringPayload(args, "plan_task_id") != "" {
+		candidates["plan"] = true
+	}
+	if stringPayload(args, "edit_id") != "" {
+		candidates["diff"] = true
+	}
+	if hasObserveArgument(args, "call_id", "event_ids", "request_ids", "operation_ids", "plan_task_ids", "execution_task_ids", "keyword", "kinds", "statuses", "created_after", "created_before") {
+		candidates["history"] = true
+	}
+	if len(candidates) == 0 {
+		if hasObserveArgument(args, "limit", "offset", "cursor", "include_diff", "path", "stdout_offset", "stderr_offset") {
+			return req, ""
+		}
+		return forwardedRequest(req, map[string]any{"view": "session"}), "session"
+	}
+	if len(candidates) != 1 {
+		return req, ""
+	}
+	for view := range candidates {
+		return forwardedRequest(req, map[string]any{"view": view}), view
+	}
+	return req, ""
+}
+
+func hasObserveArgument(args map[string]any, keys ...string) bool {
+	for _, key := range keys {
+		if value, ok := args[key]; ok && value != nil {
+			switch typed := value.(type) {
+			case string:
+				if typed != "" {
+					return true
+				}
+			case []any:
+				if len(typed) > 0 {
+					return true
+				}
+			default:
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (r *Runtime) toolObservePlan(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -85,6 +145,9 @@ func (r *Runtime) toolObserveStatus(ctx context.Context, req *mcp.CallToolReques
 		"remote_session_id": session.ID,
 		"workspace":         session.WorkspaceName,
 		"session_status":    session.Status,
+	}
+	if activity := r.agentActivitySnapshot(session.ID, time.Now().UTC()); activity != nil {
+		data["agent_activity"] = activity
 	}
 	if r.observation != nil && r.observation.store != nil {
 		events, _, err := r.observation.store.Query(ctx, observation.HistoryQuery{

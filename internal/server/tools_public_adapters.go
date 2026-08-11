@@ -24,25 +24,24 @@ func publicDispatch(req *mcp.CallToolRequest, key, value string) *mcp.CallToolRe
 }
 
 func (r *Runtime) toolWorkspace(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	ctx = withCleanCoreRequest(ctx)
-	if publicSelector(req, "action") == "list" {
-		return r.toolWorkspaceList(ctx, req)
-	}
-	envReq, _, fail := r.remoteRequest(ctx, req)
-	if fail != nil {
-		return fail, nil
-	}
-	return r.terminalError(envReq, "", "", "bad_request", "action must be list")
+	return r.toolWorkspaceList(withCleanCoreRequest(ctx), req)
 }
 
-// toolSession consolidates open + lifecycle transitions behind action.
+// toolSession defaults to open/resume. Supplying a close mode uniquely selects
+// close, so clients only need an action when they want to be explicit.
 func (r *Runtime) toolSession(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	ctx = withCleanCoreRequest(ctx)
 	action := publicSelector(req, "action")
+	if action == "" {
+		if publicSelector(req, "mode") != "" {
+			action = "close"
+		} else {
+			action = "open"
+		}
+		req = publicDispatch(req, "action", action)
+	}
 	switch action {
 	case "open":
-		return r.toolSessionOpen(ctx, req)
-	case "attach":
 		return r.toolSessionOpen(ctx, req)
 	case "close":
 		return r.toolRemoteSessionClose(ctx, req)
@@ -51,19 +50,12 @@ func (r *Runtime) toolSession(ctx context.Context, req *mcp.CallToolRequest) (*m
 		if fail != nil {
 			return fail, nil
 		}
-		return r.terminalError(envReq, envReq.RemoteSessionID, envReq.Workspace, "bad_request", "action must be open, close, or attach")
+		return r.terminalError(envReq, envReq.RemoteSessionID, envReq.Workspace, "bad_request", "action must be open or close")
 	}
 }
 
-// toolEnvironment is write-side snapshot create (action=snapshot_create).
+// toolEnvironment is the single write-side environment operation: save a snapshot.
 func (r *Runtime) toolEnvironment(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if action := publicSelector(req, "action"); action != "" && action != "snapshot_create" {
-		envReq, _, remote, fail := r.changeRequest(ctx, req, false)
-		if fail != nil {
-			return fail, nil
-		}
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "bad_request", "action must be snapshot_create")
-	}
 	return r.toolEnvironmentSnapshotCreate(ctx, req)
 }
 
@@ -217,17 +209,44 @@ func (r *Runtime) toolSourceRead(ctx context.Context, req *mcp.CallToolRequest) 
 }
 
 func (r *Runtime) toolRuntimeRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return r.toolRuntimeInspect(ctx, publicDispatch(req, "action", publicSelector(req, "view")))
+	req, view := canonicalRuntimeReadRequest(req)
+	return r.toolRuntimeInspect(ctx, publicDispatch(req, "action", view))
+}
+
+func canonicalRuntimeReadRequest(req *mcp.CallToolRequest) (*mcp.CallToolRequest, string) {
+	if view := publicSelector(req, "view"); view != "" {
+		return req, view
+	}
+	args := mcpresult.Arguments(req)
+	if strings.TrimSpace(stringPayload(args, "anchor_path")) != "" {
+		return publicDispatch(req, "view", "instructions"), "instructions"
+	}
+	if paths, _ := args["paths"].([]any); len(paths) > 0 {
+		return publicDispatch(req, "view", "instructions"), "instructions"
+	}
+	return publicDispatch(req, "view", "capabilities"), "capabilities"
 }
 
 func (r *Runtime) toolEnvironmentRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	req, view := canonicalEnvironmentReadRequest(req)
 	updates := map[string]any{"save_snapshot": false}
-	if publicSelector(req, "view") == "compare" {
+	if view == "compare" {
 		if snapshotID, ok := mcpresult.Arguments(req)["snapshot_id"]; ok {
 			updates["compare_to"] = snapshotID
 		}
 	}
 	return r.toolEnvironmentInspect(ctx, forwardedRequest(req, updates))
+}
+
+func canonicalEnvironmentReadRequest(req *mcp.CallToolRequest) (*mcp.CallToolRequest, string) {
+	if view := publicSelector(req, "view"); view != "" {
+		return req, view
+	}
+	view := "current"
+	if strings.TrimSpace(stringPayload(mcpresult.Arguments(req), "snapshot_id")) != "" {
+		view = "compare"
+	}
+	return publicDispatch(req, "view", view), view
 }
 
 func (r *Runtime) toolEnvironmentSnapshotCreate(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {

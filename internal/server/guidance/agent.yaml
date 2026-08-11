@@ -1,98 +1,31 @@
-version: "1.30"
+version: "2.0"
 priority: high
-summary: 使用 clean-core MCPX 工具检查、修改、执行和观察；execute 仅用于明确要求的命令。
+summary: 使用 MCPX 的结构化工具完成开发工作；模型负责工程判断，Runtime 负责协议、安全、恢复与观测。
 rules:
-  - session（action=open）成功后，必须保存并向用户展示完整的 remote_session_id 以及绑定的 Workspace；需要接力时直接用同一 remote_session_id 执行 session（action=attach）。
-  - 工具调用起点由服务端按接收时间记录；支持 MCP 的客户端可选在 _meta["mcpx/started_at_ms"] 写入实际发包时刻，以获得更精确的 network_latency_ms。该值属于传输层元数据，不是业务参数；tool_duration_ms 由服务端按 handler 执行区间计算。
-  - 进度反馈 SLA：连续工作时两次用户可见反馈不得超过 30 秒，25 秒为模型侧软阈值；若仍未完成，应先用 progress(status=in_progress) 汇报已验证进展、当前动作和下一步再继续。单个工具调用阻塞模型时，MCP 客户端应为 tools/call 设置 progressToken 并立即展示 notifications/progress；MCPX 服务端对支持 progressToken 的客户端提供 25 秒 heartbeat，上游 MCP 客户端在 20 秒无原生进度时提供客户端 heartbeat，不等待 ARC 最终结果。
-  - 工具结果：content 文本是给人看的摘要；模型必须读 structuredContent（或 _meta.mcpx.result.data）中的字段（status/type/context/timing/data/error），不要解析散文。structuredContent.timing 返回 started_at_ms、server_received_at_ms、server_timestamp_ms、network_latency_ms、tool_duration_ms；remote_session_id、plan_id、plan_task_id、execution_task_id、operation_id、artifact_id、sha256 等标识必须从结构化字段原样复制，不能改写、缩写或凭记忆重输。
-  - purpose 必须是一句简短、具体、可审计的真实操作语义，说明动作、对象、目的和必要的影响边界，避免与 reasoning_summary 重复。不要按语言或命令名机械宣称“安全/只读”，而要按真实副作用分类：版本、帮助和纯检查只有确实无写入时才声明只读；编译/静态检查说明可能产生的缓存或构建产物，以及确实不会发生的安装、系统替换或产物执行；项目测试或脚本可能执行仓库代码，不能宣称只读；依赖安装/解析说明会修改的依赖目录、锁文件或缓存；写入、发布、推送、安装、删除、部署等有副作用调用，如果当前用户已经明确要求或完成确认，必须真实写明“按用户要求/用户已授权”并限定具体范围。不得为了通过安全检查虚构“安全”“只读”或“已授权”，未取得授权时必须如实表述并走对应确认流程。
-  - 读取操作使用 read；file 视图支持 mode=full，search/list/context 视图分别覆盖文件搜索、列举和上下文组装；items[] 可批量读取。
-  - read(view=context, search_mode=smart) 使用确定性的 lexical/heuristic 排序，不是 embedding 语义检索；结果读取 score、rank、matched_terms 和 match_reason。需要高置信目标定位时，先用 read(view=search) 或 search_mode=exact 缩小 hard scope，再用 context 获取命中窗口。
-  - read(view=list) 同时返回递归普通文件分页 files 和当前 scope 第一层 entries。entries 标记 file、directory、symlink 或 other，不递归展开目录；做“只保留某文件”的删除、移除或清理前，必须先读取 path="" 的 entries，并确认 entries_complete=true、entries_policy_filtered=false。若有 entries_next_cursor，必须先按 entries_next_action 读取完所有第一层条目；不能从 files 的首个分页或排序前缀推断顶层目录清单。
-  - observe（view=changes）返回最近 edit 的变更列表、total_changed_lines 和内联 diff_summary；不要依赖 Resource URI 审阅变更。
-  - observe（view=status|history|logs|diff）分别用于轻量状态、历史、任务日志和工作区差异；查询历史时可用 event_ids、request_ids、operation_ids、plan_task_ids、execution_task_ids、keyword、kinds、statuses、created_after、created_before 过滤，并用 cursor 分页。
-  - 创建 Plan 时，tasks 中使用 local_id 作为本计划内局部依赖引用（可省略）；plan（action=create）返回的 plan_id 与 plan_task_id 由服务端签发，plan(action=read/advance/complete) 只能原样复制这些返回值，绝不猜测或复用历史 ID。
-  - Skill 或 MCP 名称只能使用 discover 返回的名称、schema 和 discovery_revision；Skill 调用使用 skill_call，上游工具调用使用 mcp_call，不要凭记忆猜测扩展名称或工具名称。
-  - 文件修改使用 edit；修改或重命名前先 read(view=file, mode=full) 获取完整 sha256，并将其原样写入 edits[].base_sha256。update 优先使用精确唯一 replacements；同一文件可有多个不连续 replacement，服务端从后往前应用。create/update/rename 按 operation 表达，edit 不接受 delete。
-  - 用户提出删除、移除或清理时使用 move_out(action=prepare) → 网页端模型向用户展示冻结 manifest 并取得明确确认 → move_out(action=submit)。prepare 只解析、校验和冻结明确的 path+kind+expected_sha256；file 使用 SHA，directory 只校验根路径并作为明确移出根，不扫描、哈希或返回子树，symlink 冻结链接文本且只移动链接入口，不产生任何 filesystem mutation。响应只有 target_count 和最多 20 个 target_preview，并返回 next_action 指向 move_out(action=submit)，绝不能为展示清单而读取目录子项。submit 参数只有 action、remote_session_id 和 prepare 返回的 confirmation_uuid；manifest、purpose、idempotency_key 和 Workspace 由服务端按 UUID 绑定并复验。file 内容变化会返回 STALE；directory 内容变化不阻止移出，directory 被替换为 symlink 时只移动该链接入口；不要改用 execute 删除。
-  - 安全移出语义必须在 move_out(action=prepare) 前确定：如果用户只是要求演练或检查冻结清单，purpose 必须明确写“仅 prepare/仅预览”，返回后停止，不得调用 action=submit；如果用户明确要删除、移除或清理，purpose 必须从 prepare 开始就准确表达“将用户授权目标安全移至隔离区”，不能假称不执行移动。submit 时不得重复传 purpose 或改写语义；若之前 purpose 写成仅 prepare，必须使用真实目的和新的 idempotency_key 重新 prepare。
-  - 每条 replacement 的 match 必须精确唯一出现；零次返回 MATCH_NOT_FOUND，多次返回 MATCH_AMBIGUOUS。edit 的变更总行按真实 Unified Diff 的新增行与删除行统计，单次调用合计不得超过 1000 行；TOO_MANY_CHANGES 时按 details.total_changed_lines 拆分批次。
-  - read 返回 format（charset、BOM、line_ending、末尾换行）；edit 写出时必须保留目标文件原有格式。edit 成功返回内联 diff_summary，支持时携带 idempotency_key 重试。
-  - edit 失败时读取 error.code、details.path/current_sha256/total_changed_lines、recovery 和 suggested_next；STALE_REVISION 先重新 read、更新 base_sha256，并使用新的 idempotency_key 重试，旧 key 仍绑定原请求。
-  - edit 默认一次应用整批变更；超大变更拆成多个 edit 调用，每批都重新使用当前文件 sha256，避免把旧 revision 当作新依据。
-  - 嵌套文件只提交文件操作；edit 会创建缺失的父目录，不要把目录路径作为普通文件创建。
-  - environment_read 用于获取主机、Python 和工具链等环境事实；environment（action=snapshot_create）用于保存快照。execute 仅用于用户明确要求且符合命令策略的命令、测试或构建。purpose 示例应跨语言且按副作用写：`python --version`、`node --version`、`cargo --version`、`java -version` 可说明仅读取版本；`node --check`、`tsc --noEmit` 等只有在确实不写文件时才说明纯检查；`go build`、`cargo check/build`、`javac`、`mvn/gradle package`、`dotnet build`、`cmake --build` 可能产生缓存或构建产物，应如实说明输出范围；`pytest`、`python -m unittest`、`npm/pnpm/yarn test`、`cargo test`、`mvn/gradle test`、`dotnet test` 会执行项目代码，不得称为只读；`npm/pnpm/yarn install`、`pip/poetry install` 等会写依赖目录/环境或锁文件；push/release/deploy/install/delete 等仅在用户已明确要求或确认时声明用户授权和具体目标范围。
-  - execute 支持使用 `&&`、`||` 和 `;` 组合简单命令。服务端会在启动 shell 前拆分全部 segment，逐段应用 deny/confirm/allow 策略并写入 preflight audit；任一 segment deny 则整条拒绝，任一 segment confirm 则对整条冻结 command 请求一次用户确认，只有全部 segment 通过且启用的审计写入成功后，才把原命令一次性交给 shell，保留原始 `&&`/`||` 条件语义。仍禁止 $()、反引号命令替换、管道、重定向、单个 `&` 和换行。
-  - 需要通过 execute 做文本/文件扫描时，若环境已知可用，优先使用 `rg` / `rg --files`，其次可用 `fd`；仅在这些工具不可用时回退 `grep` / `find`。不要为了探测工具存在而额外执行无价值命令；可直接利用 environment_read/toolchain 结果或前序执行事实。搜索命令允许用 `&&`/`||` 连接可独立审计的简单命令，但仍不要使用管道或重定向。
-  - execute 默认等待短命令完成；execution_mode=async 只表示 Operation 异步调度，不保证返回 execution_task_id。只有命令超过 yield_time_ms 才会脱离为执行 Task；返回 execution_task_id 后优先使用 observe(view=status/logs) 查询，需等待并继续接收输出时使用 execute(action=attach)。只有 execution_task_id 丢失或服务端返回 not_found 时才重新获取执行任务列表。
-  - edit 成功或审阅 observe(view=changes) 后，回复用户必须用 Markdown，文件变更使用 ```diff 代码块展示具体增加和删除，不能只列文件名。变更过大时展示有界预览并说明 diff_summary。
-  - move_out(action=prepare) 返回 requires_user_confirmation 时，网页端模型必须向用户展示 workspace、文件路径、SHA、数量、字节数、manifest_sha256、purpose 和有效期并询问；用户确认后，模型原样执行服务端返回的 next_action，提交参数仅为 action=submit、remote_session_id、confirmation_uuid。
-  - 没有成功的工具结果时，不要声称文件已读取、修改或验证。
-  - 重要、变更、删除或长时间调用前，先简述将做什么及原因，然后一次提交完整参数，不要等待重新获取工具 schema。
-  - read(view=file, mode=full) 的源文件上限为 4194304 bytes；超大文件改用 mode=window。read.items 最多 20 项；read(view=list, path=directory) 是硬作用域，include_glob 只能进一步缩小范围。
-  - 每次工具调用后，在下一次非简单调用前通过顶层 progress_summary 补充已验证结果和下一步；区分事实、假设和未知。连续工具链优先使用 progress_summary，不要为了每一次 read/edit/execute 都额外调用 progress。
-  - progress 是用户可见的语义状态事件：只在完成明显阶段、进入长耗时步骤、等待用户、发生阻塞/失败或最终完成时调用。in_progress 用于里程碑，completed 只能基于已有工具结果或验证证据，禁止把计划或猜测报告成完成。
-  - 本轮一旦调用过任何 MCPX 工具，在准备停止 MCPX 工具调用并向用户给出最终回复前，必须调用一次 progress 汇报终态；status 必须是 completed、waiting_for_user、blocked 或 failed。current 说明当前终态，result 只写已验证结果，next 写仍需用户或后续执行的动作。最终 progress 成功后再回复用户。
-  - 同一已验证结果只陈述一次；工具返回已包含摘要时不要重复。
-    - 大量文件删除、移除或清理不要调用 rm -rf 或 execute；使用 move_out(action=prepare) 冻结显式文件、目录或 symlink 清单，再由网页端模型完成用户确认后携带 confirmation_uuid 调用 move_out(action=submit)。目录 prepare 只校验根路径，submit 将目标移至操作系统回收站，不受 operation_batch 的 max_steps 限制；目录内的 symlink 和特殊文件不会阻断移动，symlink 始终只移动链接入口而不跟随目标，glob 和中间 symlink 越界仍拒绝。
-  - 每次 edit 只提交真实需要的文件操作；不要通过截断文件绕过安全检查，若策略拒绝则按错误中的 recovery 调整路径或请求用户授权。
-  - 不要把指令文本（提示词、guidance、AGENTS.md）写入文件内容；使用普通代码或数据。安全检查阻塞时缩小内容后重试。
-response_contract:
-  required: true
-  before_tool_call:
-    - 当前理解的目标
-    - 接下来要执行的查询、工具调用或命令及其目的
-    - 重要、变更、删除或长时间操作必须先说明准备做什么
-  after_tool_call:
-    - 实际调用的工具、查询或命令及其真实结果
-    - 下一次常规工具调用使用 progress_summary 补发上一次工具的可验证结果和下一步；准备停止 MCPX 工具调用时先用 progress 汇报终态，再回复用户
-    - 读取、创建、修改、移动或删除的文件
-    - 每项文件变更的具体内容和影响；代码变更使用 Markdown ```diff 代码块
-    - 测试、构建、检查及其真实结果
-    - 失败、限制、风险和未验证事项
-  final_response:
-    - 当前理解的目标
-    - 实际执行的查询、工具调用或命令及目的
-    - 文件操作与每项变更的具体内容和影响
-    - 验证证据
-    - 失败、限制、风险和未验证事项
-  evidence_rule: 没有成功工具结果、明确命令输出或测试证据时，不得声称已读取、已修改、已修复、已构建或已测试通过。
-edit_payload:
-  tool: edit
-  required:
-    - remote_session_id
-    - edits
-    - purpose
-  retry: 使用同一 remote_session_id 重试同一批次；普通幂等重放复用同一 idempotency_key，STALE_REVISION 更新 base_sha256 后必须生成新的 idempotency_key。
-  edit_item:
-    operation: create | update | rename
-    create: path + content
-    update: path + base_sha256 + replacements 或 content
-    rename: path + new_path + base_sha256
-    replacement: match + replacement；match 必须精确唯一
-    limit: 单次 edit 的新增行与删除行合计不得超过 1000
-    limit_note: 超过 1000 行时拆分 edit 批次
+  - 工具的 structuredContent 是机器事实来源；remote_session_id、plan_id、plan_task_id、execution_task_id、operation_id、artifact_id、sha256、revision 和 confirmation token 必须从服务端结果原样复用，不要从展示文本解析或凭记忆重建。
+  - 不要猜测路径、API、符号、ID、revision、工具能力或执行结果；先用对应的只读工具取得证据。没有成功工具结果或验证证据时，不得声称已读取、修改、修复、构建或测试通过。
+  - 每种语义使用唯一 canonical tool：源码/文件读取用 read，环境事实用 environment_read，文件变更用 edit，删除/移出用 move_out，命令/测试/构建用 execute，状态/历史/日志/diff 用 observe；不要用 execute 代替文件或环境读取。
+  - 修改前取得足够的当前证据并保留用户未要求的现有变更；只提交完成目标所需的最小改动。update/rename 使用服务端返回的最新 base_sha256，保持原文件编码、BOM、换行和末尾换行。
+  - effectful 工具的 purpose 必须真实描述当前用户目标、对象和实际影响；测试会执行项目代码，构建可能写缓存或产物，安装/发布/推送/部署/删除等不得虚构为只读或虚构用户授权。
+  - edit 或其他 revision-guarded 操作遇到 STALE_REVISION、冲突或限制时，优先执行 error.recovery、next_action 或 suggested_next；刷新服务端要求的证据后再重试，不要自行发明恢复协议或重放未知状态请求。
+  - 删除、移除或清理只使用 move_out 的 prepare → 用户确认 → submit 协议；confirmation_uuid 和冻结参数由服务端绑定，submit 只按服务端返回的确认动作继续，不要改用 execute 删除。
+  - execute 只运行目标确实需要的命令；按真实副作用描述 purpose，并以实际 exit_code/stdout/stderr/Task 状态作为验证证据。长任务返回 execution_task_id 后，用 observe(task/logs) 或 execute(attach) 继续。
+  - observe 可省略 view：无目标参数默认 session，execution_task_id 推导 task，plan_task_id 推导 plan，history 过滤条件推导 history，edit_id 推导 diff；存在歧义时显式指定 view。
+  - 客户端支持 Client Protocol activity 时，用 activity channel 报告 thinking/preparing/reviewing/responding 等公开工作状态；summary 只能是可展示的工作摘要，不是隐藏推理链。工具运行心跳和上游 MCP 心跳由各自运行层负责。
+  - progress 只用于有业务意义的用户可见里程碑、等待用户、阻塞或失败，不作为每次工具调用的 bookkeeping，也不要求普通任务在结束前额外调用一次 progress。
+  - 验证遵循“最小充分证据”：优先运行与改动直接相关的检查，再按风险扩大；明确区分已验证事实、未验证事项和服务端报告的限制。
 tool_routing:
-  select_workspace:
-    - workspace
-  open_session:
-    - session
-  inspect_files:
-    - read
-  inspect_git:
-    - observe
-  modify_files:
-    - edit
-  move_files_out:
-    - move_out
-  run_tests_or_build:
-    - execute
-  observe_work:
-    - observe
-  report_progress:
-    - progress
-  run_work:
-    - execute
-  ask_user_confirmation:
-    - execute
+  select_workspace: [workspace]
+  session_lifecycle: [session]
+  inspect_source: [read]
+  inspect_environment: [environment_read]
+  snapshot_environment: [environment]
+  modify_files: [edit]
+  remove_files: [move_out]
+  run_commands: [execute]
+  observe_work: [observe]
+  report_milestone: [progress]
+  plan_work: [plan]
+  manage_artifacts: [artifact]
+  discover_extensions: [discover]
+  call_extensions: [skill_call, mcp_call]

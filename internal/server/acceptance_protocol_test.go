@@ -275,7 +275,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	if err := json.Unmarshal(moveSchema, &moveSchemaMap); err != nil {
 		t.Fatal(err)
 	}
-	for _, needle := range []string{"prepare", "submit", "targets", "kind", "expected_sha256", "symlink", "confirmation_uuid"} {
+	for _, needle := range []string{"prepare", "submit", "targets", "expected_sha256", "symlink", "confirmation_uuid"} {
 		if !strings.Contains(string(moveSchema), needle) {
 			t.Fatalf("move_out schema missing %q: %s", needle, moveSchema)
 		}
@@ -303,10 +303,13 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 			submitRequired, _ = branch["required"].([]any)
 		}
 	}
-	for _, field := range []string{"action", "remote_session_id", "workspace", "purpose", "targets", "idempotency_key"} {
+	for _, field := range []string{"action", "remote_session_id", "purpose", "targets"} {
 		if prepareProperties[field] == nil || !containsSchemaRequired(prepareRequired, field) {
 			t.Fatalf("move_out prepare branch missing required %q: %s", field, moveSchema)
 		}
+	}
+	if prepareProperties["workspace"] != nil || containsSchemaRequired(prepareRequired, "idempotency_key") || strings.Contains(string(moveSchema), `"kind"`) {
+		t.Fatalf("move_out prepare must let Runtime infer workspace/kind and make idempotency optional: %s", moveSchema)
 	}
 	for _, field := range []string{"action", "remote_session_id", "confirmation_uuid"} {
 		if submitProperties[field] == nil || !containsSchemaRequired(submitRequired, field) {
@@ -353,18 +356,21 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		t.Fatalf("catalog count %d != tools/list %d", len(declared), len(listed.Tools))
 	}
 
+	needsPurpose := func(name string, args map[string]any) bool {
+		switch name {
+		case "edit", "execute", "plan", "operation_batch", "skill_call", "mcp_call", "screenshot_capture", "secret_provide":
+			return true
+		case "move_out":
+			return fmt.Sprint(args["action"]) == "prepare"
+		case "artifact":
+			return fmt.Sprint(args["action"]) == "register"
+		default:
+			return false
+		}
+	}
 	rawCall := func(name string, args map[string]any) map[string]any {
 		t.Helper()
-		if name == "edit" {
-			if _, exists := args["purpose"]; !exists {
-				withPurpose := make(map[string]any, len(args)+1)
-				for key, value := range args {
-					withPurpose[key] = value
-				}
-				args = withPurpose
-				args["purpose"] = "acceptance edit"
-			}
-		} else if name != "session" && name != "read" && name != "observe" {
+		if needsPurpose(name, args) {
 			if _, exists := args["purpose"]; !exists {
 				withPurpose := make(map[string]any, len(args)+1)
 				for key, value := range args {
@@ -460,7 +466,12 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 				name = "execute"
 				args["action"] = action
 			} else {
-				name, args["view"] = "observe", action
+				name = "observe"
+				if action == "status" {
+					args["view"] = "task"
+				} else {
+					args["view"] = action
+				}
 				delete(args, "action")
 			}
 		case "plan_manage":
@@ -514,9 +525,8 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	}
 	guidance, _ := openData["agent_guidance"].(map[string]any)
 	routing, _ := guidance["tool_routing"].(map[string]any)
-	responseContract, _ := guidance["response_contract"].(map[string]any)
-	if guidance["version"] != agentGuidanceVersion || !containsAnyString(routing["modify_files"], "edit") || responseContract["required"] != true {
-		t.Fatalf("session_open guidance missing or incomplete: %+v", guidance)
+	if guidance["version"] != agentGuidanceVersion || !containsAnyString(routing["modify_files"], "edit") || guidance["response_contract"] != nil || guidance["edit_payload"] != nil {
+		t.Fatalf("session_open compact guidance missing or incomplete: %+v", guidance)
 	}
 	remoteSession, _ := openData["remote_session"].(map[string]any)
 	remoteID, _ := remoteSession["id"].(string)
@@ -529,7 +539,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	revs, _ := openData["revisions"].(map[string]any)
 	for _, key := range []string{
 		"tool_schema_revision", "capability_manifest_revision", "guidance_revision", "skill_revision",
-		"mcp_revision", "instruction_revision", "session_capability_revision",
+		"mcp_revision", "instruction_revision", "session_capability_revision", "client_protocol_revision",
 	} {
 		if revs[key] == nil || revs[key] == "" {
 			t.Fatalf("missing revision %s: %+v", key, revs)
@@ -557,9 +567,8 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	}
 	schemaRev1 := fmt.Sprint(revs["tool_schema_revision"])
 	sessionRev1 := fmt.Sprint(revs["session_capability_revision"])
-	initialRefresh, _ := openData["client_refresh"].(map[string]any)
-	if initialRefresh["required"] != true || initialRefresh["tool_schema_revision"] != schemaRev1 {
-		t.Fatalf("initial client refresh contract missing: %+v", initialRefresh)
+	if openData["client_refresh"] != nil || openData["omitted_sections"] != nil {
+		t.Fatalf("session bootstrap must not require client revision bookkeeping: %+v", openData)
 	}
 
 	// --- P0 plan: create, advance, and deliver ---
@@ -576,13 +585,6 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	executedData, _ := executeRun["data"].(map[string]any)
 	if executedData["completed_in_call"] != true || executedData["exit_code"] != float64(0) {
 		t.Fatalf("execute run did not reach handler: %+v", executedData)
-	}
-	legacyGoalExecute := call("execute", map[string]any{
-		"action": "run", "remote_session_id": remoteID, "purpose": "acceptance legacy goal compatibility",
-		"goal": "legacy client context", "command": "printf acceptance-legacy-goal", "scope": "workspace",
-	})
-	if !statusOK(legacyGoalExecute) {
-		t.Fatalf("legacy goal execute must be accepted and ignored: %+v", legacyGoalExecute)
 	}
 	planCreated := call("plan_manage", map[string]any{
 		"action": "create", "remote_session_id": remoteID, "summary": "acceptance plan", "purpose": "acceptance plan create",
@@ -634,26 +636,13 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		// Same session/role — should match.
 		t.Fatalf("session_capability_revision mismatch: %v vs %v", sessionRev1, capRevs["session_capability_revision"])
 	}
-	resumed := call("session", map[string]any{
-		"action":            "open",
-		"remote_session_id": remoteID,
-		"known_revisions": map[string]any{
-			"tool_schema_revision": schemaRev1,
-			"skill_revision":       revs["skill_revision"], "mcp_revision": revs["mcp_revision"],
-			"instruction_revision": revs["instruction_revision"], "session_capability_revision": sessionRev1,
-		},
-	})
+	resumed := call("session", map[string]any{"action": "open", "remote_session_id": remoteID})
 	resumedData, _ := resumed["data"].(map[string]any)
-	if omitted, _ := resumedData["omitted_sections"].([]any); len(omitted) != 4 {
-		t.Fatalf("session_open should omit unchanged revision payloads: %+v", resumedData)
+	if resumedData["client_refresh"] != nil || resumedData["omitted_sections"] != nil {
+		t.Fatalf("session re-open must return canonical bootstrap without revision bookkeeping: %+v", resumedData)
 	}
-	resumedRefresh, _ := resumedData["client_refresh"].(map[string]any)
-	if resumedRefresh["required"] != false {
-		t.Fatalf("session_open should not require refresh for current schema: %+v", resumedRefresh)
-	}
-	changedRefresh := clientRefreshPayload(map[string]any{"known_revisions": map[string]any{"tool_schema_revision": "old"}}, map[string]any{"tool_schema_revision": schemaRev1})
-	if changedRefresh["required"] != true {
-		t.Fatalf("changed tool schema should require refresh: %+v", changedRefresh)
+	if len(asMapSlice(resumedData["tools"])) == 0 || resumedData["instructions"] == nil {
+		t.Fatalf("session re-open must return complete bootstrap facts: %+v", resumedData)
 	}
 
 	// --- A04 nested AGENTS ---
@@ -721,7 +710,6 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		"query":             "Alpha",
 		"context_before":    1,
 		"context_after":     1,
-		"include_sha256":    true,
 	})
 	searchData, _ := search["data"].(map[string]any)
 	matches, _ := searchData["matches"].([]any)

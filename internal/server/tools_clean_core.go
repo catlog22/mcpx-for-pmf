@@ -71,18 +71,15 @@ func riskDescriptor(readOnly, destructive, idempotent, openWorld bool, classific
 
 // cleanCoreTool builds the stable clean-core contract with remote_session_id.
 func cleanCoreTool(name, description string, properties map[string]any, required []string, annotation toolAnnotation) mcp.Tool {
-	publicProperties := make(map[string]any, len(properties)+1)
-	for key, value := range properties {
-		publicProperties[key] = value
-	}
-	publicProperties["execution_mode"] = enumSchema("执行模式", "sync", "async")
-	publicProperties["call_id"] = stringSchema("外部调用关联 ID；缺省时由 Runtime 使用 request_id")
-	raw, _ := json.Marshal(map[string]any{
+	schema := map[string]any{
 		"type":                 "object",
-		"properties":           publicProperties,
-		"required":             required,
+		"properties":           properties,
 		"additionalProperties": false,
-	})
+	}
+	if len(required) > 0 {
+		schema["required"] = required
+	}
+	raw, _ := json.Marshal(schema)
 	return annotatedTool(mcp.Tool{Name: name, Description: description, InputSchema: json.RawMessage(raw)}, annotation)
 }
 
@@ -92,13 +89,11 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 	workspace := stringSchema("已注册的 Workspace 名称")
 	path := stringSchema("Workspace 内的相对文件路径")
 
-	r.addTool(s, cleanCoreTool("workspace", desc["workspace"], map[string]any{
-		"action": enumSchema("Workspace 查询动作", "list"),
-	}, []string{"action"}, readOnlyToolAnnotation), r.toolWorkspace)
+	r.addTool(s, cleanCoreTool("workspace", desc["workspace"], map[string]any{}, nil, readOnlyToolAnnotation), r.toolWorkspace)
 
 	r.addTool(s, cleanCoreTool("session", desc["session"], map[string]any{
 		"remote_session_id":            remoteSession,
-		"action":                       enumSchema("会话生命周期动作", "open", "close", "attach"),
+		"action":                       enumSchema("会话生命周期动作；省略时默认 open/resume，传 mode 时可省略并推导 close", "open", "close"),
 		"workspace":                    workspace,
 		"label":                        stringSchema("会话标签"),
 		"description":                  stringSchema("开发目标或会话描述"),
@@ -106,13 +101,8 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"include_instructions_content": booleanSchema("是否内联返回指令内容"),
 		"include_upstream_tools":       booleanSchema("是否返回上游 MCP 工具"),
 		"include_project_tasks":        booleanSchema("是否返回项目任务"),
-		"known_revisions": map[string]any{
-			"type":                 "object",
-			"additionalProperties": map[string]any{"type": "string"},
-			"description":          "客户端已知的 revision 值",
-		},
-		"mode": enumSchema("关闭模式", "closed", "archived"),
-	}, []string{"action"}, sessionToolAnnotation), r.toolSession)
+		"mode":                         enumSchema("关闭模式；出现时省略 action 也会推导 close", "closed", "archived"),
+	}, nil, sessionToolAnnotation), r.toolSession)
 
 	readItems := arraySchema(map[string]any{
 		"type":                 "object",
@@ -134,7 +124,7 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 	directEntriesLimit["maximum"] = source.MaxDirectListEntries
 	r.addTool(s, cleanCoreTool("read", desc["read"], map[string]any{
 		"remote_session_id":    remoteSession,
-		"view":                 enumSchema("读取视图", "file", "search", "list", "context", "environment"),
+		"view":                 enumSchema("读取视图", "file", "search", "list", "context"),
 		"path":                 readPath,
 		"mode":                 enumSchema("文件读取模式", "window", "full"),
 		"offset":               numberSchema("0-based 行偏移"),
@@ -154,13 +144,10 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"max_bytes_per_file":   maxBytesPerFile,
 		"regex":                booleanSchema("是否按 RE2 正则解释"),
 		"case_sensitive":       booleanSchema("是否区分大小写"),
-		"include_sha256":       booleanSchema("是否返回文件 sha256"),
 		"include_instructions": booleanSchema("是否返回适用指令"),
 		"context_before":       numberSchema("匹配前上下文行数"),
 		"context_after":        numberSchema("匹配后上下文行数"),
-		"sections":             arraySchema(map[string]any{"type": "string"}, "环境分区"),
-		"snapshot_id":          stringSchema("环境快照 ID"),
-	}, []string{"remote_session_id", "view"}, readOnlyToolAnnotation), r.toolRead)
+	}, []string{"remote_session_id"}, readOnlyToolAnnotation), r.toolRead)
 
 	editItem := map[string]any{
 		"type":                 "object",
@@ -180,6 +167,17 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 				},
 				"required": []string{"match", "replacement"},
 			}, "从后往前应用的精确替换列表"),
+			"range": map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"description":          "按逻辑行替换 update 范围；start_line/end_line 为 1-based 且包含首尾行，空 replacement 删除这些完整行。必须提供 base_sha256；与 content/replacements 互斥。",
+				"properties": map[string]any{
+					"start_line":  map[string]any{"type": "integer", "minimum": 1, "description": "起始逻辑行（1-based，包含）"},
+					"end_line":    map[string]any{"type": "integer", "minimum": 1, "description": "结束逻辑行（1-based，包含）"},
+					"replacement": stringSchema("替换整个行范围的文本；空字符串删除范围内完整行"),
+				},
+				"required": []string{"start_line", "end_line", "replacement"},
+			},
 		},
 		"required": []string{"path", "operation"},
 	}
@@ -196,12 +194,11 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"additionalProperties": false,
 		"properties": map[string]any{
 			"path":            path,
-			"kind":            enumSchema("移出目标类型；file 移出普通文件，directory 原子移出指定目录树，symlink 只移出链接入口", "file", "directory", "symlink"),
-			"expected_sha256": stringSchema("file 必填 SHA-256；directory 必须省略；symlink 可选，prepare 会冻结链接文本摘要"),
+			"expected_sha256": stringSchema("普通文件必填从 read 获得的 SHA-256 revision guard；目录省略；symlink 可选，prepare 会冻结链接文本摘要。目标类型由 Runtime 安全推导。"),
 		},
-		"required": []string{"path", "kind"},
+		"required": []string{"path"},
 	}
-	moveOutTargets := arraySchema(moveOutTarget, "明确的文件、目录或 symlink 安全移出清单；directory 原子移出当前目录树，symlink 只移出链接入口且不跟随目标")
+	moveOutTargets := arraySchema(moveOutTarget, "明确的安全移出清单；Runtime 用不跟随 symlink 的 lstat 推导 file/directory/symlink，directory 原子移出当前目录树，symlink 只移出链接入口")
 	moveOutTargets["minItems"] = 1
 	moveOutTargets["maxItems"] = moveOutRequestMaxTargets
 	moveOutCommon := map[string]any{
@@ -209,14 +206,13 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 	}
 	moveOutBranches := map[string]actionSchemaBranch{
 		"prepare": {
-			Description: "只读冻结明确的 Workspace 文件、目录或 symlink 安全移出清单；不执行文件系统移动。",
+			Description: "只读冻结明确的 Workspace 文件、目录或 symlink 安全移出清单；不执行文件系统移动。Workspace 和目标类型由 Runtime 从 Remote Session 与文件系统事实确定。",
 			Properties: map[string]any{
-				"workspace":       workspace,
 				"purpose":         stringSchema("向用户展示的安全移出目的；删除/移除/清理请求必须准确描述最终移出意图"),
 				"targets":         moveOutTargets,
-				"idempotency_key": stringSchema("同一安全移出准备请求重试时复用；不同清单必须使用新 key"),
+				"idempotency_key": stringSchema("可选；需要跨请求重放同一 prepare 时复用。省略时 Runtime 为本次请求生成 key"),
 			},
-			Required: []string{"remote_session_id", "workspace", "purpose", "targets", "idempotency_key"},
+			Required: []string{"remote_session_id", "purpose", "targets"},
 		},
 		"submit": {
 			Description: "提交网页端模型已向用户询问并确认的冻结 manifest；客户端只能带回服务端签发的 confirmation_uuid。",
@@ -231,7 +227,7 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 	r.addTool(s, cleanCoreTool("observe", desc["observe"], map[string]any{
 		"remote_session_id":  remoteSession,
 		"workspace":          workspace,
-		"view":               enumSchema("观察视图", "session", "status", "plan", "history", "changes", "logs", "diff"),
+		"view":               enumSchema("观察视图；省略时 Runtime 仅在目标唯一时推导，完全无目标参数时默认为 session", "session", "task", "plan", "history", "changes", "logs", "diff"),
 		"limit":              numberSchema("返回数量限制"),
 		"offset":             numberSchema("diff 视图的字节偏移"),
 		"cursor":             stringSchema("分页游标"),
@@ -248,19 +244,25 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"created_before":     stringSchema("仅返回此时间之前的事件；支持 RFC3339、YYYY-MM-DD 或 Unix 毫秒"),
 		"edit_id":            stringSchema("edit 返回的变更 ID；view=diff 时使用"),
 		"plan_task_id":       stringSchema("Plan Task ID；view=plan 时使用，也可用于 history 过滤"),
-		"execution_task_id":  stringSchema("执行 Task ID；view=status/logs 时使用，也可用于 history 过滤"),
+		"execution_task_id":  stringSchema("执行 Task ID；view=task/logs 时使用，也可用于 history 过滤"),
+		"stdout_offset":      numberSchema("view=logs 的 stdout 字节偏移；可原样使用服务端 next_action 返回值"),
+		"stderr_offset":      numberSchema("view=logs 的 stderr 字节偏移；可原样使用服务端 next_action 返回值"),
 		"include_diff":       booleanSchema("是否包含完整 Unified Diff"),
 		"path":               path,
-	}, []string{"remote_session_id", "view"}, readOnlyToolAnnotation), r.toolObserve)
+	}, []string{"remote_session_id"}, readOnlyToolAnnotation), r.toolObserve)
 
 	r.addTool(s, cleanCoreTool("progress", desc["progress"], map[string]any{
 		"remote_session_id": remoteSession,
-		"status":            enumSchema("模型当前工作状态；停止 MCPX 工具调用前必须使用终态 completed、waiting_for_user、blocked 或 failed", "in_progress", "completed", "waiting_for_user", "blocked", "failed"),
+		"status":            enumSchema("有业务意义的用户可见里程碑状态；普通工具调用和任务结束不要求额外 progress", "in_progress", "completed", "waiting_for_user", "blocked", "failed"),
 		"current":           stringSchema("当前阶段或终态的用户可见摘要；陈述已发生或正在发生的工作"),
-		"result":            stringSchema("已验证结果摘要；没有证据时不要声称已完成或通过"),
-		"next":              stringSchema("下一步动作；completed 时通常留空"),
-		"phase":             stringSchema("可选的阶段名称，例如 implementation、verification、release"),
-		"related_tool":      stringSchema("可选的相关 MCPX 工具名"),
+		"result": map[string]any{
+			"type": "array", "maxItems": maxProgressResultItems,
+			"items":       stringSchema("一条可独立扫描的已验证事实"),
+			"description": "已验证结果列表；每项只表达一个有证据支持的事实，不要把多个结论拼成一段",
+		},
+		"next":         stringSchema("下一步动作；completed 时通常留空"),
+		"phase":        stringSchema("可选的阶段名称，例如 implementation、verification、release"),
+		"related_tool": stringSchema("可选的相关 MCPX 工具名"),
 	}, []string{"remote_session_id", "current"}, sessionToolAnnotation), r.toolProgress)
 
 	r.registerConsolidatedToolsCatalog(s)

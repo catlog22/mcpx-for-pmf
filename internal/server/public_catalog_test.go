@@ -5,6 +5,7 @@ import (
 	"mcpx/internal/mcpresult"
 
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -53,6 +54,7 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 		if err := json.Unmarshal(mcpresult.ToolSchemaJSON(registered), &schema); err != nil {
 			t.Fatalf("%s schema: %v", name, err)
 		}
+		assertRequiredKeywordsAreArrays(t, name, "$", schema)
 		if _, union := schema["oneOf"]; union && schema["additionalProperties"] == nil {
 			// Discriminated action roots stay open for connectors that inspect
 			// object properties before evaluating oneOf.
@@ -86,12 +88,8 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspaceProperties, _ := workspaceSchema["properties"].(map[string]any)
-	if workspaceProperties["remote_session_id"] != nil || workspaceProperties["action"] == nil {
-		t.Fatalf("workspace schema must expose action without remote_session_id: %s", mcpresult.ToolSchemaJSON(workspaceTool))
-	}
-	workspaceAction, _ := workspaceProperties["action"].(map[string]any)
-	if values, _ := workspaceAction["enum"].([]any); !reflect.DeepEqual(values, []any{"list"}) {
-		t.Fatalf("workspace action enum=%v", values)
+	if workspaceProperties["remote_session_id"] != nil || workspaceProperties["action"] != nil || len(workspaceProperties) != 0 {
+		t.Fatalf("workspace must be a zero-argument catalog query: %s", mcpresult.ToolSchemaJSON(workspaceTool))
 	}
 
 	editTool := runtime.listedToolMap()["edit"]
@@ -108,8 +106,8 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	if safety["scope"] != "registered_workspace_root" || safety["approval"] == "host_user_approval_required" {
 		t.Fatalf("edit safety metadata is incomplete: %+v", safety)
 	}
-	if !strings.Contains(editTool.Description, "不提供文件删除") || !strings.Contains(editTool.Description, "move_out") {
-		t.Fatalf("edit description must explain the removal boundary: %s", editTool.Description)
+	if !strings.Contains(editTool.Description, "不提供删除") || !strings.Contains(editTool.Description, "move_out") {
+		t.Fatalf("edit description must explain the removal boundary semantically: %s", editTool.Description)
 	}
 	var editSchema map[string]any
 	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(editTool), &editSchema); err != nil {
@@ -122,7 +120,7 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	editItems, _ := editProperties["edits"].(map[string]any)
 	itemSchema, _ := editItems["items"].(map[string]any)
 	itemProperties, _ := itemSchema["properties"].(map[string]any)
-	for _, field := range []string{"operation", "path", "base_sha256", "content", "new_path", "replacements"} {
+	for _, field := range []string{"operation", "path", "base_sha256", "content", "new_path", "replacements", "range"} {
 		if itemProperties[field] == nil {
 			t.Fatalf("edit item missing %q: %s", field, mcpresult.ToolSchemaJSON(editTool))
 		}
@@ -174,6 +172,11 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 		if progressProperties[field] == nil {
 			t.Fatalf("progress schema missing %q: %s", field, mcpresult.ToolSchemaJSON(progressTool))
 		}
+	}
+	resultSchema, _ := progressProperties["result"].(map[string]any)
+	resultItems, _ := resultSchema["items"].(map[string]any)
+	if resultSchema["type"] != "array" || resultSchema["maxItems"] != float64(maxProgressResultItems) || resultItems["type"] != "string" {
+		t.Fatalf("progress result must be a bounded string list: %+v", resultSchema)
 	}
 	statusSchema, _ := progressProperties["status"].(map[string]any)
 	statusValues, _ := statusSchema["enum"].([]any)
@@ -256,6 +259,26 @@ func containsSchemaRequired(required []any, want string) bool {
 		}
 	}
 	return false
+}
+
+func assertRequiredKeywordsAreArrays(t *testing.T, toolName, path string, value any) {
+	t.Helper()
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			childPath := path + "." + key
+			if key == "required" {
+				if _, ok := child.([]any); !ok {
+					t.Fatalf("%s has invalid JSON Schema %s: required must be an array, got %T (%v)", toolName, childPath, child, child)
+				}
+			}
+			assertRequiredKeywordsAreArrays(t, toolName, childPath, child)
+		}
+	case []any:
+		for index, child := range typed {
+			assertRequiredKeywordsAreArrays(t, toolName, fmt.Sprintf("%s[%d]", path, index), child)
+		}
+	}
 }
 
 func TestActionSchemasExposeBranchPropertiesAtRoot(t *testing.T) {

@@ -13,7 +13,7 @@ func renderProgressSummary(w io.Writer, event Event, options renderOptions) erro
 type progressView struct {
 	Status      string
 	Current     string
-	Result      string
+	Results     []string
 	Next        string
 	Phase       string
 	RelatedTool string
@@ -28,7 +28,7 @@ func progressEventView(event Event) progressView {
 	view := progressView{
 		Status:      strings.ToLower(firstProgressString(input, "status")),
 		Current:     firstProgressString(input, "current"),
-		Result:      firstProgressString(input, "result"),
+		Results:     progressResultStrings(input["result"]),
 		Next:        firstProgressString(input, "next"),
 		Phase:       firstProgressString(input, "phase"),
 		RelatedTool: firstProgressString(input, "related_tool"),
@@ -51,6 +51,30 @@ func firstProgressString(input map[string]any, keys ...string) string {
 	return ""
 }
 
+func progressResultStrings(value any) []string {
+	var raw []string
+	switch typed := value.(type) {
+	case string:
+		raw = []string{typed}
+	case []string:
+		raw = typed
+	case []any:
+		raw = make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				raw = append(raw, text)
+			}
+		}
+	}
+	results := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if item = strings.TrimSpace(item); item != "" {
+			results = append(results, item)
+		}
+	}
+	return results
+}
+
 func renderProgressCompleted(w io.Writer, event Event, options renderOptions) error {
 	view := progressEventView(event)
 	if view.Current == "" {
@@ -61,8 +85,8 @@ func renderProgressCompleted(w io.Writer, event Event, options renderOptions) er
 		return err
 	}
 	details := make([]string, 0, 4)
-	if view.Result != "" {
-		details = append(details, "result: "+view.Result)
+	if len(view.Results) > 0 {
+		details = append(details, "result:\n- "+strings.Join(view.Results, "\n- "))
 	}
 	if view.Next != "" {
 		details = append(details, "next: "+view.Next)

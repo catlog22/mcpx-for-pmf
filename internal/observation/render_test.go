@@ -216,14 +216,14 @@ func TestRenderTextShowsSemanticProgressStates(t *testing.T) {
 				"blocked":          "缺少测试环境配置",
 				"failed":           "全仓测试仍有失败",
 			}[test.status]
-			input := `{"status":` + strconv.Quote(test.status) + `,"current":` + strconv.Quote(current) + `,"result":"2 files changed · tests checked","next":"根据状态继续"}`
+			input := `{"status":` + strconv.Quote(test.status) + `,"current":` + strconv.Quote(current) + `,"result":["2 files changed","tests checked"],"next":"根据状态继续"}`
 			if err := RenderText(&output, Event{
 				Tool: "progress", Type: TypeToolCompleted, Input: []byte(input), Output: []byte(`{"status":"succeeded"}`),
 			}, false); err != nil {
 				t.Fatal(err)
 			}
 			got := output.String()
-			for _, want := range []string{test.want, "result: 2 files changed · tests checked", "next: 根据状态继续"} {
+			for _, want := range []string{test.want, "result:\n", "    - 2 files changed\n", "    - tests checked\n", "next: 根据状态继续"} {
 				if !strings.Contains(got, want) {
 					t.Fatalf("progress rendering missing %q: %q", want, got)
 				}

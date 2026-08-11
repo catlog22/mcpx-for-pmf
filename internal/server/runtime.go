@@ -77,6 +77,8 @@ type Runtime struct {
 	observation     *observationBridge
 	operations      *operation.Service
 	observerSocket  *observation.SocketServer
+	activityMu      sync.Mutex
+	activityLast    map[string]agentActivityState
 	closeOnce       sync.Once
 	closeErr        error
 
@@ -219,6 +221,7 @@ func New(opts Options) (*Runtime, error) {
 		idempotency:    idempotency.NewStore(stateStore.DB()),
 		discoveries:    map[string]discoveryLease{},
 		projectConfigs: map[string]projectConfigCacheEntry{},
+		activityLast:   map[string]agentActivityState{},
 		build: BuildInfo{
 			Version: firstNonEmpty(opts.Version, buildversion.Current),
 			Commit:  firstNonEmpty(opts.Commit, "none"),
@@ -372,7 +375,7 @@ func (r *Runtime) Start() error {
 		SessionTimeout:             config.TransportSessionIdleTTL(r.cfg.Transport),
 		Stateless:                  true,
 	})
-	gw := NewGateway(r.cfg, r.oauth, streamable)
+	gw := NewGateway(r.cfg, r.oauth, streamable, r.agentActivityHandler())
 
 	log := logging.With("component", "server")
 	log.Info("listening", "addr", addr, "transport", "streamable-http")
@@ -888,7 +891,6 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 		session = &resolved
 	}
 	effective := r.effectiveConfig(wsPath)
-	includeToolSchemas := boolPayload(envReq.Payload, "include_tool_schemas")
 	includeSkillDetails := boolPayload(envReq.Payload, "include_skill_details")
 	servers := []map[string]any{}
 	if manager, managerErr := r.mcpManagerForWorkspace(wsPath); managerErr == nil {
@@ -903,33 +905,30 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 	if !includeSkillDetails {
 		skills = skillSummaryItems(loadedSkills)
 	}
-	tools := r.runtimeToolCapabilities(effective, session, includeToolSchemas)
+	tools := r.runtimeToolCapabilities(effective, session)
 	fullToolManifest := r.registeredToolManifest()
-	toolManifest := fullToolManifest
-	if !includeToolSchemas {
-		toolManifest = summarizeToolManifest(fullToolManifest)
-	}
 
 	guidance := agentGuidance()
+	clientProtocol := clientProtocolCapabilities()
 	toolSchemaRevision := r.currentToolSchemaRevision()
 	data := map[string]any{
 		"capability_version":    cleanCoreCapabilityVersion,
 		"capability_groups":     capabilityGroups(),
 		"limits":                publishedLimits(),
 		"schema_source":         "tools/list",
-		"include_tool_schemas":  includeToolSchemas,
 		"include_skill_details": includeSkillDetails,
 		"agent_guidance":        guidance,
-		"tool_manifest":         toolManifest,
+		"client_protocol":       clientProtocol,
 		"workspace":             map[string]any{"name": ws.Name},
 		"tools":                 tools,
 		"runtime": map[string]any{
-			"version":              r.build.Version,
-			"build_commit":         r.build.Commit,
-			"build_time":           r.build.Date,
-			"tool_schema_revision": toolSchemaRevision,
-			"capability_version":   cleanCoreCapabilityVersion,
-			"capability_groups":    capabilityGroups(),
+			"version":                  r.build.Version,
+			"build_commit":             r.build.Commit,
+			"build_time":               r.build.Date,
+			"tool_schema_revision":     toolSchemaRevision,
+			"client_protocol_revision": clientProtocolRevision(),
+			"capability_version":       cleanCoreCapabilityVersion,
+			"capability_groups":        capabilityGroups(),
 		},
 		"instructions": map[string]any{
 			"order": []string{"global", "project", "directory"}, "documents": r.agentInstructions(wsPath),
@@ -949,23 +948,18 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 			"plan_delivery":  []string{"plan", "edit", "execute", "artifact", "observe"},
 			"extension_call": []string{"discover", "skill_call", "mcp_call"},
 		},
-		"client_refresh": map[string]any{
-			"when":    "tool_schema_revision_changed",
-			"actions": []string{"tools/list", "runtime_read"},
-		},
 	}
 	instrDocs := r.agentInstructions(wsPath)
 	data["revisions"] = map[string]any{
 		"tool_schema_revision":         toolSchemaRevision,
-		"capability_manifest_revision": capabilityManifestRevision(fullToolManifest, fullSkills, servers, instrDocs, guidance),
+		"capability_manifest_revision": capabilityManifestRevision(fullToolManifest, fullSkills, servers, instrDocs, guidance, clientProtocol),
 		"guidance_revision":            agentGuidanceRevision(),
 		"skill_revision":               skillRevision(fullSkills),
 		"mcp_revision":                 mcpRevision(servers),
 		"instruction_revision":         instructionRevision(instrDocs),
 		"session_capability_revision":  sessionCapabilityRevision(session),
+		"client_protocol_revision":     clientProtocolRevision(),
 	}
-	revs := data["revisions"].(map[string]any)
-	data["client_refresh"] = clientRefreshPayload(envReq.Payload, revs)
 	if session != nil {
 		data["remote_session"] = map[string]any{"id": session.ID, "role": session.Role, "status": session.Status}
 	}

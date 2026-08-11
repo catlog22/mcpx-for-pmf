@@ -84,8 +84,10 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 		t.Fatalf("session should not expand project tasks by default: %+v", data["project_tasks"])
 	}
 	for _, item := range asMapSlice(data["tools"]) {
-		if _, exists := item["input_schema"]; exists {
-			t.Fatalf("session should not inline full tool schemas: %+v", item)
+		for _, forbidden := range []string{"input_schema", "description", "annotations"} {
+			if _, exists := item[forbidden]; exists {
+				t.Fatalf("session capability state must not duplicate tools/list field %q: %+v", forbidden, item)
+			}
 		}
 	}
 
@@ -124,27 +126,27 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 	if !moveOutCapabilityFound {
 		t.Fatal("runtime_read did not publish the move_out capability")
 	}
-	for _, item := range asMapSlice(capabilityData["tool_manifest"]) {
-		if _, exists := item["inputSchema"]; exists {
-			t.Fatalf("capabilities should default to tool summaries: %+v", item)
+	if capabilityData["tool_manifest"] != nil || capabilityData["client_refresh"] != nil {
+		t.Fatalf("runtime capabilities must not duplicate schema or client bookkeeping: %+v", capabilityData)
+	}
+	for _, item := range asMapSlice(capabilityData["tools"]) {
+		for _, forbidden := range []string{"input_schema", "inputSchema", "description", "annotations"} {
+			if _, exists := item[forbidden]; exists {
+				t.Fatalf("runtime capability state must not duplicate tools/list field %q: %+v", forbidden, item)
+			}
 		}
 	}
-
-	capabilityRequest = mcpresult.Request(map[string]any{"intent": "inspect capability schemas", "action": "capabilities", "remote_session_id": remoteID, "include_tool_schemas": true})
-
-	capabilityResult, err = rt.toolRuntimeInspect(context.Background(), capabilityRequest)
-	if err != nil {
+	var runtimeReadSchema map[string]any
+	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(tools["runtime_read"]), &runtimeReadSchema); err != nil {
 		t.Fatal(err)
 	}
-	fullCapabilityData := structuredBusinessData(capabilityResult)
-	foundSchema := false
-	for _, item := range asMapSlice(fullCapabilityData["tool_manifest"]) {
-		if _, exists := item["inputSchema"]; exists {
-			foundSchema = true
-			break
+	runtimeReadProperties := runtimeReadSchema["properties"].(map[string]any)
+	for _, removed := range []string{"include_tool_schemas", "known_revisions"} {
+		if runtimeReadProperties[removed] != nil {
+			t.Fatalf("runtime_read must not expose client schema bookkeeping %q: %+v", removed, runtimeReadProperties)
 		}
 	}
-	if !foundSchema {
-		t.Fatal("explicit include_tool_schemas did not return registered schemas")
+	if data["client_refresh"] != nil || data["omitted_sections"] != nil {
+		t.Fatalf("session bootstrap must not expose client revision bookkeeping: %+v", data)
 	}
 }

@@ -10,40 +10,25 @@ import (
 //go:embed agent.yaml
 var agentYAML []byte
 
-// Config is the agent guidance document loaded from agent.yaml.
+// Config is the compact agent guidance document loaded from agent.yaml.
 type Config struct {
-	Version          string `yaml:"version"`
-	Priority         string `yaml:"priority"`
-	Summary          string `yaml:"summary"`
-	Rules            []string
-	ResponseContract struct {
-		Required       bool     `yaml:"required"`
-		BeforeToolCall []string `yaml:"before_tool_call"`
-		AfterToolCall  []string `yaml:"after_tool_call"`
-		FinalResponse  []string `yaml:"final_response"`
-		EvidenceRule   string   `yaml:"evidence_rule"`
-	} `yaml:"response_contract"`
-	EditPayload struct {
-		Tool     string         `yaml:"tool"`
-		Required []string       `yaml:"required"`
-		Retry    string         `yaml:"retry"`
-		EditItem map[string]any `yaml:"edit_item"`
-	} `yaml:"edit_payload"`
+	Version     string              `yaml:"version"`
+	Priority    string              `yaml:"priority"`
+	Summary     string              `yaml:"summary"`
+	Rules       []string            `yaml:"rules"`
 	ToolRouting map[string][]string `yaml:"tool_routing"`
 }
 
-// LoadAgent returns guidance from the embedded agent.yaml. Missing required
-// fields fail fast so catalog regressions cannot ship empty prompts.
+// LoadAgent returns the embedded guidance. Tool schemas and Runtime recovery
+// are authoritative for protocol details; this document only carries stable
+// engineering invariants and routing hints.
 func LoadAgent() (Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(agentYAML, &cfg); err != nil {
 		return Config{}, fmt.Errorf("guidance agent.yaml: %w", err)
 	}
-	if cfg.Version == "" || cfg.Summary == "" || len(cfg.Rules) == 0 {
-		return Config{}, fmt.Errorf("guidance agent.yaml missing version, summary, or rules")
-	}
-	if cfg.EditPayload.Tool == "" || len(cfg.ToolRouting) == 0 {
-		return Config{}, fmt.Errorf("guidance agent.yaml missing edit_payload.tool or tool_routing")
+	if cfg.Version == "" || cfg.Summary == "" || len(cfg.Rules) == 0 || len(cfg.ToolRouting) == 0 {
+		return Config{}, fmt.Errorf("guidance agent.yaml missing version, summary, rules, or tool_routing")
 	}
 	return cfg, nil
 }

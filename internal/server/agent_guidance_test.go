@@ -1,39 +1,61 @@
 package server
 
 import (
-	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"mcpx/internal/mcpresult"
-
 	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"mcpx/internal/envelope"
+	"mcpx/internal/mcpresult"
 )
 
-func TestAgentGuidanceUsesDedicatedRoutingWithoutBusinessArguments(t *testing.T) {
+func TestAgentGuidanceIsCompactPrincipledContract(t *testing.T) {
 	guidance := agentGuidance()
 	if guidance["version"] != agentGuidanceVersion || guidance["priority"] != "high" {
-		t.Fatalf("guidance metadata = %+v", guidance)
+		t.Fatalf("guidance metadata=%+v", guidance)
 	}
-	routingIface, ok := guidance["tool_routing"]
-	if !ok {
-		t.Fatalf("tool routing type = %T", guidance["tool_routing"])
+	if guidance["response_contract"] != nil || guidance["edit_payload"] != nil {
+		t.Fatalf("protocol cheat-sheets must live in schemas/runtime, not guidance: %+v", guidance)
 	}
+	routingIface := guidance["tool_routing"]
 	var routing map[string]any
-	if m, ok := routingIface.(map[string]any); ok {
-		routing = m
-	} else if m, ok := routingIface.(map[string][]string); ok {
-		routing = make(map[string]any, len(m))
-		for k, v := range m {
-			routing[k] = v
+	switch typed := routingIface.(type) {
+	case map[string]any:
+		routing = typed
+	case map[string][]string:
+		routing = make(map[string]any, len(typed))
+		for key, value := range typed {
+			routing[key] = value
 		}
-	} else {
-		t.Fatalf("tool routing type = %T", guidance["tool_routing"])
+	default:
+		t.Fatalf("tool routing type=%T", routingIface)
 	}
-	if !containsAnyString(routing["inspect_files"], "read") || !containsAnyString(routing["modify_files"], "edit") {
-		t.Fatalf("guidance routing = %+v", routing)
+	if !containsAnyString(routing["inspect_source"], "read") || !containsAnyString(routing["inspect_environment"], "environment_read") || !containsAnyString(routing["modify_files"], "edit") {
+		t.Fatalf("canonical routing=%+v", routing)
+	}
+	rules, ok := guidance["rules"].([]string)
+	if !ok || len(rules) < 8 || len(rules) > 16 {
+		t.Fatalf("guidance should stay compact: %T %+v", guidance["rules"], guidance["rules"])
+	}
+	joined := strings.Join(rules, "\n")
+	for _, required := range []string{"structuredContent", "不要猜测", "canonical tool", "STALE_REVISION", "recovery", "move_out", "purpose", "activity", "progress", "最小充分证据"} {
+		if !strings.Contains(joined, required) {
+			t.Errorf("compact guidance missing principle %q: %s", required, joined)
+		}
+	}
+	for _, forbidden := range []string{"progress_summary", "reasoning_summary", "准备停止 MCPX 工具调用", "用户可见响应契约", "edit 参数速查"} {
+		if strings.Contains(joined, forbidden) {
+			t.Errorf("guidance still contains protocol bookkeeping %q: %s", forbidden, joined)
+		}
+	}
+	instructions := agentGuidanceInstructions()
+	if strings.Contains(instructions, "用户可见响应契约") || strings.Contains(instructions, "edit 参数速查") {
+		t.Fatalf("rendered instructions still duplicate tool protocol: %s", instructions)
+	}
+	if len(instructions) > 6000 {
+		t.Fatalf("rendered guidance unexpectedly large: %d bytes", len(instructions))
 	}
 	for _, forbidden := range []string{"presentation", "renderer", "show_source", "density"} {
 		if strings.Contains(strings.ToLower(mustJSON(t, guidance)), `"`+forbidden+`"`) {
@@ -43,29 +65,6 @@ func TestAgentGuidanceUsesDedicatedRoutingWithoutBusinessArguments(t *testing.T)
 	revision := agentGuidanceRevision()
 	if revision == "" || revision != agentGuidanceRevision() {
 		t.Fatalf("guidance revision is not stable: %q", revision)
-	}
-}
-
-func TestAgentGuidanceRequiresUserVisibleResponseContract(t *testing.T) {
-	guidance := agentGuidance()
-	contract, ok := guidance["response_contract"].(map[string]any)
-	if !ok || contract["required"] != true {
-		t.Fatalf("response contract = %+v", guidance["response_contract"])
-	}
-	for _, field := range []string{"before_tool_call", "after_tool_call", "final_response"} {
-		items, ok := contract[field].([]string)
-		if !ok || len(items) == 0 {
-			t.Fatalf("response contract field %q = %+v", field, contract[field])
-		}
-	}
-	after, _ := contract["after_tool_call"].([]string)
-	joinedAfter := strings.Join(after, "\n")
-	if !strings.Contains(joinedAfter, "progress_summary") || !strings.Contains(joinedAfter, "下一步") {
-		t.Fatalf("after-tool progress contract is incomplete: %+v", after)
-	}
-	evidence, _ := contract["evidence_rule"].(string)
-	if !strings.Contains(evidence, "不得声称") || !strings.Contains(evidence, "工具结果") {
-		t.Fatalf("evidence rule = %q", evidence)
 	}
 }
 
@@ -106,73 +105,36 @@ func TestRecoveryActionIsStructuredInErrorDetails(t *testing.T) {
 	}
 	next, ok := response.Error.Details["next_action"].(map[string]any)
 	if !ok || next["tool"] != "read" || next["reason"] != "locate the missing file" {
-		t.Fatalf("next action = %+v", response.Error.Details["next_action"])
+		t.Fatalf("next action=%+v", response.Error.Details["next_action"])
 	}
 	if response.Error.Recovery == nil || response.Error.Recovery.Tool != "read" || response.Error.Recovery.Arguments["view"] != "list" {
-		t.Fatalf("structured recovery = %+v", response.Error.Recovery)
+		t.Fatalf("structured recovery=%+v", response.Error.Recovery)
 	}
 }
 
-func TestAgentGuidanceIncludesEditPayloadCheatSheet(t *testing.T) {
-	guidance := agentGuidance()
-	payload, ok := guidance["edit_payload"].(map[string]any)
-	if !ok {
-		t.Fatalf("edit_payload type = %T", guidance["edit_payload"])
+func TestLegacyTaskStatusRecoveryNormalizesToObserveTask(t *testing.T) {
+	tool, args := normalizePublicAction("task_manage", map[string]any{
+		"action": "status", "remote_session_id": "rs_1", "execution_task_id": "task_1",
+	})
+	if tool != "observe" || args["view"] != "task" || args["execution_task_id"] != "task_1" {
+		t.Fatalf("normalized recovery=%s %+v", tool, args)
 	}
-	if payload["tool"] != "edit" || !containsAnyString(payload["required"], "remote_session_id") || !containsAnyString(payload["required"], "edits") {
-		t.Fatalf("edit payload contract = %+v", payload)
+}
+
+func TestCleanProjectTaskNotFoundRecoveryUsesRuntimeProject(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	result, err := rt.terminalErrorWithCleanMode(envelope.Request{RequestID: "req_task_missing"}, "rs_1", "demo", "task_not_found", "project task missing not found", true)
+	if err != nil {
+		t.Fatal(err)
 	}
-	item, ok := payload["edit_item"].(map[string]any)
-	if !ok {
-		t.Fatalf("edit_item type = %T", payload["edit_item"])
-	}
-	operation, _ := item["operation"].(string)
-	for _, wanted := range []string{"create", "update", "rename"} {
-		if !strings.Contains(operation, wanted) {
-			t.Fatalf("edit_item.operation %q missing %q", operation, wanted)
-		}
-	}
-	if strings.Contains(operation, "delete") {
-		t.Fatalf("edit guidance must route deletion to move_out: %q", operation)
-	}
-	replacement, ok := item["replacement"].(string)
-	if !ok || !strings.Contains(replacement, "精确唯一") {
-		t.Fatalf("replacement hint must describe exact matching: %+v", item["replacement"])
-	}
-	limit, _ := item["limit"].(string)
-	if !strings.Contains(limit, "1000") {
-		t.Fatalf("edit limit must be strict 1000 lines: %q", limit)
-	}
-	rules, _ := guidance["rules"].([]string)
-	joined := strings.Join(rules, "\n")
-	if !strings.Contains(joined, "session（action=open）成功后") || !strings.Contains(joined, "完整的 remote_session_id") {
-		t.Fatalf("rules must require showing the session ID to the user: %s", joined)
-	}
-	if !strings.Contains(joined, "使用 read") || !strings.Contains(joined, "使用 edit") || !strings.Contains(joined, "不得超过 1000 行") {
-		t.Fatalf("rules must carry clean-core read/edit guidance: %s", joined)
-	}
-	if !strings.Contains(joined, "完整 sha256") || !strings.Contains(joined, "line_ending") {
-		t.Fatalf("rules must carry file revision and non-Git guidance: %s", joined)
-	}
-	if !strings.Contains(joined, "search_mode=smart") || !strings.Contains(joined, "lexical/heuristic") || !strings.Contains(joined, "score、rank、matched_terms 和 match_reason") || !strings.Contains(joined, "read(view=search)") {
-		t.Fatalf("rules must explain deterministic context ranking and high-confidence narrowing: %s", joined)
-	}
-	if !strings.Contains(joined, "local_id") || !strings.Contains(joined, "plan_task_id") || !strings.Contains(joined, "execution_task_id") || !strings.Contains(joined, "plan_task_ids") || !strings.Contains(joined, "execution_task_ids") {
-		t.Fatalf("rules must use the explicit dual task ID contract: %s", joined)
-	}
-	if !strings.Contains(joined, "idempotency_key") || !strings.Contains(joined, "STALE_REVISION") || !strings.Contains(joined, "suggested_next") {
-		t.Fatalf("rules must carry edit retry guidance: %s", joined)
-	}
-	if !strings.Contains(joined, "move_out(action=prepare)") || !strings.Contains(joined, "move_out(action=submit)") ||
-		!strings.Contains(joined, "安全移出语义必须在 move_out(action=prepare) 前确定") ||
-		!strings.Contains(joined, "submit 时不得重复传 purpose") ||
-		!strings.Contains(joined, "新的 idempotency_key") ||
-		strings.Contains(joined, "move_out_prepare") || strings.Contains(joined, "submit_move_out") {
-		t.Fatalf("rules must use the unified move_out action contract without legacy names: %s", joined)
-	}
-	instructions := agentGuidanceInstructions()
-	if !strings.Contains(instructions, "用户可见响应契约") || !strings.Contains(instructions, "edit") || !strings.Contains(instructions, "replacement") {
-		t.Fatalf("instructions must render the cheat-sheet: %s", instructions)
+	response := decodeToolResult(t, result)
+	errorBody, _ := response["error"].(map[string]any)
+	details, _ := errorBody["details"].(map[string]any)
+	next, _ := details["next_action"].(map[string]any)
+	assertSuggestedActionFitsPublicSchema(t, rt, next)
+	args, _ := next["arguments"].(map[string]any)
+	if next["tool"] != "runtime_read" || args["view"] != "project" || args["remote_session_id"] != "rs_1" {
+		t.Fatalf("project task recovery=%+v", next)
 	}
 }
 
@@ -195,35 +157,19 @@ func TestEditSchemaIsSelfDescribingAndFlat(t *testing.T) {
 		t.Fatalf("edit must reject unknown fields: %s", mcpresult.ToolSchemaJSON(registered))
 	}
 	properties, ok := schema["properties"].(map[string]any)
-	if !ok {
-		t.Fatal("missing properties")
-	}
-	if properties["remote_session_id"] == nil || properties["purpose"] == nil || properties["idempotency_key"] == nil {
+	if !ok || properties["remote_session_id"] == nil || properties["purpose"] == nil || properties["idempotency_key"] == nil {
 		t.Fatalf("edit semantic fields are invalid: %+v", properties)
 	}
-	edits, ok := properties["edits"].(map[string]any)
-	if !ok {
-		t.Fatal("missing edits property")
-	}
-	items, ok := edits["items"].(map[string]any)
-	if !ok {
-		t.Fatal("missing edit items")
-	}
-	itemProperties, ok := items["properties"].(map[string]any)
-	if !ok {
-		t.Fatal("missing edit item properties")
-	}
+	edits := properties["edits"].(map[string]any)
+	items := edits["items"].(map[string]any)
+	itemProperties := items["properties"].(map[string]any)
 	for _, field := range []string{"operation", "path", "base_sha256", "content", "new_path", "replacements"} {
 		fieldSchema, ok := itemProperties[field].(map[string]any)
-		if !ok {
-			t.Fatalf("edit item missing field %q", field)
-		}
-		if description, _ := fieldSchema["description"].(string); strings.TrimSpace(description) == "" {
-			t.Fatalf("edit item field %q has no description", field)
+		if !ok || strings.TrimSpace(fieldSchema["description"].(string)) == "" {
+			t.Fatalf("edit item field %q is not self describing", field)
 		}
 	}
-	replacements := itemProperties["replacements"].(map[string]any)
-	replacementItems := replacements["items"].(map[string]any)
+	replacementItems := itemProperties["replacements"].(map[string]any)["items"].(map[string]any)
 	for _, field := range []string{"match", "replacement"} {
 		fieldSchema := replacementItems["properties"].(map[string]any)[field].(map[string]any)
 		if strings.TrimSpace(fieldSchema["description"].(string)) == "" {

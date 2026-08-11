@@ -48,8 +48,9 @@ func TestListReturnsStableMachineReadableDescriptorsWithoutSecrets(t *testing.T)
 	if _, exposed := items[1]["env"]; exposed {
 		t.Fatalf("descriptor exposed environment: %+v", items[1])
 	}
-	discovery, ok := items[0]["tool_discovery"].(map[string]any)
-	if !ok || discovery["tool"] != "discover" {
-		t.Fatalf("missing discovery invocation: %+v", items[0])
+	for _, legacy := range []string{"invocation", "tool_discovery"} {
+		if items[0][legacy] != nil {
+			t.Fatalf("inventory descriptor must not expose incomplete %s metadata: %+v", legacy, items[0])
+		}
 	}
 }

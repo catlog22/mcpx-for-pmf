@@ -367,7 +367,7 @@ func progressFingerprint(event Event) string {
 		return ""
 	}
 	values := []string{
-		event.Workspace, event.RemoteSessionID, view.Current, view.Result,
+		event.Workspace, event.RemoteSessionID, view.Current, strings.Join(view.Results, "\x1e"),
 		view.Status, view.Next, view.Phase, view.RelatedTool,
 	}
 	return strings.Join(values, "\x00")

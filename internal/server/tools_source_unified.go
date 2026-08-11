@@ -98,7 +98,7 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req *mcp.CallToolRequ
 				if code == "NOT_FOUND" {
 					details["next_action"] = nextActionWithReason("read", "locate this path before retrying read", map[string]any{
 						"remote_session_id": session.ID,
-						"action":            "list",
+						"view":              "list",
 					})
 				}
 				entry["error"] = map[string]any{"code": code, "message": item.Error, "category": category, "retryable": code == "RESULT_BUDGET_EXCEEDED", "details": details}
@@ -541,7 +541,7 @@ func (r *Runtime) toolContextQueryAction(ctx context.Context, req *mcp.CallToolR
 		Query: query, Mode: mode, Parallel: parallel, MaxResults: maxResults,
 		Cursor: sourcePayloadString(envReq.Payload, "cursor"), Pattern: include, ExcludePattern: exclude,
 		ContextBefore: intPayload(envReq.Payload, "context_before"), ContextAfter: intPayload(envReq.Payload, "context_after"),
-		MaxBytesPerFile: maxBytes, IncludeSHA256: boolPayload(envReq.Payload, "include_sha256"), ScopePaths: seeds, Allowed: allowed,
+		MaxBytesPerFile: maxBytes, IncludeSHA256: true, ScopePaths: seeds, Allowed: allowed,
 	})
 	if err != nil {
 		return r.sourceError(envReq, session.ID, session.WorkspaceName, err)
@@ -582,7 +582,7 @@ func (r *Runtime) toolContextSearchAction(ctx context.Context, req *mcp.CallTool
 	seeds := sourcePayloadPaths(envReq.Payload)
 	resultData, err := source.SearchWith(session.WorkspacePath, source.SearchOptions{
 		Query: query, Pattern: pattern, ExcludePattern: sourcePayloadString(envReq.Payload, "exclude_glob"), ScopePaths: seeds, Cursor: sourcePayloadString(envReq.Payload, "cursor"), Regex: regex,
-		CaseSensitive: caseSensitive, Limit: intPayload(envReq.Payload, "limit"), ContextBefore: intPayload(envReq.Payload, "context_before"), ContextAfter: intPayload(envReq.Payload, "context_after"), IncludeSHA256: boolPayload(envReq.Payload, "include_sha256"),
+		CaseSensitive: caseSensitive, Limit: intPayload(envReq.Payload, "limit"), ContextBefore: intPayload(envReq.Payload, "context_before"), ContextAfter: intPayload(envReq.Payload, "context_after"), IncludeSHA256: true,
 	}, r.sourcePathAllowed(session.WorkspacePath))
 	if err != nil {
 		return r.sourceError(envReq, session.ID, session.WorkspaceName, err)
@@ -596,7 +596,6 @@ func (r *Runtime) toolContextSearchAction(ctx context.Context, req *mcp.CallTool
 			"cursor": resultData.NextCursor, "limit": intPayload(envReq.Payload, "limit"),
 			"include_glob": pattern, "exclude_glob": sourcePayloadString(envReq.Payload, "exclude_glob"),
 			"regex": regex, "case_sensitive": caseSensitive,
-			"include_sha256": boolPayload(envReq.Payload, "include_sha256"),
 			"context_before": intPayload(envReq.Payload, "context_before"),
 			"context_after":  intPayload(envReq.Payload, "context_after"),
 		})
@@ -638,7 +637,7 @@ func (r *Runtime) toolContextListAction(ctx context.Context, req *mcp.CallToolRe
 	if err != nil {
 		return r.sourceError(envReq, session.ID, session.WorkspaceName, err)
 	}
-	list, err := source.ListWith(session.WorkspacePath, pattern, sourcePayloadString(envReq.Payload, "exclude_glob"), sourcePayloadString(envReq.Payload, "cursor"), intPayload(envReq.Payload, "limit"), boolPayload(envReq.Payload, "include_sha256"), allowed)
+	list, err := source.ListWith(session.WorkspacePath, pattern, sourcePayloadString(envReq.Payload, "exclude_glob"), sourcePayloadString(envReq.Payload, "cursor"), intPayload(envReq.Payload, "limit"), false, allowed)
 	if err != nil {
 		return r.sourceError(envReq, session.ID, session.WorkspaceName, err)
 	}
@@ -661,7 +660,7 @@ func (r *Runtime) toolContextListAction(ctx context.Context, req *mcp.CallToolRe
 		data["next_action"] = nextAction("read", map[string]any{
 			"remote_session_id": session.ID, "view": "list", "path": sourcePayloadString(envReq.Payload, "path"), "include_glob": pattern,
 			"exclude_glob": sourcePayloadString(envReq.Payload, "exclude_glob"), "cursor": list.NextCursor,
-			"limit": intPayload(envReq.Payload, "limit"), "include_sha256": boolPayload(envReq.Payload, "include_sha256"),
+			"limit": intPayload(envReq.Payload, "limit"),
 		})
 	}
 	if direct.NextCursor != "" {

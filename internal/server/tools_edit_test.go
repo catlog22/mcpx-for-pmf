@@ -41,13 +41,35 @@ func TestTooManyChangesResponseCarriesStructuredRecovery(t *testing.T) {
 	if recovery["action"] != "split_edit" || recovery["max_changed_lines"] != float64(edit.MaxChangedLines) {
 		t.Fatalf("details recovery=%+v", details["recovery"])
 	}
-	next, _ := details["suggested_next"].(map[string]any)
-	if next["action"] != "split_edit" || next["max_changed_lines"] != float64(edit.MaxChangedLines) {
-		t.Fatalf("suggested next=%+v", next)
+	if details["suggested_next"] != nil {
+		t.Fatalf("too-many-changes requires replanning, not a fake executable action: %+v", details["suggested_next"])
 	}
-	publicRecovery, _ := errorBody["recovery"].(map[string]any)
-	if publicRecovery["action"] != "split_edit" || publicRecovery["tool"] != "edit" {
-		t.Fatalf("public recovery=%+v", publicRecovery)
+	if errorBody["recovery"] != nil {
+		t.Fatalf("too-many-changes must not publish an incomplete public recovery call: %+v", errorBody["recovery"])
+	}
+}
+
+func TestStaleEditRecoveryIsExecutableReadRefresh(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	workspace, _ := rt.reg.Get("demo")
+	result, err := rt.editToolError(envelope.Request{RequestID: "req_stale"}, remotesession.Session{
+		ID: "session-1", WorkspaceName: "demo", WorkspacePath: workspace.Path,
+	}, &edit.ApplyError{Code: "STALE_REVISION", Path: "demo.go", Current: "sha256:current"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := decodeToolResult(t, result)
+	errorBody := response["error"].(map[string]any)
+	details := errorBody["details"].(map[string]any)
+	next := details["suggested_next"].(map[string]any)
+	assertSuggestedActionFitsPublicSchema(t, rt, next)
+	args := next["arguments"].(map[string]any)
+	if next["tool"] != "read" || args["view"] != "file" || args["mode"] != "window" || args["limit"] != float64(1) {
+		t.Fatalf("stale refresh action=%+v", next)
+	}
+	publicRecovery := errorBody["recovery"].(map[string]any)
+	if publicRecovery["tool"] != "read" {
+		t.Fatalf("stale public recovery=%+v", publicRecovery)
 	}
 }
 
@@ -88,22 +110,16 @@ func TestCleanCoreReadSupportsMixedFullAndWindowBatch(t *testing.T) {
 	}
 }
 
-func TestCleanCoreSessionAttachReusesOnlySuppliedID(t *testing.T) {
+func TestCleanCoreSessionDefaultsToOpenAndResumesSuppliedID(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	missing := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{
-		"action": "attach", "workspace": "demo",
-	})
-	if statusOK(missing) || errorCode(missing) != "remote_session_required" {
-		t.Fatalf("attach without remote id=%+v", missing)
+	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"workspace": "demo"})
+	if !statusOK(opened) {
+		t.Fatalf("default session open failed: %+v", opened)
 	}
-
-	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
 	remoteID := opened["remote_session_id"].(string)
-	attached := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{
-		"action": "attach", "remote_session_id": remoteID,
-	})
-	if attached["remote_session_id"] != remoteID {
-		t.Fatalf("attach changed remote id: %+v", attached)
+	resumed := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"remote_session_id": remoteID})
+	if resumed["remote_session_id"] != remoteID {
+		t.Fatalf("resume changed remote id: %+v", resumed)
 	}
 }
 

@@ -31,6 +31,7 @@ type discoveryLease struct {
 }
 
 func (r *Runtime) toolDiscover(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	req, _, _ = canonicalDiscoverRequest(req)
 	envReq, principal, session, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil
@@ -50,6 +51,32 @@ func (r *Runtime) toolDiscover(ctx context.Context, req *mcp.CallToolRequest) (*
 		return r.discoverSkill(ctx, envReq, principal.ID, session, view)
 	}
 	return r.discoverMCP(ctx, envReq, principal.ID, session, view)
+}
+
+func canonicalDiscoverRequest(req *mcp.CallToolRequest) (*mcp.CallToolRequest, string, string) {
+	args := mcpresult.Arguments(req)
+	kind := strings.ToLower(strings.TrimSpace(stringPayload(args, "kind")))
+	view := strings.ToLower(strings.TrimSpace(stringPayload(args, "view")))
+	server := strings.TrimSpace(stringPayload(args, "server"))
+	name := strings.TrimSpace(stringPayload(args, "name"))
+	includeTools := boolPayload(args, "include_tools")
+	updates := map[string]any{}
+	if kind == "" && (server != "" || includeTools) {
+		kind = "mcp"
+		updates["kind"] = kind
+	}
+	if view == "" {
+		if server != "" || name != "" || includeTools {
+			view = "describe"
+		} else {
+			view = "list"
+		}
+		updates["view"] = view
+	}
+	if len(updates) > 0 {
+		req = forwardedRequest(req, updates)
+	}
+	return req, kind, view
 }
 
 func (r *Runtime) discoverSkill(ctx context.Context, envReq envelope.Request, principalID string, session remotesession.Session, view string) (*mcp.CallToolResult, error) {
@@ -87,10 +114,14 @@ func (r *Runtime) discoverSkill(ctx context.Context, envReq envelope.Request, pr
 	return r.remoteResult(envReq, session.ID, session.WorkspaceName, map[string]any{
 		"kind": "skill", "view": "describe", "skill": descriptor,
 		"discovery_id": lease.ID, "discovery_revision": lease.Revision, "expires_at": lease.ExpiresAt,
-		"invocation": map[string]any{"tool": "skill_call", "arguments": map[string]any{
-			"remote_session_id": session.ID, "name": name, "arguments": map[string]any{},
-			"discovery_id": lease.ID, "discovery_revision": lease.Revision,
-		}},
+		"invocation_template": map[string]any{
+			"tool": "skill_call",
+			"arguments": map[string]any{
+				"remote_session_id": session.ID, "name": name, "arguments": map[string]any{},
+				"discovery_id": lease.ID, "discovery_revision": lease.Revision,
+			},
+			"required_client_fields": []string{"purpose"},
+		},
 	})
 }
 
@@ -139,10 +170,14 @@ func (r *Runtime) discoverMCP(ctx context.Context, envReq envelope.Request, prin
 	return r.remoteResult(envReq, session.ID, session.WorkspaceName, map[string]any{
 		"kind": "mcp", "view": "describe", "server": server,
 		"discovery_id": lease.ID, "discovery_revision": lease.Revision, "expires_at": lease.ExpiresAt,
-		"invocation": map[string]any{"tool": "mcp_call", "arguments": map[string]any{
-			"remote_session_id": session.ID, "server": serverName, "tool": "<tool from tools>",
-			"arguments": map[string]any{}, "discovery_id": lease.ID, "discovery_revision": lease.Revision,
-		}},
+		"invocation_template": map[string]any{
+			"tool": "mcp_call",
+			"arguments": map[string]any{
+				"remote_session_id": session.ID, "server": serverName, "arguments": map[string]any{},
+				"discovery_id": lease.ID, "discovery_revision": lease.Revision,
+			},
+			"required_client_fields": []string{"purpose", "tool"},
+		},
 	})
 }
 

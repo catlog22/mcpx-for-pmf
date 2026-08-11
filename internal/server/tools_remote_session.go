@@ -108,20 +108,20 @@ func (r *Runtime) remoteError(envReq envelope.Request, remoteSessionID, workspac
 	resp.RemoteSessionID = remoteSessionID
 	switch code {
 	case "workspace_not_found":
-		addRecoveryAction(&resp, "workspace", "select a valid workspace before retrying session", map[string]any{"action": "list"})
+		addRecoveryAction(&resp, "workspace", "select a valid workspace before retrying session", map[string]any{})
 		addRecoveryActions(&resp,
-			nextActionWithReason("workspace", "refresh the available workspace names", map[string]any{"action": "list"}),
+			nextActionWithReason("workspace", "refresh the available workspace names", map[string]any{}),
 			nextActionWithReason("session", "open a Remote Session after selecting a workspace", map[string]any{"workspace": workspace}),
 		)
 	case "not_found":
 		if remoteSessionID != "" {
-			addRecoveryAction(&resp, "workspace", "refresh workspace selection before opening a new Remote Session", map[string]any{"action": "list"})
+			addRecoveryAction(&resp, "workspace", "refresh workspace selection before opening a new Remote Session", map[string]any{})
 		}
 	case "remote_session_required":
 		if workspace != "" {
 			addRecoveryAction(&resp, "session", "open or resume a Remote Session before using this tool", map[string]any{"workspace": workspace})
 		} else {
-			addRecoveryAction(&resp, "workspace", "select a workspace before opening a Remote Session", map[string]any{"action": "list"})
+			addRecoveryAction(&resp, "workspace", "select a workspace before opening a Remote Session", map[string]any{})
 		}
 	}
 	return r.resultJSON(resp)

@@ -33,6 +33,14 @@ type Replacement struct {
 	Replacement string `json:"replacement"`
 }
 
+// LineRange replaces complete logical lines using 1-based inclusive indexes.
+// It is only valid for revision-guarded updates.
+type LineRange struct {
+	StartLine   int    `json:"start_line"`
+	EndLine     int    `json:"end_line"`
+	Replacement string `json:"replacement"`
+}
+
 // FileEdit is one path-level operation inside a batch.
 type FileEdit struct {
 	Path         string        `json:"path"`
@@ -41,6 +49,7 @@ type FileEdit struct {
 	Content      string        `json:"content,omitempty"`
 	NewPath      string        `json:"new_path,omitempty"`
 	Replacements []Replacement `json:"replacements,omitempty"`
+	Range        *LineRange    `json:"range,omitempty"`
 }
 
 // BatchRequest is one edit tool call worth of work.

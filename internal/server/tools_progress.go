@@ -10,6 +10,8 @@ import (
 	"mcpx/internal/envelope"
 )
 
+const maxProgressResultItems = 12
+
 // toolProgress records a model-authored, user-visible progress state.
 // It does not mutate workspace files; the instrumented lifecycle persists
 // semantic milestones and terminal states for observers and reconnects.
@@ -26,9 +28,21 @@ func (r *Runtime) toolProgress(ctx context.Context, req *mcp.CallToolRequest) (*
 	if len(current) > envelope.MaxIntentBytes {
 		return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", fmt.Sprintf("progress current exceeds %d bytes", envelope.MaxIntentBytes))
 	}
-	result, _ := envReq.Payload["result"].(string)
-	result = strings.TrimSpace(result)
-	if len(result) > envelope.MaxResultSummaryBytes {
+	rawResults := stringSlicePayload(envReq.Payload, "result")
+	if len(rawResults) > maxProgressResultItems {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", fmt.Sprintf("progress result supports at most %d items", maxProgressResultItems))
+	}
+	results := make([]string, 0, len(rawResults))
+	resultBytes := 0
+	for _, item := range rawResults {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		resultBytes += len(item)
+		results = append(results, item)
+	}
+	if resultBytes > envelope.MaxResultSummaryBytes {
 		return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", fmt.Sprintf("progress result exceeds %d bytes", envelope.MaxResultSummaryBytes))
 	}
 	next, _ := envReq.Payload["next"].(string)
@@ -47,8 +61,8 @@ func (r *Runtime) toolProgress(ctx context.Context, req *mcp.CallToolRequest) (*
 	phase = strings.TrimSpace(phase)
 
 	display := current
-	if result != "" {
-		display += " · result: " + result
+	if len(results) > 0 {
+		display += fmt.Sprintf(" · results: %d", len(results))
 	}
 	if next != "" {
 		display += " · next: " + next
@@ -56,7 +70,7 @@ func (r *Runtime) toolProgress(ctx context.Context, req *mcp.CallToolRequest) (*
 	data := map[string]any{
 		"phase":             phase,
 		"current":           current,
-		"result":            result,
+		"result":            results,
 		"status":            status,
 		"next":              next,
 		"related_tool":      relatedTool,
