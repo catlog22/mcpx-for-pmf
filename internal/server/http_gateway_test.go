@@ -58,6 +58,23 @@ func TestGatewayBearer401AndOK(t *testing.T) {
 	}
 }
 
+func TestGatewayDoesNotExposeLegacyActivityHTTPRoute(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Auth.Mode = "open"
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	ts := httptest.NewServer(NewGateway(cfg, nil, inner).Handler())
+	defer ts.Close()
+
+	response, err := http.Post(ts.URL+"/mcp/activity", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("legacy /mcp/activity status=%d, want 404", response.StatusCode)
+	}
+}
+
 func TestGatewayStreamableActionDiscovery(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Auth.Mode = "bearer"

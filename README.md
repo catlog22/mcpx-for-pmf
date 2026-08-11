@@ -382,8 +382,8 @@ curl -sS -m 5 \
    直接复用本地缓存。
 
 ARC V2 将工具 effect 与 Agent 语义轨迹分开：`purpose` 只描述本次工具操作的作用，
-`plan_id`、`plan_task_id`、`execution_task_id`、`operation_id` 用于绑定执行上下文；公开的 Intent、Hypothesis、Evidence、Conclusion、Next 和 Status 通过 Client Protocol Activity V2 上报。服务端只在收到真实 Activity 后，才会把工具结果生成时该 Remote Session 的最新 snapshot 作为 `structuredContent.context.activity` 和 `_meta["mcpx.result"].mcpx.result.context.activity` 返回；不会从工具参数或结果反推、伪造 Activity。`reasoning_summary`、`progress_summary`、`next_step` 不再属于 ARC context。
-`move_out(action="submit")` 的参数只有 `action`、`remote_session_id`、`confirmation_uuid`，所有业务语义继续使用 prepare 时由服务端冻结的值。
+`plan_id`、`plan_task_id`、`execution_task_id`、`operation_id` 用于绑定执行上下文。Client Protocol Activity V3 直接嵌入会话内 MCP 工具参数：可选 `activity` 对象允许同一次调用同时提供 `intent`、`hypothesis`、`evidence`、`conclusion`、`next`、`status`，但只应填写本次发生实质变化的字段，不重复未变化内容。`intent` 是整个工作 turn 的目标并开启新 turn；`hypothesis` 是待验证且可被推翻的暂定判断；`evidence` 只写刚获得的可核验事实；`conclusion` 写由 evidence 支持的当前判断；`next` 表示立即要执行且与当前 tool call 对齐的动作；`status` 只用于无法归入前五类的阶段、等待或阻塞变化。Runtime 按固定顺序展开非空字段，并自动生成 `turn_id`、`sequence`、`state=preparing_action`、`related_call_id`。旧 `/mcp/activity` HTTP ingress 已移除。服务端只把已经接受并持久化的真实 Activity snapshot 放入 `structuredContent.context.activity` 和 `_meta["mcpx.result"].mcpx.result.context.activity`；ARC 不直接复制 raw tool input，也不会从工具结果反推、伪造 Activity。`reasoning_summary`、`progress_summary`、`next_step` 不再属于 ARC context。
+`move_out(action="submit")` 的业务参数只有 `action`、`remote_session_id`、`confirmation_uuid`；公共可选 `activity` 只记录公开工作轨迹，不改变 prepare 时由服务端冻结的业务语义。
 需要发布有业务意义的里程碑、等待用户、阻塞或失败状态时，使用 `progress`；它不是 Activity heartbeat，也不要求每个普通工具调用额外执行一次。
 
 终端观测使用普通 stdout/stderr pipe，不依赖 PTY、tmux 或 ConPTY。观测事件先写入

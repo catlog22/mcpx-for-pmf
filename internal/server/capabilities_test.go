@@ -131,12 +131,12 @@ func TestCapabilityListIncludesInstructionsSkillsAndRoleState(t *testing.T) {
 	}
 	clientProtocol, _ := data["client_protocol"].(map[string]any)
 	activityProtocol, _ := clientProtocol["activity"].(map[string]any)
-	if clientProtocol["version"] != clientProtocolVersion || activityProtocol["version"] != agentActivityProtocolVersion || activityProtocol["path"] != "/mcp/activity" {
+	if clientProtocol["version"] != clientProtocolVersion || activityProtocol["version"] != agentActivityProtocolVersion || activityProtocol["transport"] != "mcp_tool_arguments" || activityProtocol["argument"] != "activity" {
 		t.Fatalf("client protocol capability missing: %+v", clientProtocol)
 	}
-	kinds, _ := activityProtocol["kinds"].([]any)
-	if len(kinds) != len(agentActivityKindNames) {
-		t.Fatalf("activity kinds missing from capability: %+v", activityProtocol)
+	fields, _ := activityProtocol["fields"].([]any)
+	if len(fields) != len(agentActivityKindNames) || activityProtocol["multiple_per_call"] != true || activityProtocol["turn_boundary"] != "non_empty_intent_starts_new_turn" {
+		t.Fatalf("activity fields missing from capability: %+v", activityProtocol)
 	}
 	revisions := data["revisions"].(map[string]any)
 	if revisions["client_protocol_revision"] == "" {

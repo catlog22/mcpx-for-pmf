@@ -20,6 +20,7 @@ import (
 )
 
 func (r *Runtime) addTool(s *mcp.Server, tool mcp.Tool, handler mcp.ToolHandler) {
+	tool = withEmbeddedActivitySchema(tool)
 	// OutputSchema describes structuredContent, not the larger ARC metadata
 	// envelope. The shared ARC contract stays identical across tools while
 	// hard limits are attached from the same source used by runtime capabilities.
@@ -141,12 +142,20 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 		}
 		internalOperationStep := isOperationChild(callCtx)
 		observationRequest, observationParseErr := r.parseEnv(callCtx, req)
-		if !internalOperationStep && observationParseErr == nil && r.observation != nil {
-			// Async: never blocks tools/call on Store.Append.
+		var embeddedActivityErr error
+		if !internalOperationStep && observationParseErr == nil {
+			embeddedActivityErr = r.recordEmbeddedAgentActivity(callCtx, observationRequest, runtime, received.UTC())
+		}
+		if !internalOperationStep && observationParseErr == nil && embeddedActivityErr == nil && r.observation != nil {
+			// Activity is recorded synchronously before this async lifecycle event,
+			// preserving semantic -> tool ordering in the observer stream.
 			_ = r.observation.RecordToolStarted(callCtx, name, observationRequest, mcpresult.Arguments(req))
 		}
 
-		if !isOperationChild(callCtx) && r.operations != nil && asyncEligibleTool(name) && executionMode(req) == "async" && observationParseErr == nil {
+		if embeddedActivityErr != nil {
+			result = mcpresult.NewError("INVALID_ACTIVITY: " + embeddedActivityErr.Error())
+			err = nil
+		} else if !isOperationChild(callCtx) && r.operations != nil && asyncEligibleTool(name) && executionMode(req) == "async" && observationParseErr == nil {
 			result, err = callToolSafely(name, func() (*mcp.CallToolResult, error) {
 				return r.submitAsyncTool(callCtx, name, req, observationRequest)
 			})

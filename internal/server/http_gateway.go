@@ -18,20 +18,16 @@ type Gateway struct {
 	oauth      *oauth.Server
 	oauthHTTP  *oauth.Handler
 	mcp        http.Handler
-	activity   http.Handler
 	trustProxy bool
 }
 
 // NewGateway builds the HTTP front door.
-func NewGateway(cfg config.Config, oauthSrv *oauth.Server, mcp http.Handler, activity ...http.Handler) *Gateway {
+func NewGateway(cfg config.Config, oauthSrv *oauth.Server, mcp http.Handler) *Gateway {
 	g := &Gateway{
 		cfg:        cfg,
 		oauth:      oauthSrv,
 		mcp:        mcp,
 		trustProxy: cfg.Server.TrustProxyHeaders,
-	}
-	if len(activity) > 0 {
-		g.activity = activity[0]
 	}
 	if oauthSrv != nil {
 		g.oauthHTTP = &oauth.Handler{S: oauthSrv}
@@ -66,12 +62,6 @@ func (g *Gateway) Handler() http.Handler {
 	}
 	// Exact /mcp only for Streamable MCP. /mcp/oauth/* registered above wins (longer path).
 	mux.Handle("/mcp", g.corsHandler(g.accessLog(g.wrapMCP(g.mcp))))
-	if g.activity != nil {
-		// MCPX extension: client work-state ingress. It shares the MCP auth
-		// boundary but is deliberately outside tools/call so thinking state can
-		// be observed before the first tool invocation.
-		mux.Handle("/mcp/activity", g.corsHandler(g.accessLog(g.wrapMCP(g.activity))))
-	}
 	return mux
 }
 

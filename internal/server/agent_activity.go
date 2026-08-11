@@ -3,36 +3,17 @@ package server
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
 
+	"mcpx/internal/envelope"
 	"mcpx/internal/observation"
 	"mcpx/internal/remotesession"
 )
 
-const (
-	agentActivityProtocolVersion   = "2"
-	maxAgentActivityBodyBytes      = 16 << 10
-	agentActivityHeartbeatInterval = 25 * time.Second
-)
-
-var agentActivityStateNames = []string{
-	"turn_started",
-	"thinking",
-	"preparing_action",
-	"waiting_tool",
-	"reviewing_result",
-	"responding",
-	"waiting_user",
-	"blocked",
-	"turn_completed",
-	"turn_failed",
-}
+const agentActivityProtocolVersion = "3"
 
 var agentActivityKindNames = []string{
 	"intent",
@@ -41,27 +22,6 @@ var agentActivityKindNames = []string{
 	"conclusion",
 	"next",
 	"status",
-}
-
-var agentActivityStates = stringSet(agentActivityStateNames)
-var agentActivityKinds = stringSet(agentActivityKindNames)
-
-func stringSet(values []string) map[string]bool {
-	set := make(map[string]bool, len(values))
-	for _, value := range values {
-		set[value] = true
-	}
-	return set
-}
-
-type agentActivityRequest struct {
-	RemoteSessionID string `json:"remote_session_id"`
-	TurnID          string `json:"turn_id"`
-	Sequence        int64  `json:"sequence"`
-	State           string `json:"state"`
-	Kind            string `json:"kind"`
-	Summary         string `json:"summary"`
-	RelatedCallID   string `json:"related_call_id,omitempty"`
 }
 
 type agentActivityState struct {
@@ -77,187 +37,154 @@ type agentActivityState struct {
 	SeenAt          time.Time
 }
 
-type agentActivityConflict struct {
-	Code    string
-	Message string
+type embeddedActivityUpdate struct {
+	Kind    string
+	Summary string
 }
 
-func (e *agentActivityConflict) Error() string { return e.Message }
-
-func (r *Runtime) agentActivityHandler() http.Handler {
-	return http.HandlerFunc(r.handleAgentActivity)
+func embeddedActivityUpdates(input envelope.ActivityInput) ([]embeddedActivityUpdate, error) {
+	values := []embeddedActivityUpdate{
+		{Kind: "intent", Summary: input.Intent},
+		{Kind: "hypothesis", Summary: input.Hypothesis},
+		{Kind: "evidence", Summary: input.Evidence},
+		{Kind: "conclusion", Summary: input.Conclusion},
+		{Kind: "next", Summary: input.Next},
+		{Kind: "status", Summary: input.Status},
+	}
+	updates := make([]embeddedActivityUpdate, 0, len(values))
+	for _, update := range values {
+		raw := strings.TrimSpace(update.Summary)
+		if raw == "" {
+			continue
+		}
+		if len(raw) > envelope.MaxIntentBytes {
+			return nil, fmt.Errorf("activity.%s exceeds %d bytes", update.Kind, envelope.MaxIntentBytes)
+		}
+		update.Summary = observation.SanitizeIntent(raw)
+		if update.Summary != "" {
+			updates = append(updates, update)
+		}
+	}
+	return updates, nil
 }
 
-func (r *Runtime) handleAgentActivity(w http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeAgentActivityError(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST is required")
-		return
+func (r *Runtime) recordEmbeddedAgentActivity(ctx context.Context, request envelope.Request, runtime RuntimeContext, now time.Time) error {
+	updates, err := embeddedActivityUpdates(request.Activity)
+	if err != nil || len(updates) == 0 {
+		return err
 	}
 	if r == nil || r.remote == nil || r.observation == nil || r.state == nil {
-		writeAgentActivityError(w, http.StatusServiceUnavailable, "activity_unavailable", "activity observation is unavailable")
-		return
+		return fmt.Errorf("activity observation is unavailable")
 	}
-
-	body := http.MaxBytesReader(w, req.Body, maxAgentActivityBodyBytes)
-	defer body.Close()
-	decoder := json.NewDecoder(body)
-	decoder.DisallowUnknownFields()
-	var input agentActivityRequest
-	if err := decoder.Decode(&input); err != nil {
-		writeAgentActivityError(w, http.StatusBadRequest, "invalid_payload", "activity payload is invalid")
-		return
+	remoteSessionID := strings.TrimSpace(request.RemoteSessionID)
+	if remoteSessionID == "" {
+		return fmt.Errorf("remote_session_id is required when activity is provided")
 	}
-	if err := ensureSingleJSONValue(decoder); err != nil {
-		writeAgentActivityError(w, http.StatusBadRequest, "invalid_payload", "activity payload must contain one JSON value")
-		return
-	}
-
-	input.RemoteSessionID = strings.TrimSpace(input.RemoteSessionID)
-	input.TurnID = strings.TrimSpace(input.TurnID)
-	input.State = strings.ToLower(strings.TrimSpace(input.State))
-	input.Kind = strings.ToLower(strings.TrimSpace(input.Kind))
-	input.Summary = observation.SanitizeIntent(input.Summary)
-	input.RelatedCallID = strings.TrimSpace(input.RelatedCallID)
-	if input.RemoteSessionID == "" || input.TurnID == "" || input.Sequence <= 0 || input.Summary == "" || !agentActivityStates[input.State] || !agentActivityKinds[input.Kind] {
-		writeAgentActivityError(w, http.StatusBadRequest, "invalid_activity", "remote_session_id, turn_id, positive sequence, supported state, supported kind and summary are required")
-		return
-	}
-
-	principal, err := r.principalFromContext(req.Context())
+	principal, err := r.principalFromContext(ctx)
 	if err != nil {
-		writeAgentActivityError(w, http.StatusUnauthorized, "unauthorized", "authorization is required")
-		return
+		return fmt.Errorf("authorization is required for activity")
 	}
-	session, err := r.remote.Get(req.Context(), principal, input.RemoteSessionID)
+	session, err := r.remote.Get(ctx, principal, remoteSessionID)
 	if err != nil {
-		status := http.StatusInternalServerError
-		code := "remote_session_unavailable"
-		switch {
-		case errors.Is(err, remotesession.ErrNotFound):
-			status, code = http.StatusNotFound, "remote_session_not_found"
-		case errors.Is(err, remotesession.ErrForbidden):
-			status, code = http.StatusForbidden, "remote_session_forbidden"
-		}
-		writeAgentActivityError(w, status, code, "remote session is unavailable")
-		return
+		return fmt.Errorf("remote session is unavailable: %w", err)
 	}
-
-	persisted, reason, err := r.acceptAgentActivity(req.Context(), session, input, time.Now().UTC())
-	if err != nil {
-		var conflict *agentActivityConflict
-		if errors.As(err, &conflict) {
-			writeAgentActivityError(w, http.StatusConflict, conflict.Code, conflict.Message)
-			return
-		}
-		writeAgentActivityError(w, http.StatusServiceUnavailable, "activity_unavailable", "activity observation is unavailable")
-		return
-	}
-
-	writeAgentActivityJSON(w, http.StatusAccepted, map[string]any{
-		"status":            "accepted",
-		"persisted":         persisted,
-		"reason":            reason,
-		"remote_session_id": session.ID,
-		"workspace":         session.WorkspaceName,
-		"turn_id":           input.TurnID,
-		"sequence":          input.Sequence,
-		"state":             input.State,
-		"kind":              input.Kind,
-		"related_call_id":   input.RelatedCallID,
-	})
+	return r.acceptEmbeddedAgentActivities(ctx, session, updates, strings.TrimSpace(request.Activity.Intent) != "", runtime.RequestID, now)
 }
 
-func (r *Runtime) acceptAgentActivity(ctx context.Context, session remotesession.Session, input agentActivityRequest, now time.Time) (bool, string, error) {
-	if r == nil || r.state == nil || r.state.DB() == nil {
-		return false, "", fmt.Errorf("activity state store is unavailable")
+func (r *Runtime) acceptEmbeddedAgentActivities(ctx context.Context, session remotesession.Session, updates []embeddedActivityUpdate, startNewTurn bool, relatedCallID string, now time.Time) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	if r == nil || r.state == nil || r.state.DB() == nil || r.observation == nil {
+		return fmt.Errorf("activity state store is unavailable")
+	}
+	relatedCallID = strings.TrimSpace(relatedCallID)
+	if relatedCallID == "" {
+		return fmt.Errorf("runtime call identity is required for activity")
 	}
 	r.activityMu.Lock()
 	defer r.activityMu.Unlock()
 
 	tx, err := r.state.DB().BeginTx(ctx, nil)
 	if err != nil {
-		return false, "", err
+		return err
 	}
 	defer tx.Rollback()
 
-	previous, exists, err := loadAgentActivityState(ctx, tx, session.ID, input.TurnID)
+	previous, exists, err := loadLatestAgentActivityState(ctx, tx, session.ID)
 	if err != nil {
-		return false, "", err
+		return err
 	}
-	if exists {
-		if input.Sequence < previous.Sequence {
-			return false, "", &agentActivityConflict{Code: "stale_sequence", Message: "activity sequence is older than the latest accepted sequence"}
+	if !previous.SeenAt.IsZero() && now.UnixMilli() <= previous.SeenAt.UnixMilli() {
+		// seen_at is persisted with millisecond precision. Advance the next
+		// activity batch by a full persisted tick so ORDER BY seen_at cannot
+		// select an older turn when two tool calls arrive in the same millisecond.
+		now = previous.SeenAt.Add(time.Millisecond)
+	}
+	turnID := ""
+	sequence := int64(0)
+	stateSince := now
+	if !startNewTurn && exists {
+		turnID = previous.TurnID
+		sequence = previous.Sequence
+		if previous.State == "preparing_action" && !previous.StateSince.IsZero() {
+			stateSince = previous.StateSince
 		}
-		if input.Sequence == previous.Sequence {
-			if input.State == previous.State && input.Kind == previous.Kind && input.Summary == previous.Summary && input.RelatedCallID == previous.RelatedCallID {
-				return false, "duplicate", nil
-			}
-			return false, "", &agentActivityConflict{Code: "sequence_conflict", Message: "activity sequence was already used with different content"}
-		}
-		if isTerminalAgentActivityState(previous.State) {
-			return false, "", &agentActivityConflict{Code: "turn_closed", Message: "terminal activity state already closed this turn"}
-		}
+	}
+	if turnID == "" {
+		turnID = "turn_" + strings.TrimPrefix(relatedCallID, "req_")
 	}
 
-	semanticUpdate := !exists || input.State != previous.State || input.Kind != previous.Kind || input.Summary != previous.Summary || input.RelatedCallID != previous.RelatedCallID
-	persistTimeline := semanticUpdate || previous.PersistedAt.IsZero() || now.Sub(previous.PersistedAt) >= agentActivityHeartbeatInterval
-	stateSince := previous.StateSince
-	if !exists || input.State != previous.State || stateSince.IsZero() {
-		stateSince = now
-	}
-	state := agentActivityState{
-		RemoteSessionID: session.ID,
-		TurnID:          input.TurnID,
-		Sequence:        input.Sequence,
-		State:           input.State,
-		Kind:            input.Kind,
-		Summary:         input.Summary,
-		RelatedCallID:   input.RelatedCallID,
-		PersistedAt:     previous.PersistedAt,
-		StateSince:      stateSince,
-		SeenAt:          now,
-	}
-	if persistTimeline {
-		state.PersistedAt = now
-	}
-	if err := saveAgentActivityState(ctx, tx, state); err != nil {
-		return false, "", err
-	}
-	if err := tx.Commit(); err != nil {
-		return false, "", err
-	}
-
-	if persistTimeline {
-		if err := r.observation.Record(ctx, observation.Event{
+	events := make([]observation.Event, 0, len(updates))
+	for index, update := range updates {
+		sequence++
+		createdAt := now.Add(time.Duration(index) * time.Nanosecond)
+		state := agentActivityState{
+			RemoteSessionID: session.ID,
+			TurnID:          turnID,
+			Sequence:        sequence,
+			State:           "preparing_action",
+			Kind:            update.Kind,
+			Summary:         update.Summary,
+			RelatedCallID:   relatedCallID,
+			PersistedAt:     createdAt,
+			StateSince:      stateSince,
+			SeenAt:          createdAt,
+		}
+		if err := saveAgentActivityState(ctx, tx, state); err != nil {
+			return err
+		}
+		events = append(events, observation.Event{
 			Workspace:        session.WorkspaceName,
 			RemoteSessionID:  session.ID,
-			TurnID:           input.TurnID,
-			ActivitySequence: input.Sequence,
-			ActivityKind:     input.Kind,
-			RelatedCallID:    input.RelatedCallID,
+			TurnID:           turnID,
+			ActivitySequence: sequence,
+			ActivityKind:     update.Kind,
+			RelatedCallID:    relatedCallID,
 			Type:             observation.TypeAgentActivity,
 			Phase:            observation.PhaseThoughtSummary,
-			Status:           input.State,
-			ProgressSummary:  input.Summary,
-			Summary:          input.Summary,
-			CreatedAt:        now,
-		}); err != nil {
-			return false, "", err
-		}
-		if semanticUpdate {
-			return true, "semantic_update", nil
-		}
-		return true, "heartbeat_interval", nil
+			Status:           "preparing_action",
+			ProgressSummary:  update.Summary,
+			Summary:          update.Summary,
+			CreatedAt:        createdAt,
+		})
 	}
-	return false, "heartbeat_throttled", nil
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	for _, event := range events {
+		if err := r.observation.Record(ctx, event); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func loadAgentActivityState(ctx context.Context, tx *sql.Tx, remoteSessionID, turnID string) (agentActivityState, bool, error) {
+func loadLatestAgentActivityState(ctx context.Context, tx *sql.Tx, remoteSessionID string) (agentActivityState, bool, error) {
 	var state agentActivityState
 	var persistedAt, stateSince, seenAt int64
 	err := tx.QueryRowContext(ctx, `SELECT remote_session_id, turn_id, sequence, state, kind, summary, related_call_id, persisted_at, state_since, seen_at
-		FROM agent_activity_turns WHERE remote_session_id = ? AND turn_id = ?`, remoteSessionID, turnID).Scan(
+		FROM agent_activity_turns WHERE remote_session_id = ? ORDER BY seen_at DESC, turn_id DESC LIMIT 1`, remoteSessionID).Scan(
 		&state.RemoteSessionID, &state.TurnID, &state.Sequence, &state.State, &state.Kind, &state.Summary, &state.RelatedCallID,
 		&persistedAt, &stateSince, &seenAt,
 	)
@@ -327,10 +254,6 @@ func (r *Runtime) currentAgentActivity(ctx context.Context, remoteSessionID stri
 	return &state, nil
 }
 
-func isTerminalAgentActivityState(state string) bool {
-	return state == "turn_completed" || state == "turn_failed"
-}
-
 func activityMillis(value time.Time) int64 {
 	if value.IsZero() {
 		return 0
@@ -343,27 +266,4 @@ func activityTime(value int64) time.Time {
 		return time.Time{}
 	}
 	return time.UnixMilli(value).UTC()
-}
-
-func writeAgentActivityError(w http.ResponseWriter, status int, code, message string) {
-	writeAgentActivityJSON(w, status, map[string]any{
-		"status": "error",
-		"error":  map[string]any{"code": code, "message": message},
-	})
-}
-
-func writeAgentActivityJSON(w http.ResponseWriter, status int, payload map[string]any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
-}
-
-func ensureSingleJSONValue(decoder *json.Decoder) error {
-	var extra any
-	if err := decoder.Decode(&extra); err == io.EOF {
-		return nil
-	} else if err != nil {
-		return err
-	}
-	return fmt.Errorf("multiple JSON values")
 }

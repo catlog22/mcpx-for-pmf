@@ -28,6 +28,18 @@ const (
 	StatusError            Status = "failed"
 )
 
+// ActivityInput is the model-authored semantic trajectory carried by a normal
+// MCP tool call. Runtime owns lifecycle fields such as turn, sequence, state,
+// and related call identity; clients only provide public semantic summaries.
+type ActivityInput struct {
+	Intent     string `json:"intent,omitempty"`
+	Hypothesis string `json:"hypothesis,omitempty"`
+	Evidence   string `json:"evidence,omitempty"`
+	Conclusion string `json:"conclusion,omitempty"`
+	Next       string `json:"next,omitempty"`
+	Status     string `json:"status,omitempty"`
+}
+
 // Request is the common tool arguments envelope.
 type Request struct {
 	// RequestID and StartedAtMs are populated by the Gateway Runtime Context.
@@ -39,6 +51,7 @@ type Request struct {
 	StepID            string         `json:"-"`
 	Purpose           string         `json:"purpose,omitempty"`
 	Intent            string         `json:"intent,omitempty"`
+	Activity          ActivityInput  `json:"activity,omitempty"`
 	ReasoningSummary  string         `json:"reasoning_summary,omitempty"`
 	ProgressSummary   string         `json:"progress_summary,omitempty"`
 	NextStep          string         `json:"next_step,omitempty"`
@@ -426,7 +439,7 @@ func ParseRequest(raw json.RawMessage) (Request, error) {
 		req.CallID = firstStringValue(flat, "call_id", "callId")
 	}
 	for key, value := range flat {
-		if key == "goal" || key == "purpose" || key == "intent" || key == "reasoning_summary" || key == "progress_summary" || key == "call_id" || key == "callId" || key == "session_id" || key == "remote_session_id" || key == "workspace" || key == "payload" || key == "execution_mode" || isRuntimeField(key) {
+		if key == "goal" || key == "purpose" || key == "intent" || key == "activity" || key == "reasoning_summary" || key == "progress_summary" || key == "call_id" || key == "callId" || key == "session_id" || key == "remote_session_id" || key == "workspace" || key == "payload" || key == "execution_mode" || isRuntimeField(key) {
 			continue
 		}
 		if _, exists := req.Payload[key]; !exists {

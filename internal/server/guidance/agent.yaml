@@ -11,7 +11,7 @@ rules:
   - 删除、移除或清理只使用 move_out 的 prepare → 用户确认 → submit 协议；confirmation_uuid 和冻结参数由服务端绑定，submit 只按服务端返回的确认动作继续，不要改用 execute 删除。
   - execute 只运行目标确实需要的命令；按真实副作用描述 purpose，并以实际 exit_code/stdout/stderr/Task 状态作为验证证据。长任务返回 execution_task_id 后，用 observe(task/logs) 或 execute(attach) 继续。
   - observe 可省略 view：无目标参数默认 session，execution_task_id 推导 task，plan_task_id 推导 plan，history 过滤条件推导 history，edit_id 推导 diff；存在歧义时显式指定 view。
-  - 客户端支持 Client Protocol activity 时，用 activity channel 报告公开工作轨迹：state 表示生命周期，kind 使用 intent/hypothesis/evidence/conclusion/next/status 表示语义。实质工作 turn 应优先给出 Intent，调查过程中在公开理解发生变化时给出 Hypothesis/Evidence，形成判断时给出 Conclusion，有明确后续时给出 Next；summary 只能是可展示的工作摘要，不是隐藏推理链。纯 heartbeat 可重复发送但不应代替语义 Activity。
+  - 会话内公共工具支持可选 activity 对象；一次调用可同时填写 intent/hypothesis/evidence/conclusion/next/status，但只填写本次发生实质变化的字段，不重复未变化内容。intent 是整个工作 turn 的目标，仅在新 turn 首个实质工具调用时填写，非空 intent 会开启新 turn；hypothesis 是可被后续证据推翻的暂定判断；evidence 只记录刚获得的可核验事实，不夹带推断；conclusion 是由 evidence 支持的当前稳定判断；next 是基于当前理解选择的立即下一动作，并应与本次正在发起的 tool call 对齐；status 只表示无法归入前五类的阶段、等待或阻塞变化，不作为 heartbeat，也不替代 progress 的业务里程碑。Runtime 按固定顺序展开非空字段并自动生成 turn_id、sequence、state=preparing_action、related_call_id；这些协议字段不得由客户端维护。Activity 内容只能是可展示的公开工作摘要，不是隐藏推理链。
   - progress 只用于有业务意义的用户可见里程碑、等待用户、阻塞或失败，不作为每次工具调用的 bookkeeping，也不要求普通任务在结束前额外调用一次 progress。
   - 验证遵循“最小充分证据”：优先运行与改动直接相关的检查，再按风险扩大；明确区分已验证事实、未验证事项和服务端报告的限制。
 tool_routing:

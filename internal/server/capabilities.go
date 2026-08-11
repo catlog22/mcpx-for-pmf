@@ -14,28 +14,32 @@ import (
 
 const cleanCoreCapabilityVersion = "clean-core-p9"
 
-const clientProtocolVersion = "1"
+const clientProtocolVersion = "2"
 
 func clientProtocolCapabilities() map[string]any {
-	states := append([]string(nil), agentActivityStateNames...)
-	kinds := append([]string(nil), agentActivityKindNames...)
+	fields := append([]string(nil), agentActivityKindNames...)
 	return map[string]any{
 		"version": clientProtocolVersion,
 		"activity": map[string]any{
-			"version":                agentActivityProtocolVersion,
-			"transport":              "http",
-			"method":                 "POST",
-			"path":                   "/mcp/activity",
-			"auth":                   "same_as_mcp",
-			"content_type":           "application/json",
-			"max_body_bytes":         maxAgentActivityBodyBytes,
-			"heartbeat_interval_ms":  agentActivityHeartbeatInterval.Milliseconds(),
-			"sequence":               "required_monotonic_per_turn_durable",
-			"states":                 states,
-			"kinds":                  kinds,
-			"semantic_update_fields": []string{"state", "kind", "summary", "related_call_id"},
-			"terminal_states":        []string{"turn_completed", "turn_failed"},
-			"summary_semantics":      "public_work_summary_not_chain_of_thought",
+			"version":           agentActivityProtocolVersion,
+			"transport":         "mcp_tool_arguments",
+			"argument":          "activity",
+			"fields":            fields,
+			"field_order":       fields,
+			"multiple_per_call": true,
+			"runtime_managed":   []string{"turn_id", "sequence", "state", "related_call_id"},
+			"state":             "preparing_action",
+			"turn_boundary":     "non_empty_intent_starts_new_turn",
+			"emission_policy":   "emit_only_semantic_changes_do_not_repeat_unchanged_fields",
+			"field_semantics": map[string]any{
+				"intent":     "turn_goal_or_problem_new_turn_only",
+				"hypothesis": "tentative_falsifiable_judgment_not_observed_fact",
+				"evidence":   "new_verifiable_observation_without_inference",
+				"conclusion": "evidence_supported_current_judgment_not_action",
+				"next":       "immediate_selected_action_aligned_with_current_tool_call",
+				"status":     "material_phase_wait_or_block_change_only_not_heartbeat",
+			},
+			"summary_semantics": "public_work_summary_not_chain_of_thought",
 			"current_state": map[string]any{
 				"tool": "observe", "arguments": map[string]any{"view": "session"}, "field": "agent_activity",
 			},
@@ -86,6 +90,15 @@ var toolCapabilityDefinitions = []toolCapabilityDefinition{
 	{Name: "environment", Domain: "environment", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "screenshot_capture", Domain: "screenshot", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "secret_provide", Domain: "secrets", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+}
+
+func toolSupportsEmbeddedActivity(name string) bool {
+	for _, definition := range toolCapabilityDefinitions {
+		if definition.Name == name {
+			return definition.RequiresRemoteSession
+		}
+	}
+	return false
 }
 
 func machineToolCapabilities(effective config.Config, session *remotesession.Session) []map[string]any {

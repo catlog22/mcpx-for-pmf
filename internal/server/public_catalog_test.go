@@ -82,6 +82,41 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 			}
 		}
 	}
+	for name, registered := range runtime.listedToolMap() {
+		var schema map[string]any
+		if err := json.Unmarshal(mcpresult.ToolSchemaJSON(registered), &schema); err != nil {
+			t.Fatalf("decode %s activity schema: %v", name, err)
+		}
+		properties, _ := schema["properties"].(map[string]any)
+		activity, ok := properties["activity"].(map[string]any)
+		if !toolSupportsEmbeddedActivity(name) {
+			if ok {
+				t.Fatalf("%s must not advertise activity without a Remote Session contract: %s", name, mcpresult.ToolSchemaJSON(registered))
+			}
+			continue
+		}
+		if !ok {
+			t.Fatalf("%s must expose optional activity object: %s", name, mcpresult.ToolSchemaJSON(registered))
+		}
+		if activity["type"] != "object" || activity["additionalProperties"] != false {
+			t.Fatalf("%s activity must be a strict object: %+v", name, activity)
+		}
+		activityProperties, _ := activity["properties"].(map[string]any)
+		if len(activityProperties) != 6 {
+			t.Fatalf("%s activity fields=%v, want six semantic fields", name, activityProperties)
+		}
+		for _, field := range []string{"intent", "hypothesis", "evidence", "conclusion", "next", "status"} {
+			entry, _ := activityProperties[field].(map[string]any)
+			if entry["type"] != "string" {
+				t.Fatalf("%s activity.%s must be string: %+v", name, field, entry)
+			}
+		}
+		for _, forbidden := range []string{"kind", "turn_id", "sequence", "state", "summary", "related_call_id"} {
+			if activityProperties[forbidden] != nil {
+				t.Fatalf("%s activity must not expose runtime field %q: %+v", name, forbidden, activityProperties)
+			}
+		}
+	}
 	workspaceTool := runtime.listedToolMap()["workspace"]
 	var workspaceSchema map[string]any
 	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(workspaceTool), &workspaceSchema); err != nil {

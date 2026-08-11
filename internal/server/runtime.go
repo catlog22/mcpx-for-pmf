@@ -373,7 +373,7 @@ func (r *Runtime) Start() error {
 		SessionTimeout:             config.TransportSessionIdleTTL(r.cfg.Transport),
 		Stateless:                  true,
 	})
-	gw := NewGateway(r.cfg, r.oauth, streamable, r.agentActivityHandler())
+	gw := NewGateway(r.cfg, r.oauth, streamable)
 
 	log := logging.With("component", "server")
 	log.Info("listening", "addr", addr, "transport", "streamable-http")
