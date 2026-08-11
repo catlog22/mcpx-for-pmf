@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func joinWrappedObservationLines(text string) string {
@@ -132,7 +133,7 @@ func TestTextRendererDefaultShowsTranscriptContextActionSeparatorAndRunDuration(
 	}
 }
 
-func TestTextRendererRendersIntentOnSeparator(t *testing.T) {
+func TestTextRendererRendersIntentAsActivityLine(t *testing.T) {
 	renderer := NewTextRenderer(false)
 	var output bytes.Buffer
 	for _, event := range []Event{
@@ -152,14 +153,16 @@ func TestTextRendererRendersIntentOnSeparator(t *testing.T) {
 		}
 	}
 	text := output.String()
-	if !strings.Contains(text, "── Intent 追踪利润分成配置到结算计算的完整链路") {
-		t.Fatalf("intent separator missing: %q", text)
+	if !strings.Contains(text, "◇ Intent ── 追踪利润分成配置到结算计算的完整链路 ──") {
+		t.Fatalf("intent activity line missing: %q", text)
 	}
-	if strings.Contains(text, "◇ Intent") {
-		t.Fatalf("intent should not be rendered as a body activity: %q", text)
+	if !strings.Contains(text, "◇ Evidence ── 已确认 profit_sharing_percentage 直接参与结算金额计算 ──") {
+		t.Fatalf("evidence activity line missing: %q", text)
 	}
-	if !strings.Contains(text, "◇ Evidence 已确认 profit_sharing_percentage 直接参与结算金额计算") {
-		t.Fatalf("non-intent activity should remain semantic body output: %q", text)
+	intentIndex := strings.Index(text, "◇ Intent")
+	evidenceIndex := strings.Index(text, "◇ Evidence")
+	if intentIndex < 0 || evidenceIndex <= intentIndex || strings.Contains(text[intentIndex:evidenceIndex], "\n\n") {
+		t.Fatalf("consecutive Activity lines must remain compact: %q", text)
 	}
 }
 
@@ -554,6 +557,57 @@ func TestTextRendererKeepsSourceReadPathAndProgressSummaryComplete(t *testing.T)
 		if got := displayWidth(line); got > width {
 			t.Fatalf("wrapped line width=%d, want <= %d: %q", got, width, line)
 		}
+	}
+}
+
+func TestTextRendererCompactsActivityFlowWithInlineTime(t *testing.T) {
+	renderer := NewTextRenderer(false)
+	var output bytes.Buffer
+	intentAt := time.Date(2026, 8, 12, 1, 32, 22, 0, time.Local)
+	nextAt := intentAt.Add(time.Second)
+	for _, event := range []Event{
+		{Sequence: 1, Type: TypeAgentActivity, ActivityKind: "intent", ProgressSummary: "恢复模型结束时的最终 progress 汇报", CreatedAt: intentAt},
+		{Sequence: 2, Type: TypeAgentActivity, ActivityKind: "next", ProgressSummary: "运行全仓测试并检查最终工作区状态。", CreatedAt: nextAt},
+		{Sequence: 3, RequestID: "req_read_1", Tool: "read", Type: TypeToolCompleted, Status: "succeeded", DurationMs: 13, Input: []byte(`{"view":"file","path":"README.md"}`), Output: []byte(`{"status":"succeeded"}`)},
+		{Sequence: 4, RequestID: "req_read_2", Tool: "read", Type: TypeToolCompleted, Status: "succeeded", DurationMs: 5, Input: []byte(`{"view":"file","path":"go.mod"}`), Output: []byte(`{"status":"succeeded"}`)},
+	} {
+		if err := renderer.RenderEvent(&output, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	text := output.String()
+	for _, want := range []string{
+		"◇ Intent ── 恢复模型结束时的最终 progress 汇报 ── 01:32:22 ──",
+		"◇ Next ── 运行全仓测试并检查最终工作区状态。 ── 01:32:23 ──",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("activity line missing %q: %q", want, text)
+		}
+	}
+	intentIndex := strings.Index(text, "◇ Intent")
+	nextIndex := strings.Index(text, "◇ Next")
+	if intentIndex < 0 || nextIndex <= intentIndex || strings.Contains(text[intentIndex:nextIndex], "\n\n") {
+		t.Fatalf("consecutive Activity events must stay compact: %q", text)
+	}
+	if !strings.Contains(text, "◇ Next ── 运行全仓测试并检查最终工作区状态。 ── 01:32:23 ──\n\n• Read") {
+		t.Fatalf("Activity to first tool must use exactly one blank line: %q", text)
+	}
+	firstRead := strings.Index(text, "• Read")
+	secondRead := strings.LastIndex(text, "• Read")
+	if firstRead < 0 || secondRead <= firstRead || !strings.Contains(text[firstRead:secondRead], "\n\n") {
+		t.Fatalf("tools after Activity must be separated by one blank line: %q", text)
+	}
+	if strings.Contains(text, "\n  ── 01:") || strings.Contains(text, "────────────────────────") {
+		t.Fatalf("Activity flow must not emit standalone separator rules: %q", text)
+	}
+
+	colored := NewTextRendererWithMode(ColorModeANSI16, 80)
+	var coloredOutput bytes.Buffer
+	if err := colored.RenderEvent(&coloredOutput, Event{Sequence: 5, Type: TypeAgentActivity, ActivityKind: "next", ProgressSummary: "运行全仓测试并检查最终工作区状态。", CreatedAt: nextAt}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(coloredOutput.String(), ansiMagenta+"──"+ansiReset) || !strings.Contains(coloredOutput.String(), ansiMagenta+"01:32:23"+ansiReset) {
+		t.Fatalf("Activity separators and time must use the semantic color: %q", coloredOutput.String())
 	}
 }
 

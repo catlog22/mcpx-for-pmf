@@ -14,21 +14,23 @@ import (
 // stateful only for streamed command output, duplicate read folding, filters,
 // and terminal-width bookkeeping; durable event grouping is left to JSON.
 type TextRenderer struct {
-	colorMode               ColorMode
-	width                   int
-	diffMode                DiffMode
-	diffCache               *diffDocumentCache
-	filter                  EventFilter
-	blocks                  map[string]*interactionBlock
-	activeKey               string
-	fallbackSeq             uint64
-	lastProgressFingerprint string
-	lastSemanticFingerprint string
-	lastClosedKey           string
-	duplicateCount          int
-	detail                  bool
-	lastWorkspace           string
-	lastRemoteSessionID     string
+	colorMode                ColorMode
+	width                    int
+	diffMode                 DiffMode
+	diffCache                *diffDocumentCache
+	filter                   EventFilter
+	blocks                   map[string]*interactionBlock
+	activeKey                string
+	fallbackSeq              uint64
+	lastProgressFingerprint  string
+	lastSemanticFingerprint  string
+	lastClosedKey            string
+	pendingActivitySeparator bool
+	compactActivityFlow      bool
+	duplicateCount           int
+	detail                   bool
+	lastWorkspace            string
+	lastRemoteSessionID      string
 }
 
 type interactionBlock struct {
@@ -154,7 +156,23 @@ func (r *TextRenderer) RenderEvent(w io.Writer, event Event) error {
 		return err
 	}
 	if isAgentActivityIntent(event) {
-		return r.renderIntentSeparator(w, event)
+		r.compactActivityFlow = true
+		if r.activeKey != "" {
+			if active := r.blocks[r.activeKey]; active != nil && !active.closed {
+				if err := r.close(w, active); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if event.Type == TypeAgentActivity {
+		r.compactActivityFlow = true
+	}
+	if event.Type != TypeAgentActivity && event.Type != TypeToolStarted && r.pendingActivitySeparator {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		r.pendingActivitySeparator = false
 	}
 	if isProgressTool(event.Tool) && event.Type == TypeToolCompleted {
 		fingerprint := progressFingerprint(event)
@@ -296,6 +314,8 @@ func (r *TextRenderer) ResetAfterGap() {
 	r.lastProgressFingerprint = ""
 	r.lastSemanticFingerprint = ""
 	r.lastClosedKey = ""
+	r.pendingActivitySeparator = false
+	r.compactActivityFlow = false
 	r.duplicateCount = 0
 }
 
@@ -557,17 +577,32 @@ func (r *TextRenderer) close(w io.Writer, block *interactionBlock) error {
 	if block == nil || block.closed {
 		return nil
 	}
-	// Separate interactions with a blank line, a colored rule, and another
-	// blank line. The rule inherits the block's tool color (or muted for
-	// unknown tools) and carries the completion time.
-	if _, err := fmt.Fprintln(w); err != nil {
-		return err
+	if block.tool == TypeAgentActivity {
+		block.closed = true
+		r.lastClosedKey = block.key
+		r.pendingActivitySeparator = true
+		if r.activeKey == block.key {
+			r.activeKey = ""
+		}
+		return nil
 	}
-	if err := r.writeActionSeparator(w, block); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintln(w); err != nil {
-		return err
+	if r.compactActivityFlow {
+		// Once an Activity turn is visible, keep subsequent tool interactions
+		// compact: one blank line only, with no rule or wall-clock separator.
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+	} else {
+		// Legacy standalone tool interactions keep the colored completion rule.
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		if err := r.writeActionSeparator(w, block); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
 	}
 	block.closed = true
 	r.lastClosedKey = block.key
@@ -600,44 +635,11 @@ func isAgentActivityIntent(event Event) bool {
 	return event.Type == TypeAgentActivity && strings.EqualFold(strings.TrimSpace(event.ActivityKind), "intent")
 }
 
-func (r *TextRenderer) renderIntentSeparator(w io.Writer, event Event) error {
-	if r.activeKey != "" {
-		if active := r.blocks[r.activeKey]; active != nil && !active.closed {
-			if err := r.close(w, active); err != nil {
-				return err
-			}
-		}
+func eventClock(event Event) string {
+	if event.CreatedAt.IsZero() {
+		return ""
 	}
-
-	summary := strings.TrimSpace(event.ProgressSummary)
-	if summary == "" {
-		summary = strings.TrimSpace(event.Summary)
-	}
-	summary = sanitizeTerminalText(summary)
-	line := "  ── Intent"
-	if summary != "" {
-		line += " " + summary
-	}
-
-	trailing := 12
-	available := r.width - displayWidth(line) - 1
-	if available < trailing {
-		trailing = available
-	}
-	if trailing < 2 {
-		trailing = 2
-		maxLabelWidth := r.width - trailing - 1
-		if maxLabelWidth > 0 {
-			line = truncateRenderedLine(line, maxLabelWidth)
-		}
-	}
-	line += " " + strings.Repeat("─", trailing)
-	semanticColor := pickColor(ansiMagenta, ansiTrueMagenta, r.colorMode)
-	if err := writeSeparatorLine(w, line, semanticColor, r.colorMode); err != nil {
-		return err
-	}
-	_, err := fmt.Fprintln(w)
-	return err
+	return event.CreatedAt.In(time.Local).Format("15:04:05")
 }
 
 func (r *TextRenderer) writeActionSeparator(w io.Writer, block *interactionBlock) error {

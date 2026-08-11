@@ -56,31 +56,34 @@ Runtime 边界内；所有有状态操作都绑定 `remote_session_id`，并通�
 ## 公开工具
 
 `tools/list` 是工具名称、描述、参数 Schema 和 Annotation 的唯一权威来源。
-当前公开工具共 18 个，分为 11 个 core tools 和 7 个 support tools：
+当前公开工具共 20 个，分为 13 个 core tools 和 7 个 support tools：
 
 | 领域 | 工具 | 主要用途 |
 | --- | --- | --- |
-| Core | `session` | open、attach、close Remote Session |
-| Core | `read` | 文件、搜索、列表、上下文和环境读取 |
-| Core | `edit` | 精确 replacement、批量编辑、原子写和格式保留；不提供删除 |
-| Core | `move_out` | `action=prepare` 只读冻结安全移出 manifest；用户确认后 `action=submit` 将目标移入系统回收站 |
-| Core | `observe` | session、task、history、changes、logs、diff 观察 |
-| Core | `execute` | 命令或项目 Task 执行，以及 attach、stop、stdin |
-| Core | `plan` | create、read、advance、complete、block、replan、deliver |
+| Core | `workspace` | 零参数列出已注册 Workspace，供建立会话前选择 |
+| Core | `session` | 创建、恢复或关闭 Remote Session；省略 action 默认 open/resume |
+| Core | `read` | 读取、搜索、列举或组装 Workspace 源码上下文；环境事实使用 `environment_read` |
+| Core | `edit` | 创建、更新或重命名 Workspace 文件；使用 SHA revision guard 和幂等语义，不提供删除 |
+| Core | `move_out` | `prepare` 冻结明确的文件/目录/symlink manifest；用户确认后 `submit` 仅携带 `confirmation_uuid` |
+| Core | `observe` | 查看 session、Execution Task、Plan Task、history、changes、logs 或 diff |
+| Core | `progress` | 发布有业务意义的用户可见里程碑、等待、阻塞或失败状态 |
+| Core | `execute` | 按策略执行命令或项目 Task，以及 attach、stop、stdin |
+| Core | `plan` | create、read、advance、complete、block、replan、deliver 持久化计划 |
 | Core | `artifact` | 产物登记、列表和分片读取 |
-| Core | `discover` | 显式发现 Skill 或上游 MCP，并签发 discovery lease |
-| Core | `skill_call` | 调用已由 `discover` 返回的 Skill |
-| Core | `mcp_call` | 调用已由 `discover` 返回的上游 MCP 工具 |
-| Support | `operation_batch` | 并发或按依赖 DAG 执行多个工具 |
-| Support | `operation_manage` | 查询、等待、读取结果、取消和恢复异步操作 |
-| Support | `runtime_read` | 读取能力、项目摘要和适用指令 |
-| Support | `environment_read` | 读取当前环境或比较环境快照 |
-| Support | `environment` | 保存环境快照 |
-| Support | `screenshot_capture` | 截取显示器或区域 |
-| Support | `secret_provide` | 提供仅驻留内存的 Secret |
+| Core | `discover` | 显式发现 Skill 或上游 MCP，并签发 discovery revision |
+| Core | `skill_call` | 调用已由 `discover` 返回且 revision 匹配的 Skill |
+| Core | `mcp_call` | 调用已由 `discover` 返回且 revision 匹配的上游 MCP 工具 |
+| Support | `operation_batch` | 并发或按依赖 DAG 执行多个公开工具操作 |
+| Support | `operation_manage` | 查询、等待、读取结果、取消和恢复异步 Operation |
+| Support | `runtime_read` | 读取运行时能力、项目摘要或适用指令 |
+| Support | `environment_read` | 读取当前主机/工具链环境或比较已保存快照 |
+| Support | `environment` | 保存当前环境快照 |
+| Support | `screenshot_capture` | 按明确 purpose 截取显示器或屏幕区域 |
+| Support | `secret_provide` | 按明确 purpose 提供仅驻留内存的 Secret |
 
-所有有状态工具统一使用完整的 `remote_session_id`；`tools/list`、session
-bootstrap、capability manifest 和 recovery action 使用同一组名称与 Schema。
+`workspace` 和 `session` 负责发现 Workspace 与建立/恢复会话；进入 Workspace 后，源码变更、命令、
+Plan、Artifact 等有状态操作都以服务端返回的完整 `remote_session_id` 为关联主键。`runtime_read`、
+`environment_read` 等读取型支持工具在参数足够时也可独立读取运行时或环境事实。
 
 ## 设计边界
 
@@ -104,7 +107,7 @@ MCPX 只提供 Streamable HTTP 的 `/mcp` 端点，不提供旧版 HTTP+SSE 的 
 - [FRP + Caddy 原生部署：公网暴露 MCPX（非 Docker）](docs/frp-caddy-native.md)
 - [FRP + Caddy + Docker Compose：公网暴露 MCPX（MCPX 保持原生运行）](docs/frp-caddy-docker-compose.md)
 
-两篇教程都保持 MCPX 原生运行，保留对本地 Workspace、工具链、桌面和扩展能力的访问。原生版直接运行 Caddy/frps/frpc；Docker Compose 版只容器化 Caddy/frps/frpc。两篇文档均预留 OpenAI / ChatGPT 配置截图位置。
+两篇教程都保持 MCPX 原生运行，保留对本地 Workspace、工具链、桌面和扩展能力的访问。原生版直接运行 Caddy/frps/frpc；Docker Compose 版只容器化 Caddy/frps/frpc。两篇文档均包含 OpenAI / ChatGPT Remote MCP 配置示例与截图。
 
 ## 快速开始
 
@@ -134,9 +137,21 @@ CI 会构建带 provenance 的二进制并通过 `mcpx -version` 校验 commit/d
 
 ### 启动服务
 
+前台运行：
+
 ```bash
 ./bin/mcpx
 ```
+
+后台运行：
+
+```bash
+./bin/mcpx -d
+```
+
+后台模式会记录 daemon 状态到 `~/.mcpx/mcpx-daemon.json`，日志写入
+`~/.mcpx/logs/mcpx-daemon.log`。再次启动前台服务或新的后台实例时，MCPX 会先停止
+状态文件中仍存活的旧后台进程。
 
 注册或更新一个 Workspace：
 
@@ -175,21 +190,35 @@ http://127.0.0.1:9090/mcp
 ./bin/mcpx -h
 ```
 
-服务端命令包括：
+主要命令包括：
 
 ```text
-mcpx [flags]                   启动 Streamable HTTP 服务
-mcpx observe [flags] <name>    终端只读观测 Workspace 事件
-mcpx workspace register <path> 注册或更新 Workspace
-mcpx oauth-register [url]      动态注册 OAuth 客户端
+mcpx [flags]                     启动 Streamable HTTP 服务
+mcpx observe [flags] <name>      终端只读观测 Workspace 事件
+mcpx workspace register <path>   注册或更新 Workspace（不启动服务）
+mcpx oauth-register [url]        动态注册 OAuth 客户端
+mcpx update [flags]              从 GitHub Release 检查并安装新版本
 ```
+
+服务进程常用 flags 包括 `-addr`、`-log-level`、`-log-format`、`-d` 和 `-version`。
+自更新支持：
+
+```bash
+./bin/mcpx update --check
+./bin/mcpx update
+./bin/mcpx update --version 0.8.5
+```
+
+`update` 会选择当前平台对应的 GitHub Release 产物，校验 `checksums.txt` 中的 SHA-256，
+再验证下载后的二进制版本并替换当前可执行文件；访问 GitHub API 需要认证时可使用
+`GITHUB_TOKEN`。
 
 ## 配置
 
 ### 全局配置
 
 全局配置路径为 `~/.mcpx/config.yaml`，可用 `MCPX_HOME` 改变根目录。
-下面是常用配置的最小示例：
+下面是一个偏保守的常用配置示例；相比首次生成的默认配置，它把未知命令的默认决策收紧为 `confirm`：
 
 ```yaml
 server:
@@ -237,12 +266,18 @@ limits:
   max_result_bytes: 262144
 ```
 
-默认值包括：监听 `127.0.0.1:9090`、窗口读取返回上限 1 MiB、显式 full 源文件上限
-4 MiB、单次 Edit 最多 20 个文件和 2000 行真实差异、工具内联结果上限 256 KiB、
-终端、Skill 和上游 MCP 发现默认启用。
+首次生成配置的主要默认值包括：监听 `127.0.0.1:9090`；Streamable HTTP transport
+空闲 Session TTL 为 `24h`；窗口读取安全预算为 1 MiB，显式 `full` 源文件硬上限为 4 MiB；
+文件策略默认 `max_patch_files=20`、`max_patch_lines=2000`，而公开 `edit` 工具还有独立的
+1000 changed-lines 硬上限；工具结果预算为 256 KiB；Terminal、File Watch、Skill 和上游 MCP
+发现默认启用。状态保留任务默认每天运行一次，过程事件与终端 Task 默认保留 30 天，模型记忆事件
+保留 180 天，环境快照保留 90 天。
 
-命令策略按 `deny`、`confirm`、`allow` 和默认决策执行。显式 `deny` 或
-`confirm` 规则优先于默认值。公网部署不要使用 `open`，应使用 `oauth`、
+需要特别注意：当前首次生成的 `config.yaml` 使用 `security.commands.default: allow`，同时内置
+`git push` / `docker` / `npm install` 的 `confirm` 规则和 `rm -rf /` / `mkfs` / `shutdown` 的
+`deny` 规则；`auto_allow_readonly` 未显式配置时也会自动允许受支持的只读命令。策略匹配顺序是
+`deny` → `confirm` → `allow` → 只读自动放行 → `default`。共享环境或公网部署建议像上面的示例一样
+把默认决策收紧为 `confirm` 或 `deny`。公网部署同时不要使用 `auth.mode: open`，应使用 `oauth`、
 `bearer` 或 `dual`，并配置最小权限规则。
 
 ### 项目配置
@@ -380,18 +415,21 @@ curl -sS -m 5 \
 
 ### 1. 建立会话和能力缓存
 
-1. Workspace 已知时直接调用 `session(action="open")`。
-2. 保存返回的完整 `remote_session_id`；需要接力时用 `session(action="attach")` 复用该会话。
-3. 调用 `runtime_read(view="capabilities")` 获取当前能力和工具 Schema。
-4. 缓存 `tool_schema_revision`、`capability_manifest_revision`、
-   `guidance_revision`、`instruction_revision`、`skill_revision` 和 `mcp_revision`。
-5. 后续 `session(action="open")` 或 `runtime_read` 传 `known_revisions`，已知版本未变化时
-   直接复用本地缓存。
+1. Workspace 名称未知时先调用零参数 `workspace`，从返回清单中选择项目。
+2. 使用 `session(action="open", workspace="...")` 创建 Remote Session；省略 `action` 也默认 open。
+3. 保存服务端返回的完整 `remote_session_id`。恢复已有会话时再次调用
+   `session(action="open", remote_session_id="...")`，不要改写、缩写或重建这个 ID。
+4. `session` bootstrap 已返回工具能力、Skill、上游 MCP、适用指令、项目摘要和一组 revision；
+   需要单独刷新能力时调用 `runtime_read(view="capabilities")`。
+5. 客户端可以缓存 `tool_schema_revision`、`capability_manifest_revision`、`guidance_revision`、
+   `instruction_revision`、`skill_revision`、`mcp_revision`、`session_capability_revision` 和
+   `client_protocol_revision`，再与后续 bootstrap / `runtime_read` 返回值比较，按变化范围刷新本地缓存。
+   当前公开 Schema 不接受 `known_revisions` 参数。
 
-ARC V2 将工具 effect 与 Agent 语义轨迹分开：`purpose` 只描述本次工具操作的作用，
+ARC 2.0 将工具 effect 与 Agent 语义轨迹分开：`purpose` 只描述本次工具操作的作用，
 `plan_id`、`plan_task_id`、`execution_task_id`、`operation_id` 用于绑定执行上下文。Client Protocol Activity V3 直接嵌入会话内 MCP 工具参数：可选 `activity` 对象允许同一次调用同时提供 `intent`、`hypothesis`、`evidence`、`conclusion`、`next`、`status`，但只应填写本次发生实质变化的字段，不重复未变化内容。`intent` 是整个工作 turn 的目标并开启新 turn；`hypothesis` 是待验证且可被推翻的暂定判断；`evidence` 只写刚获得的可核验事实；`conclusion` 写由 evidence 支持的当前判断；`next` 表示立即要执行且与当前 tool call 对齐的动作；`status` 只用于无法归入前五类的阶段、等待或阻塞变化。Runtime 按固定顺序展开非空字段，并自动生成 `turn_id`、`sequence`、`state=preparing_action`、`related_call_id`。旧 `/mcp/activity` HTTP ingress 已移除。服务端只把已经接受并持久化的真实 Activity snapshot 放入 `structuredContent.context.activity` 和 `_meta["mcpx.result"].mcpx.result.context.activity`；ARC 不直接复制 raw tool input，也不会从工具结果反推、伪造 Activity。`reasoning_summary`、`progress_summary`、`next_step` 不再属于 ARC context。
 `move_out(action="submit")` 的业务参数只有 `action`、`remote_session_id`、`confirmation_uuid`；公共可选 `activity` 只记录公开工作轨迹，不改变 prepare 时由服务端冻结的业务语义。
-需要发布有业务意义的里程碑、等待用户、阻塞或失败状态时，使用 `progress`；它不是 Activity heartbeat，也不要求每个普通工具调用额外执行一次。
+`progress` 不作为每个普通工具调用的 heartbeat；过程只在有业务意义的里程碑、等待、阻塞或失败时发布。任务正常完成并准备给用户最终回复前，必须调用一次 `progress(status="completed")`，用 `current` 汇总完成状态、`result` 列出已验证结果。
 
 终端观测使用普通 stdout/stderr pipe，不依赖 PTY、tmux 或 ConPTY。观测事件先写入
 durable Store，再通过本地 JSONL 帧推送；`observe --format=json`、终端 text 渲染和
@@ -407,8 +445,7 @@ durable Store，再通过本地 JSONL 帧推送；`observe --format=json`、终�
   "remote_session_id": "rs_...",
   "view": "file",
   "path": "src/main.ts",
-  "mode": "window",
-  "purpose": "读取入口文件并确认当前版本"
+  "mode": "window"
 }
 ```
 
@@ -538,7 +575,7 @@ preflight audit 成功写入后，原始 command 才会一次性交给 shell。�
 使用已知 ID：
 
 ```text
-observe(view="status", execution_task_id="task_...")
+observe(view="task", execution_task_id="task_...")
 observe(view="logs", execution_task_id="task_...", stdout_offset=0, stderr_offset=0)
 execute(action="attach", execution_task_id="task_...", yield_time_ms=30000)
 ```
@@ -596,7 +633,7 @@ operation_manage(action="result", operation_id="op_...")
 不会再额外复制一份顶层 aggregate/raw MCP envelope；需要聚合结果或分页字节时显式调用
 `operation_manage(action="result")`。客户端不需要解析嵌套的 `content[].text`。
 
-### 6. 统一响应
+### 7. 统一响应
 
 工具默认文本适合模型和宿主直接展示；机器结果同时保存在
 `structuredContent` 和 ARC 元数据 `_meta["mcpx.result"]`。响应状态包括：
@@ -624,15 +661,20 @@ mcpx://remote-sessions/{remote_session_id}/tasks/{execution_task_id}/logs
 mcpx://remote-sessions/{remote_session_id}/artifacts/{artifact_id}
 ```
 
-ARC 的机器结果固定包含 `context`：
+ARC 2.0 的 `structuredContent.context` 保持精简，只携带当前结果真正存在的语义与关联字段：
 
 ```json
 {
   "context": {
     "purpose": "验证命令执行结果",
-    "reasoning_summary": "先确认最小执行链路",
-    "progress_summary": "命令已完成并返回 exit_code=0",
-    "next_step": "检查异常任务恢复",
+    "activity": {
+      "turn_id": "turn_...",
+      "sequence": 3,
+      "state": "preparing_action",
+      "kind": "evidence",
+      "summary": "相关测试已通过",
+      "related_call_id": "call_..."
+    },
     "plan_id": "pl_...",
     "plan_task_id": "pt_...",
     "execution_task_id": "task_...",
@@ -641,8 +683,12 @@ ARC 的机器结果固定包含 `context`：
 }
 ```
 
-终端文本默认展示作用、进展、下一步、判断依据以及 Plan / Plan Task / Execution Task；
-`-detail` 继续展示 operation 等更细的执行元数据。普通结果不会因为只有内部 `operation_id` 而额外生成 Context 区块。
+其中 `activity` 来自 Runtime 已接受并持久化的 Client Protocol Activity snapshot；字段不存在时不会
+为了填满结构而伪造。旧的 `reasoning_summary`、`progress_summary`、`next_step` 不属于公开 ARC context，
+语义轨迹统一通过 `activity` 表达。`progress` 负责用户可见的阶段与终态：过程按需发布里程碑、等待、阻塞或失败；正常任务在最终回复前固定发布一次 `completed`，并在 `result` 中列出已验证结果。新的 `session` bootstrap 还会返回最新的 model progress state（若存在）。
+
+终端文本按可用信息展示 `purpose`、最新 Activity 以及 Plan / Plan Task / Execution Task / Operation
+关联信息；`-detail` 再追加 call、path 等执行元数据。
 
 ## 本机终端观测
 
@@ -683,7 +729,7 @@ ARC 的机器结果固定包含 `context`：
 - 事件行：状态标记（`•` / `!` / `?`）+ 语义动作（`Read`、`Edited`、`Ran`、`Searched`）+ 目标标签；
 - 事实与结果：2 空格缩进的子行，展示耗时、退出码、结果摘要与失败原因；
 - 命令输出：4 空格缩进、行首带行号，并按 stdout / stderr 区分着色。
-- 交互之间以「空行 + 彩色分隔线（`───`，含完成时间）+ 空行」分隔；超过终端宽度自动软换行。
+- Activity 使用单行紧凑格式 `◇ Kind ── 内容 ── HH:mm:ss ──`，状态、彩色分隔符和事件时间保持在同一行；连续 Activity 不插空行。进入 Activity flow 后，后续工具交互之间只保留一个空行，不再输出独立分隔线或墙钟时间；未进入 Activity flow 的独立工具交互仍保留原有完成分隔线。超过终端宽度自动软换行。
 
 颜色层级（ui-ux-pro-max 语义色规范）：
 
@@ -694,7 +740,7 @@ ARC 的机器结果固定包含 `context`：
 - 命令输出行号使用 muted 色，stdout 弱化（dim）、stderr 黄色；
 - 支持真彩色终端时全部语义色升级为 true-color 变体，普通终端降级 ANSI 16 色，`NO_COLOR=1` 或非终端完全无色。
 
-ARC 内容仍先显示 `Read`、`Edited`、`Ran`、`Searched` 等语义动作，再显示 Context（作用、进展、下一步、判断依据、Plan / Task / Execution Task）、执行事实和结果；命令 stdout/stderr 带行号。内部 `operation.*` 调度事件、重复的远端 `*.started`/`*.completed` notice 默认静默，只保留失败、取消等对人有用的最终结果。ARC 人类展示层继续按工具和状态使用稳定 ANSI 颜色，Diff 默认完整（`-diff full`），区分新增、删除和上下文；支持真彩色终端时使用真彩色，普通终端降级 ANSI 16 色。设置 `NO_COLOR=1` 可关闭颜色，`COLORTERM=truecolor` 或 `24bit` 启用真彩色；非终端（管道/重定向）自动关闭颜色。
+ARC 内容仍先显示 `Read`、`Edited`、`Ran`、`Searched` 等语义动作，再按实际存在的字段显示 Context（`purpose`、最新 Activity、Plan / Task / Operation 关联信息）、执行事实和结果；命令 stdout/stderr 带行号。内部 `operation.*` 调度事件、重复的远端 `*.started`/`*.completed` notice 默认静默，只保留失败、取消等对人有用的最终结果。ARC 人类展示层继续按工具和状态使用稳定 ANSI 颜色，Diff 默认完整（`-diff full`），区分新增、删除和上下文；支持真彩色终端时使用真彩色，普通终端降级 ANSI 16 色。设置 `NO_COLOR=1` 可关闭颜色，`COLORTERM=truecolor` 或 `24bit` 启用真彩色；非终端（管道/重定向）自动关闭颜色。
 
 `-detail` 会追加 operation、call、path 等执行元数据；默认视图只展示必要事实，避免与事件行重复。机器处理、重定向或管道场景也可直接使用默认 `text` 模式，或选择 `--format json` 获取无格式的完整事件。
 事件中保留 `event_id`、`sequence`、`request_id`、`operation_id`、`plan_task_id`、
@@ -708,8 +754,9 @@ ARC 内容仍先显示 `Read`、`Edited`、`Ran`、`Searched` 等语义动作，
 - Remote Session 使用 `viewer`、`editor`、`approver` 和 `owner` 角色。
 - 命令和文件都经过策略匹配；命令可允许、要求确认或拒绝，文件变更还会检查
   SHA-256、路径和差异预算。
-- `user_confirmed` 只表达用户对同一业务参数的语义确认；服务端保存待确认摘要，
-  不要求模型复制确认 token。
+- `execute`、Skill/MCP 等需要确认的调用可通过 `user_confirmed` 表达用户对同一冻结业务请求的确认，
+  服务端仍会重新执行权限与策略检查；`move_out` 使用独立的 `prepare → confirmation_uuid → submit`
+  协议，`submit` 只接受服务端签发的确认 UUID 和 `remote_session_id`。
 - `secret_provide` 的明文值只在进程内短期使用，不写入 SQLite、Workspace 或日志。
 - SQLite、Task 日志、OAuth 客户端注册和 Token 密钥位于 `~/.mcpx/`，运行时使用
   受限文件权限；不要把真实 Token、密码或 Secret 写入仓库和命令字符串。
@@ -722,17 +769,22 @@ ARC 内容仍先显示 `Read`、`Edited`、`Ran`、`Searched` 等语义动作，
 仓库结构：
 
 ```text
-cmd/mcpx-server       服务入口、observe 终端观测、workspace 注册和 oauth-register
-internal/server       HTTP Gateway、公开工具和 Resource 注册
+cmd/mcpx-server       服务入口、后台模式、observe、workspace、oauth-register 和 update
+internal/server       HTTP Gateway、20 个公开工具、Resource、capability 与协议适配
+internal/arc          ARC 2.0 结果契约、structuredContent、呈现与 trace metadata
+internal/remotesession Remote Session、角色、handoff 与持久化事件
 internal/edit         Edit 解析、原子写、格式保留和变更摘要
+internal/deletion     move_out 请求、确认凭据和安全移出状态
 internal/operation    异步 Operation、依赖调度和结果分页
-internal/terminal     Task 生命周期、日志、端口和诊断
+internal/terminal     Execution Task 生命周期、日志、端口和诊断
 internal/source       搜索、列表、上下文和批量读取
-internal/observation  事件存储、本机观测和终端渲染
+internal/environment  主机/工具链环境检查、快照与比较
+internal/observation  事件存储、本机观测、Activity 和终端渲染
 internal/auth         Bearer、OAuth、Principal 和 ACL
 internal/config       全局/项目配置及 MCP/Skill 发现
-docs/plans             实现计划
-docs/specs             设计规格
+internal/update       GitHub Release 自更新、checksum 和二进制替换
+docs/plans            实现计划
+docs/specs            设计规格
 ```
 
 提交前运行：

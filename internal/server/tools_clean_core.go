@@ -253,7 +253,7 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 
 	r.addTool(s, cleanCoreTool("progress", desc["progress"], map[string]any{
 		"remote_session_id": remoteSession,
-		"status":            enumSchema("有业务意义的用户可见里程碑状态；普通工具调用和任务结束不要求额外 progress", "in_progress", "completed", "waiting_for_user", "blocked", "failed"),
+		"status":            enumSchema("用户可见进度或终态；普通工具调用不要求逐次 progress，任务正常完成并准备最终回复前必须发送一次 completed，等待、阻塞或失败使用对应状态", "in_progress", "completed", "waiting_for_user", "blocked", "failed"),
 		"current":           stringSchema("当前阶段或终态的用户可见摘要；陈述已发生或正在发生的工作"),
 		"result": map[string]any{
 			"type": "array", "maxItems": maxProgressResultItems,

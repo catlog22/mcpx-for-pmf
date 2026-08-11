@@ -60,7 +60,7 @@ func TestRuntimeReadAndProgressSchemasMatchSimplifiedProtocol(t *testing.T) {
 	}
 	status := progressSchema["properties"].(map[string]any)["status"].(map[string]any)
 	description, _ := status["description"].(string)
-	if strings.Contains(description, "停止 MCPX 工具调用前必须") || !strings.Contains(description, "不要求额外 progress") {
-		t.Fatalf("progress status still encodes client bookkeeping: %q", description)
+	if !strings.Contains(description, "最终回复前") || !strings.Contains(description, "必须发送一次 completed") || !strings.Contains(description, "不要求逐次 progress") {
+		t.Fatalf("progress status does not encode the terminal report contract: %q", description)
 	}
 }

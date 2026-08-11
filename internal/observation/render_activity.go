@@ -20,7 +20,13 @@ func renderAgentActivity(w io.Writer, event Event, options renderOptions) error 
 	summary = sanitizeTerminalText(summary)
 	color := options.colorMode != ColorModeNone
 	semanticColor := pickColor(ansiMagenta, ansiTrueMagenta, options.colorMode)
-	if _, err := fmt.Fprintf(w, "%s %s %s\n", paint("◇", semanticColor, color), paint(kind, semanticColor, color), summary); err != nil {
+	separator := paint("──", semanticColor, color)
+	clock := eventClock(event)
+	if clock == "" {
+		if _, err := fmt.Fprintf(w, "%s %s %s %s %s\n", paint("◇", semanticColor, color), paint(kind, semanticColor, color), separator, summary, separator); err != nil {
+			return err
+		}
+	} else if _, err := fmt.Fprintf(w, "%s %s %s %s %s %s %s\n", paint("◇", semanticColor, color), paint(kind, semanticColor, color), separator, summary, separator, paint(clock, semanticColor, color), separator); err != nil {
 		return err
 	}
 	if !options.detail {

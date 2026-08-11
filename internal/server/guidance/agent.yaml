@@ -12,7 +12,7 @@ rules:
   - execute 只运行目标确实需要的命令；按真实副作用描述 purpose，并以实际 exit_code/stdout/stderr/Task 状态作为验证证据。长任务返回 execution_task_id 后，用 observe(task/logs) 或 execute(attach) 继续。
   - observe 可省略 view：无目标参数默认 session，execution_task_id 推导 task，plan_task_id 推导 plan，history 过滤条件推导 history，edit_id 推导 diff；存在歧义时显式指定 view。
   - 会话内公共工具支持可选 activity 对象；一次调用可同时填写 intent/hypothesis/evidence/conclusion/next/status，但只填写本次发生实质变化的字段，不重复未变化内容。intent 是整个工作 turn 的目标，仅在新 turn 首个实质工具调用时填写，非空 intent 会开启新 turn；hypothesis 是可被后续证据推翻的暂定判断；evidence 只记录刚获得的可核验事实，不夹带推断；conclusion 是由 evidence 支持的当前稳定判断；next 是基于当前理解选择的立即下一动作，并应与本次正在发起的 tool call 对齐；status 只表示无法归入前五类的阶段、等待或阻塞变化，不作为 heartbeat，也不替代 progress 的业务里程碑。Runtime 按固定顺序展开非空字段并自动生成 turn_id、sequence、state=preparing_action、related_call_id；这些协议字段不得由客户端维护。Activity 内容只能是可展示的公开工作摘要，不是隐藏推理链。
-  - progress 只用于有业务意义的用户可见里程碑、等待用户、阻塞或失败，不作为每次工具调用的 bookkeeping，也不要求普通任务在结束前额外调用一次 progress。
+  - progress 不作为每次工具调用的 bookkeeping；过程只在有业务意义的里程碑、等待用户、阻塞或失败时发布。任务正常完成并准备给用户最终回复前，必须调用一次 progress(status="completed")，用 current 汇总完成状态、result 列出已验证结果；若终止于等待、阻塞或失败，则使用对应 terminal status。
   - 验证遵循“最小充分证据”：优先运行与改动直接相关的检查，再按风险扩大；明确区分已验证事实、未验证事项和服务端报告的限制。
 tool_routing:
   select_workspace: [workspace]

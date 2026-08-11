@@ -6,7 +6,7 @@ tools:
   edit: 创建、更新或重命名 Workspace 文件；使用 revision guard 和幂等语义，不提供删除。删除/移出使用 move_out。
   move_out: 安全移出明确文件、目录或 symlink；prepare 冻结 manifest，用户确认后 submit 仅携带服务端 confirmation_uuid。
   observe: 查看会话、执行 Task、Plan Task、历史、变更、日志或 diff；目标唯一时可省略 view，任务日志支持流式 offset 续读。
-  progress: 发布有业务意义的用户可见里程碑、等待、阻塞或失败状态；不是工具 heartbeat，也不是每次调用的必需 bookkeeping。
+  progress: 发布用户可见进度与终态；过程仅用于有业务意义的里程碑、等待、阻塞或失败，任务正常完成并准备最终回复前必须用 completed + result 汇报一次最终结果。
   execute: 按策略执行命令或项目任务并处理 attach/stop/stdin；purpose 必须描述真实目标和副作用，长命令返回 execution_task_id。
   plan: 创建、读取、推进、阻塞、重规划或交付持久化计划。
   operation_batch: 按 DAG 提交多个公开工具操作；无依赖步骤可并发。
