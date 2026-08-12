@@ -42,77 +42,150 @@ type ToolProgress struct {
 // ProgressHandler receives progress for an upstream tools/call.
 type ProgressHandler func(ToolProgress)
 
-// CallTool starts a stdio MCP client, calls tool, and closes the session.
+// ClientSession owns one upstream stdio MCP process. ListTools and CallTool on
+// the same value observe and execute against the same upstream instance.
+type ClientSession struct {
+	srv           config.MCPServer
+	session       *mcp.ClientSession
+	cancel        context.CancelFunc
+	onProgress    ProgressHandler
+	callbackMu    sync.Mutex
+	progressMu    sync.Mutex
+	progressToken string
+	progressReset chan struct{}
+	callStarted   time.Time
+}
+
+// OpenClientSession connects one upstream MCP process for a bounded operation.
+func OpenClientSession(ctx context.Context, srv config.MCPServer, onProgress ProgressHandler) (*ClientSession, error) {
+	client := &ClientSession{srv: srv, onProgress: onProgress}
+	var options *mcp.ClientOptions
+	if onProgress != nil {
+		options = &mcp.ClientOptions{ProgressNotificationHandler: client.handleProgress}
+	}
+	session, cancel, err := connect(ctx, srv, mcpConnectTimeout, options)
+	if err != nil {
+		return nil, err
+	}
+	client.session = session
+	client.cancel = cancel
+	return client, nil
+}
+
+func (c *ClientSession) handleProgress(_ context.Context, req *mcp.ProgressNotificationClientRequest) {
+	if req == nil || req.Params == nil {
+		return
+	}
+	c.progressMu.Lock()
+	token := c.progressToken
+	reset := c.progressReset
+	started := c.callStarted
+	c.progressMu.Unlock()
+	if token == "" || fmt.Sprint(req.Params.ProgressToken) != token {
+		return
+	}
+	c.deliver(ToolProgress{
+		Message: req.Params.Message, Progress: req.Params.Progress, Total: req.Params.Total,
+		Elapsed: time.Since(started),
+	})
+	if reset != nil {
+		select {
+		case reset <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (c *ClientSession) deliver(update ToolProgress) {
+	if c == nil || c.onProgress == nil {
+		return
+	}
+	c.callbackMu.Lock()
+	defer c.callbackMu.Unlock()
+	c.onProgress(update)
+}
+
+// Close terminates the owned upstream MCP process.
+func (c *ClientSession) Close() {
+	if c == nil {
+		return
+	}
+	if c.session != nil {
+		_ = c.session.Close()
+	}
+	if c.cancel != nil {
+		c.cancel()
+	}
+}
+
+// ListTools reads tools/list on this exact upstream instance.
+func (c *ClientSession) ListTools(ctx context.Context) ([]*mcp.Tool, error) {
+	if c == nil || c.session == nil {
+		return nil, fmt.Errorf("upstream mcp session is not connected")
+	}
+	listCtx, cancel := context.WithTimeout(ctx, mcpListTimeout)
+	defer cancel()
+	listed, err := c.session.ListTools(listCtx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("tools/list: %w", err)
+	}
+	if listed == nil {
+		return nil, nil
+	}
+	return listed.Tools, nil
+}
+
+// CallTool calls a tool on this exact upstream instance.
+func (c *ClientSession) CallTool(ctx context.Context, toolName string, arguments map[string]any) (any, error) {
+	if c == nil || c.session == nil {
+		return nil, fmt.Errorf("upstream mcp session is not connected")
+	}
+	if arguments == nil {
+		arguments = map[string]any{}
+	}
+	callCtx, cancel := context.WithTimeout(ctx, mcpCallTimeout)
+	defer cancel()
+	started := time.Now()
+	progressToken := ""
+	progressReset := make(chan struct{}, 1)
+	if c.onProgress != nil {
+		progressToken = fmt.Sprintf("mcpx-progress-%d", nextProgressToken.Add(1))
+	}
+	c.progressMu.Lock()
+	c.progressToken = progressToken
+	c.progressReset = progressReset
+	c.callStarted = started
+	c.progressMu.Unlock()
+	defer func() {
+		c.progressMu.Lock()
+		c.progressToken = ""
+		c.progressReset = nil
+		c.progressMu.Unlock()
+	}()
+	params := newCallToolParams(toolName, arguments, progressToken, started)
+	stopHeartbeat := startClientProgressHeartbeat(callCtx, toolName, started, progressReset, c.deliver)
+	defer stopHeartbeat()
+	res, err := c.session.CallTool(callCtx, params)
+	if err != nil {
+		return nil, err
+	}
+	logging.Debug("mcp call ok", "tool", toolName, "cmd", DescribeCommand(c.srv))
+	return res, nil
+}
+
+// CallTool starts one stdio MCP client, calls tool, and closes the session.
 func CallTool(ctx context.Context, srv config.MCPServer, toolName string, arguments map[string]any) (any, error) {
 	return CallToolWithProgress(ctx, srv, toolName, arguments, nil)
 }
 
-// CallToolWithProgress calls an upstream tool while requesting native MCP
-// progress notifications. When onProgress is non-nil, a client-side watchdog
-// also emits a synthetic update if no upstream progress arrives in time.
+// CallToolWithProgress is the one-shot convenience wrapper around ClientSession.
 func CallToolWithProgress(ctx context.Context, srv config.MCPServer, toolName string, arguments map[string]any, onProgress ProgressHandler) (any, error) {
-	if arguments == nil {
-		arguments = map[string]any{}
-	}
-
-	progressToken := ""
-	progressReset := make(chan struct{}, 1)
-	callStarted := time.Now()
-	var callbackMu sync.Mutex
-	deliver := func(update ToolProgress) {
-		if onProgress == nil {
-			return
-		}
-		callbackMu.Lock()
-		defer callbackMu.Unlock()
-		onProgress(update)
-	}
-	resetWatchdog := func() {
-		select {
-		case progressReset <- struct{}{}:
-		default:
-		}
-	}
-
-	var clientOptions *mcp.ClientOptions
-	if onProgress != nil {
-		progressToken = fmt.Sprintf("mcpx-progress-%d", nextProgressToken.Add(1))
-		clientOptions = &mcp.ClientOptions{
-			ProgressNotificationHandler: func(_ context.Context, req *mcp.ProgressNotificationClientRequest) {
-				if req == nil || req.Params == nil || fmt.Sprint(req.Params.ProgressToken) != progressToken {
-					return
-				}
-				deliver(ToolProgress{
-					Message:  req.Params.Message,
-					Progress: req.Params.Progress,
-					Total:    req.Params.Total,
-					Elapsed:  time.Since(callStarted),
-				})
-				resetWatchdog()
-			},
-		}
-	}
-
-	session, cancel, err := connect(ctx, srv, mcpConnectTimeout, clientOptions)
+	client, err := OpenClientSession(ctx, srv, onProgress)
 	if err != nil {
 		return nil, err
 	}
-	defer cancel()
-	defer session.Close()
-
-	callCtx, callCancel := context.WithTimeout(ctx, mcpCallTimeout)
-	defer callCancel()
-	callStarted = time.Now()
-	params := newCallToolParams(toolName, arguments, progressToken, callStarted)
-	stopHeartbeat := startClientProgressHeartbeat(callCtx, toolName, callStarted, progressReset, deliver)
-	defer stopHeartbeat()
-
-	res, err := session.CallTool(callCtx, params)
-	if err != nil {
-		return nil, err
-	}
-	logging.Debug("mcp call ok", "tool", toolName, "cmd", DescribeCommand(srv))
-	return res, nil
+	defer client.Close()
+	return client.CallTool(ctx, toolName, arguments)
 }
 
 func newCallToolParams(toolName string, arguments map[string]any, progressToken string, started time.Time) *mcp.CallToolParams {
@@ -170,25 +243,14 @@ func resetProgressTimer(timer *time.Timer, interval time.Duration) {
 	timer.Reset(interval)
 }
 
-// ListTools starts an upstream stdio server and returns its tools/list items.
+// ListTools starts one upstream stdio server and returns its tools/list items.
 func ListTools(ctx context.Context, srv config.MCPServer) ([]*mcp.Tool, error) {
-	session, cancel, err := connect(ctx, srv, mcpConnectTimeout, nil)
+	client, err := OpenClientSession(ctx, srv, nil)
 	if err != nil {
 		return nil, err
 	}
-	defer cancel()
-	defer session.Close()
-
-	listCtx, listCancel := context.WithTimeout(ctx, mcpListTimeout)
-	defer listCancel()
-	listed, err := session.ListTools(listCtx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("tools/list: %w", err)
-	}
-	if listed == nil {
-		return nil, nil
-	}
-	return listed.Tools, nil
+	defer client.Close()
+	return client.ListTools(ctx)
 }
 
 func connect(ctx context.Context, srv config.MCPServer, timeout time.Duration, options *mcp.ClientOptions) (*mcp.ClientSession, context.CancelFunc, error) {

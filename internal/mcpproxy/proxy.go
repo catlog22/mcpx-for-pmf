@@ -48,10 +48,14 @@ func (m *Manager) List() []map[string]any {
 		if typeName == "" {
 			typeName = "stdio"
 		}
-		out = append(out, map[string]any{
+		item := map[string]any{
 			"name": name, "type": typeName, "state": "configured",
 			"source": "merged_config",
-		})
+		}
+		if description := strings.TrimSpace(srv.Description); description != "" {
+			item["description"] = description
+		}
+		out = append(out, item)
 	}
 	return out
 }

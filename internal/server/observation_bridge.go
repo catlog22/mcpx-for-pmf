@@ -275,10 +275,10 @@ func toolObservationFacts(name string, args map[string]any, result *mcp.CallTool
 	if path, ok := args["path"].(string); ok {
 		facts.Path = strings.TrimSpace(path)
 	}
-	if name == "skill_call" {
+	if name == "skill_tool" {
 		facts.SkillName, _ = args["name"].(string)
 	}
-	if name == "mcp_call" {
+	if name == "mcp_tool" {
 		facts.MCPServer, _ = args["server"].(string)
 		facts.MCPTool, _ = args["tool"].(string)
 	}

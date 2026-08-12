@@ -70,11 +70,22 @@ func TestEffectfulToolsOwnPurposeContract(t *testing.T) {
 	runtime.registerTools(protocol)
 	registered := runtime.listedToolMap()
 
-	for _, name := range []string{"edit", "operation_batch", "skill_call", "mcp_call", "screenshot_capture", "secret_provide"} {
+	for _, name := range []string{"edit", "operation_batch", "screenshot_capture", "secret_provide"} {
 		schema := decodedToolSchema(t, registered[name])
 		properties, _ := schema["properties"].(map[string]any)
 		if properties["purpose"] == nil || !schemaRequires(schema, "purpose") {
 			t.Errorf("effectful tool %q must explicitly require purpose: %+v", name, schema)
+		}
+	}
+	for _, name := range []string{"skill_tool", "mcp_tool"} {
+		schema := decodedToolSchema(t, registered[name])
+		if branch := actionBranch(schema, "call"); branch == nil || !schemaRequires(branch, "purpose") {
+			t.Fatalf("%s(call) must require purpose: %+v", name, schema)
+		}
+		for _, action := range []string{"list", "describe"} {
+			if branch := actionBranch(schema, action); branch == nil || schemaRequires(branch, "purpose") {
+				t.Fatalf("%s(%s) must remain read-only and not require purpose: %+v", name, action, schema)
+			}
 		}
 	}
 

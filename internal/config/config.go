@@ -169,10 +169,11 @@ type MCPFile struct {
 
 // MCPServer describes an upstream MCP process.
 type MCPServer struct {
-	Type    string            `json:"type"`
-	Command string            `json:"command"`
-	Args    []string          `json:"args"`
-	Env     map[string]string `json:"env"`
+	Type        string            `json:"type"`
+	Description string            `json:"description,omitempty"`
+	Command     string            `json:"command"`
+	Args        []string          `json:"args"`
+	Env         map[string]string `json:"env"`
 }
 
 // DefaultConfig returns built-in defaults per PRD.

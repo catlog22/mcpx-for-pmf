@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"mcpx/internal/terminal"
@@ -14,17 +13,20 @@ import (
 // Execute runs skill entry via Runtime-controlled terminal bridge (not raw shell from skill code path).
 func Execute(ctx context.Context, sk Skill, workDir string, arguments any) (map[string]any, error) {
 	argsJSON, _ := json.Marshal(arguments)
-	entry := sk.Manifest.Entry
 	// Documentation / Agent skills: return markdown body, do not exec.
 	if sk.Manifest.Runtime == "markdown" || sk.Manifest.Format == "skill_md" {
-		path := filepath.Join(sk.Dir, entry)
-		if entry == "" {
-			path = filepath.Join(sk.Dir, "SKILL.md")
+		path, err := ResolveEntry(sk)
+		if err != nil {
+			return nil, fmt.Errorf("invalid skill entry: %w", err)
 		}
 		body, err := os.ReadFile(path)
-		if err != nil {
+		if err != nil && (sk.Manifest.Entry == "" || sk.Manifest.Entry == "SKILL.md") {
 			// try skill.md
-			body, err = os.ReadFile(filepath.Join(sk.Dir, "skill.md"))
+			if alt, altErr := ResolveEntryName(sk, "skill.md"); altErr == nil {
+				if altBody, altErr2 := os.ReadFile(alt); altErr2 == nil {
+					path, body, err = alt, altBody, nil
+				}
+			}
 		}
 		if err != nil {
 			return nil, fmt.Errorf("read skill doc: %w", err)
@@ -37,6 +39,10 @@ func Execute(ctx context.Context, sk Skill, workDir string, arguments any) (map[
 			"path":              path,
 			"working_directory": workDir,
 		}, nil
+	}
+	entry, err := SafeEntry(sk)
+	if err != nil {
+		return nil, fmt.Errorf("invalid skill entry: %w", err)
 	}
 	var cmd string
 	switch sk.Manifest.Runtime {

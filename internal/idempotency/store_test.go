@@ -69,3 +69,63 @@ func TestStoreMergesInFlightRequests(t *testing.T) {
 		t.Fatalf("wait replay=%+v err=%v", replayed, err)
 	}
 }
+
+func TestStoreAbandonRemovesOnlyPendingRecords(t *testing.T) {
+	store, closeStore := testStore(t)
+	defer closeStore()
+	ctx := context.Background()
+	key := testKey()
+
+	owner, err := store.Claim(ctx, key, "sha256:first", time.Hour)
+	if err != nil || owner.Kind != ClaimOwner {
+		t.Fatalf("owner=%+v err=%v", owner, err)
+	}
+	if err := store.Abandon(ctx, key, "sha256:first"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.Lookup(ctx, key); err != nil || ok {
+		t.Fatalf("abandoned pending record must be gone: ok=%v err=%v", ok, err)
+	}
+
+	// A different fingerprint must not delete the owned record.
+	owner, err = store.Claim(ctx, key, "sha256:first", time.Hour)
+	if err != nil || owner.Kind != ClaimOwner {
+		t.Fatalf("re-owner=%+v err=%v", owner, err)
+	}
+	if err := store.Abandon(ctx, key, "sha256:other"); err != nil {
+		t.Fatal(err)
+	}
+	record, ok, err := store.Lookup(ctx, key)
+	if err != nil || !ok || record.State != StatePending {
+		t.Fatalf("wrong-fingerprint Abandon must keep pending record: %+v ok=%v err=%v", record, ok, err)
+	}
+
+	// The in-process flight must survive a wrong-fingerprint Abandon: the
+	// owner is still running, so an identical Claim waits for its completion
+	// instead of reporting a foreign pending record.
+	waiting, err := store.Claim(ctx, key, "sha256:first", time.Hour)
+	if err != nil || waiting.Kind != ClaimWait {
+		t.Fatalf("wrong-fingerprint Abandon must keep the in-process flight: %+v err=%v", waiting, err)
+	}
+	if waiting.Done == nil {
+		t.Fatal("ClaimWait must expose the owner's completion channel")
+	}
+	// The owner completes below; the wait channel must be released.
+	if err := store.Complete(ctx, key, "sha256:first", StateSucceeded, []byte(`{"done":true}`), nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-waiting.Done:
+	default:
+		t.Fatal("owner completion must release the waiting claim")
+	}
+
+	// A terminal record is protected: Abandon must not delete it.
+	if err := store.Abandon(ctx, key, "sha256:first"); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := store.Claim(ctx, key, "sha256:first", time.Hour)
+	if err != nil || replay.Kind != ClaimReplay {
+		t.Fatalf("terminal record must survive Abandon: %+v err=%v", replay, err)
+	}
+}

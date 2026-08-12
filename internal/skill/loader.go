@@ -1,6 +1,7 @@
 package skill
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,7 +102,7 @@ func loadManifest(dir, fallbackName string) (Manifest, bool) {
 		}
 		m.Format = "yaml"
 		normalizeManifest(&m, fallbackName)
-		return m, true
+		return acceptManifest(m, dir)
 	}
 	// 2) Agent SKILL.md / skill.md
 	for _, name := range []string{"SKILL.md", "skill.md"} {
@@ -129,9 +130,21 @@ func loadManifest(dir, fallbackName string) (Manifest, bool) {
 		if m.Entry == "" {
 			m.Entry = name
 		}
-		return m, true
+		return acceptManifest(m, dir)
 	}
 	return Manifest{}, false
+}
+
+// acceptManifest rejects skills whose manifest entry would escape the skill
+// directory. An unsafe entry is treated as an invalid package and skipped so
+// read-only surfaces such as skill_tool describe can never expose files
+// outside the skill directory.
+func acceptManifest(m Manifest, dir string) (Manifest, bool) {
+	if err := entryWithinDir(dir, m.Entry); err != nil {
+		logging.Warn("skill entry rejected", "dir", dir, "entry", m.Entry, "err", err)
+		return Manifest{}, false
+	}
+	return m, true
 }
 
 func normalizeManifest(m *Manifest, fallbackName string) {
@@ -182,6 +195,81 @@ func Find(skills []Skill, name string) (Skill, bool) {
 		}
 	}
 	return Skill{}, false
+}
+
+// defaultEntry returns the conventional entry name for a skill that does not
+// declare one.
+func defaultEntry(sk Skill) string {
+	if sk.Manifest.Runtime == "markdown" || sk.Manifest.Format == "skill_md" {
+		return "SKILL.md"
+	}
+	return "main.py"
+}
+
+// entryWithinDir validates that a manifest-controlled entry cannot escape its
+// skill directory. It rejects absolute paths, lexical ".." traversal, and
+// existing symlinks whose target resolves outside the directory. A missing
+// file passes the lexical check so skills that are still being authored are
+// not dropped.
+func entryWithinDir(dir, entry string) error {
+	if entry == "" {
+		return nil
+	}
+	if filepath.IsAbs(entry) {
+		return fmt.Errorf("entry %q must be relative to the skill directory", entry)
+	}
+	clean := filepath.Clean(entry)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("entry %q escapes the skill directory", entry)
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Join(dir, clean))
+	if err != nil {
+		// The file does not exist yet; the lexical check above is the best
+		// containment guarantee available.
+		return nil
+	}
+	root, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return nil
+	}
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("entry %q escapes the skill directory through a symlink", entry)
+	}
+	return nil
+}
+
+// ResolveEntry returns the absolute path of a skill's configured entry,
+// guaranteeing the entry stays inside the skill directory (lexically and
+// through symlinks).
+func ResolveEntry(sk Skill) (string, error) {
+	return ResolveEntryName(sk, sk.Manifest.Entry)
+}
+
+// ResolveEntryName resolves an explicit entry candidate (used for the
+// SKILL.md / skill.md fallback) with the same containment guarantees as
+// ResolveEntry.
+func ResolveEntryName(sk Skill, entry string) (string, error) {
+	if entry == "" {
+		entry = defaultEntry(sk)
+	}
+	if err := entryWithinDir(sk.Dir, entry); err != nil {
+		return "", err
+	}
+	return filepath.Join(sk.Dir, filepath.Clean(entry)), nil
+}
+
+// SafeEntry returns the cleaned, containment-checked entry relative to the
+// skill directory. Shell-based runtimes use it to build the entry command.
+func SafeEntry(sk Skill) (string, error) {
+	entry := sk.Manifest.Entry
+	if entry == "" {
+		entry = defaultEntry(sk)
+	}
+	if err := entryWithinDir(sk.Dir, entry); err != nil {
+		return "", err
+	}
+	return filepath.Clean(entry), nil
 }
 
 // DefaultScanDirs returns the default skill search paths (for logging/docs).

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -212,72 +213,40 @@ func sortedKeys(values map[string]string) []string {
 	return keys
 }
 
-func (r *Runtime) toolMCPList(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	envReq, principal, fail := r.remoteRequest(ctx, req)
-	if fail != nil {
-		return fail, nil
-	}
-	ws, remoteID, err := r.resolveExplicitWorkspace(ctx, principal, envReq)
-	if err != nil {
-		return r.remoteError(envReq, remoteID, ws.Name, err)
-	}
-	manager, err := r.mcpManagerForWorkspace(ws.Path)
-	if err != nil {
-		return r.terminalError(envReq, remoteID, ws.Name, "mcp_config_error", err.Error())
-	}
-	servers := manager.List()
-	data := map[string]any{"servers": servers}
-	includeTools, _ := envReq.Payload["include_tools"].(bool)
-	serverName, _ := envReq.Payload["server"].(string)
-	serverName = strings.TrimSpace(serverName)
-	if includeTools {
-		if serverName != "" {
-			srv, ok := manager.ServerConfig(serverName)
-			if !ok {
-				return r.terminalError(envReq, remoteID, ws.Name, "not_found", "mcp server not configured")
-			}
-			tools, discoverErr := mcpproxy.ListTools(ctx, srv)
-			if discoverErr != nil {
-				return r.terminalError(envReq, remoteID, ws.Name, "mcp_discovery_error", discoverErr.Error())
-			}
-			data["server"] = serverName
-			data["tools"] = tools
-			data["tools_revision"] = mcpRevision(tools)
-		} else {
-			// Discover tools for every configured server (A05 bootstrap path).
-			data["servers"] = r.enrichServersWithTools(ctx, manager, servers)
-			data["mcp_revision"] = mcpRevision(data["servers"])
-		}
-	}
-	return r.remoteResult(envReq, remoteID, ws.Name, data)
-}
+var (
+	errMCPDisabled       = errors.New("upstream MCP is disabled")
+	errMCPServerNotFound = errors.New("MCP server is not configured")
+)
 
-func (r *Runtime) toolMCPCall(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) mcpToolCallWithObservedSession(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, _, remote, fail := r.changeRequest(ctx, req, true)
 	if fail != nil {
 		return fail, nil
 	}
-	eff := r.effectiveConfig(remote.WorkspacePath)
-	if !eff.Discovery.MCP.Enabled {
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "disabled", "MCP discovery is disabled")
-	}
-	serverName, _ := envReq.Payload["server"].(string)
-	toolName, _ := envReq.Payload["tool"].(string)
-	args, _ := envReq.Payload["arguments"].(map[string]any)
-	if isCleanCoreRequest(ctx) {
-		if result, preflightErr := r.preflightCleanMCPCall(ctx, req); result != nil || preflightErr != nil {
-			return result, preflightErr
+	serverName := strings.TrimSpace(stringPayload(envReq.Payload, "server"))
+	toolName := strings.TrimSpace(stringPayload(envReq.Payload, "tool"))
+	var (
+		client   *mcpproxy.ClientSession
+		upstream *mcp.Tool
+	)
+	// The upstream configuration is resolved lazily: an idempotency replay
+	// returns a persisted result and must not depend on the current MCP
+	// configuration, so a removed server or disabled discovery cannot block it.
+	resolveServer := func() (config.MCPServer, error) {
+		if !r.effectiveConfig(remote.WorkspacePath).Discovery.MCP.Enabled {
+			return config.MCPServer{}, errMCPDisabled
 		}
+		manager, err := r.mcpManagerForWorkspace(remote.WorkspacePath)
+		if err != nil {
+			return config.MCPServer{}, err
+		}
+		cfg, ok := manager.ServerConfig(serverName)
+		if !ok {
+			return config.MCPServer{}, fmt.Errorf("%w: %s", errMCPServerNotFound, serverName)
+		}
+		return cfg, nil
 	}
-	manager, err := r.mcpManagerForWorkspace(remote.WorkspacePath)
-	if err != nil {
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "mcp_config_error", err.Error())
-	}
-	cfg, ok := manager.ServerConfig(serverName)
-	if !ok {
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "not_found", "mcp server not configured")
-	}
-	res, err := mcpproxy.CallToolWithProgress(ctx, cfg, toolName, args, func(update mcpproxy.ToolProgress) {
+	progress := func(update mcpproxy.ToolProgress) {
 		message := strings.TrimSpace(update.Message)
 		if message == "" {
 			message = "upstream tool is still running"
@@ -288,11 +257,76 @@ func (r *Runtime) toolMCPCall(ctx context.Context, req *mcp.CallToolRequest) (*m
 		if !notifyRequestProgress(ctx, req, fmt.Sprintf("MCP %s/%s: %s", serverName, toolName, message), update.Progress, update.Total) {
 			logging.Debug("upstream mcp progress", "server", serverName, "tool", toolName, "message", message, "synthetic", update.Synthetic)
 		}
-	})
-	if err != nil {
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "mcp_error", err.Error())
 	}
-	// serialize result
+	// The upstream instance is opened lazily: an idempotency replay returns a
+	// persisted result and must not restart the upstream MCP process.
+	ensureClient := func(callCtx context.Context) (*mcpproxy.ClientSession, error) {
+		if client != nil {
+			return client, nil
+		}
+		cfg, resolveErr := resolveServer()
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		opened, openErr := mcpproxy.OpenClientSession(callCtx, cfg, progress)
+		if openErr != nil {
+			return nil, openErr
+		}
+		client = opened
+		return client, nil
+	}
+	openFailure := func(openErr error) (*mcp.CallToolResult, error) {
+		code, message := "MCP_SERVER_UNAVAILABLE", openErr.Error()
+		switch {
+		case errors.Is(openErr, errMCPDisabled):
+			message = "upstream MCP is disabled"
+		case errors.Is(openErr, errMCPServerNotFound):
+			code, message = "MCP_SERVER_NOT_FOUND", fmt.Sprintf("MCP server %q is not configured", serverName)
+		}
+		result, resultErr := r.terminalError(envReq, remote.ID, remote.WorkspaceName, code, message)
+		return result, resultErr
+	}
+	preflight := func(callCtx context.Context, callReq *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		opened, openErr := ensureClient(callCtx)
+		if openErr != nil {
+			return openFailure(openErr)
+		}
+		result, selected, preflightErr := r.preflightMCPToolCallOnSession(callCtx, callReq, opened)
+		if selected != nil {
+			upstream = selected
+		}
+		return result, preflightErr
+	}
+	handler := func(callCtx context.Context, callReq *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		opened, openErr := ensureClient(callCtx)
+		if openErr != nil {
+			return openFailure(openErr)
+		}
+		return r.toolMCPCallOnSession(callCtx, callReq, opened, upstream)
+	}
+	result, callErr := r.withCleanIdempotency(ctx, req, "mcp_tool", envReq.Payload, handler, preflight)
+	if client != nil {
+		client.Close()
+	}
+	return result, callErr
+}
+
+func (r *Runtime) toolMCPCallOnSession(ctx context.Context, req *mcp.CallToolRequest, client *mcpproxy.ClientSession, upstreamTool *mcp.Tool) (*mcp.CallToolResult, error) {
+	envReq, principal, remote, fail := r.changeRequest(ctx, req, true)
+	if fail != nil {
+		return fail, nil
+	}
+	if upstreamTool == nil {
+		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "MCP_TOOL_NOT_FOUND", "upstream MCP tool was not selected by preflight")
+	}
+	eff := r.effectiveConfig(remote.WorkspacePath)
+	serverName := strings.TrimSpace(stringPayload(envReq.Payload, "server"))
+	toolName := strings.TrimSpace(stringPayload(envReq.Payload, "tool"))
+	args, _ := envReq.Payload["arguments"].(map[string]any)
+	res, err := client.CallTool(ctx, toolName, args)
+	if err != nil {
+		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "MCP_CALL_FAILED", err.Error())
+	}
 	b, _ := json.Marshal(res)
 	maxResultBytes := config.MaxResultBytes(eff.Limits)
 	if maxResultBytes > 0 && len(b) > maxResultBytes {
@@ -301,20 +335,26 @@ func (r *Runtime) toolMCPCall(ctx context.Context, req *mcp.CallToolRequest) (*m
 		if response.Error != nil {
 			response.Error.Details["result_bytes"] = len(b)
 			response.Error.Details["max_result_bytes"] = maxResultBytes
-			addRecoveryAction(&response, "mcp_call", "使用上游工具的分页或 limit 参数缩小结果后重试", map[string]any{
-				"remote_session_id": remote.ID, "server": serverName, "tool": toolName,
+			addRecoveryAction(&response, "mcp_tool", "使用上游工具的分页或 limit 参数缩小结果后重试", map[string]any{
+				"action": "call", "remote_session_id": remote.ID, "server": serverName, "tool": toolName,
 			})
 		}
 		return r.resultJSON(response)
 	}
 	var data any
 	_ = json.Unmarshal(b, &data)
-	if upstream, ok := res.(*mcp.CallToolResult); ok && upstream.IsError {
+	if upstreamResult, ok := res.(*mcp.CallToolResult); ok && upstreamResult.IsError {
 		response := envelope.Fail(envelope.StatusError, envReq.RequestID, remote.WorkspaceName, data, "MCP_CALL_FAILED", fmt.Sprintf("MCP %s/%s returned an error", serverName, toolName))
 		response.RemoteSessionID = remote.ID
 		return r.resultJSON(response)
 	}
-	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: firstString(toolInvocationName(ctx), "mcp_call"), Status: "ok", Detail: map[string]any{"server": serverName, "tool": toolName}})
+	risk := mcpExecutionRisk(upstreamTool)
+	if risk.ConfirmationRequired {
+		revision := mcpRevision([]*mcp.Tool{upstreamTool})
+		contentKey := extensionConfirmationContentKey(principal.ID, "mcp_tool", serverName+"/"+toolName, revision, envReq.Payload)
+		r.consumeExtensionConfirmation(remote.ID, principal.ID, "mcp_tool", contentKey)
+	}
+	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: firstString(toolInvocationName(ctx), "mcp_tool"), Status: "ok", Detail: map[string]any{"server": serverName, "tool": toolName}})
 	return compactToolResult(data, fmt.Sprintf("MCP %s/%s completed.", serverName, toolName)), nil
 }
 
@@ -354,9 +394,7 @@ func skillItems(skills []skill.Skill) []map[string]any {
 		if len(argumentsSchema) == 0 {
 			argumentsSchema = map[string]any{"type": "object", "additionalProperties": true}
 		}
-		// Stable content fingerprint for the Skill revision.
-		revInput := s.Manifest.Name + "\x00" + s.Manifest.Description + "\x00" + s.Manifest.Runtime + "\x00" + s.Dir
-		revision := skillRevision(revInput)
+		revision := skillDefinitionRevision(s)
 		items = append(items, map[string]any{
 			"name": s.Manifest.Name, "description": s.Manifest.Description,
 			"kind": kind, "runtime": s.Manifest.Runtime, "format": s.Manifest.Format,
@@ -365,16 +403,35 @@ func skillItems(skills []skill.Skill) []map[string]any {
 			"revision":         revision,
 			"priority":         (index + 1) * 10,
 			"required":         forced,
-			"trigger":          map[string]any{"kind": "explicit", "tool": "discover"},
-			"invocation_template": map[string]any{
-				"tool":                   "skill_call",
-				"requires_discovery":     true,
-				"arguments":              map[string]any{"name": s.Manifest.Name, "arguments": map[string]any{}},
-				"required_client_fields": []string{"remote_session_id", "purpose", "discovery_id", "discovery_revision"},
-			},
 		})
 	}
 	return items
+}
+
+func skillDefinitionRevision(sk skill.Skill) string {
+	manifest, _ := json.Marshal(sk.Manifest)
+	entryPath, entryErr := skill.ResolveEntry(sk)
+	var content []byte
+	err := entryErr
+	if entryErr == nil {
+		content, err = os.ReadFile(entryPath)
+		if err != nil && (sk.Manifest.Runtime == "markdown" || sk.Manifest.Format == "skill_md") {
+			if alt, altErr := skill.ResolveEntryName(sk, "skill.md"); altErr == nil {
+				if altBody, altErr2 := os.ReadFile(alt); altErr2 == nil {
+					entryPath, content, err = alt, altBody, nil
+				}
+			}
+		}
+	}
+	payload := append(append([]byte{}, manifest...), 0)
+	payload = append(payload, []byte(entryPath)...)
+	payload = append(payload, 0)
+	if err == nil {
+		payload = append(payload, content...)
+	} else {
+		payload = append(payload, []byte(err.Error())...)
+	}
+	return skillRevision(string(payload))
 }
 
 func skillSummaryItems(skills []skill.Skill) []map[string]any {
@@ -391,7 +448,7 @@ func skillSummaryItems(skills []skill.Skill) []map[string]any {
 }
 
 func (r *Runtime) toolSkillExecute(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	envReq, _, remote, fail := r.changeRequest(ctx, req, true)
+	envReq, principal, remote, fail := r.changeRequest(ctx, req, true)
 	if fail != nil {
 		return fail, nil
 	}
@@ -406,11 +463,6 @@ func (r *Runtime) toolSkillExecute(ctx context.Context, req *mcp.CallToolRequest
 	if !ok {
 		return r.skillNotFound(envReq, remote.ID, remote.WorkspaceName, name)
 	}
-	if isCleanCoreRequest(ctx) {
-		if result, preflightErr := r.preflightCleanSkillCall(ctx, req); result != nil || preflightErr != nil {
-			return result, preflightErr
-		}
-	}
 	out, err := skill.Execute(ctx, sk, remote.WorkspacePath, args)
 	if err != nil {
 		response := envelope.Fail(envelope.StatusError, envReq.RequestID, remote.WorkspaceName, out, "skill_error", err.Error())
@@ -422,13 +474,14 @@ func (r *Runtime) toolSkillExecute(ctx context.Context, req *mcp.CallToolRequest
 		response.RemoteSessionID = remote.ID
 		return r.resultJSON(response)
 	}
-	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: firstString(toolInvocationName(ctx), "skill_call"), Status: "ok", Detail: map[string]any{"name": name}})
+	risk := skillExecutionRisk(sk)
+	if risk.ConfirmationRequired {
+		revision := skillDefinitionRevision(sk)
+		contentKey := extensionConfirmationContentKey(principal.ID, "skill_tool", name, revision, envReq.Payload)
+		r.consumeExtensionConfirmation(remote.ID, principal.ID, "skill_tool", contentKey)
+	}
+	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: firstString(toolInvocationName(ctx), "skill_tool"), Status: "ok", Detail: map[string]any{"name": name}})
 	return compactToolResult(out, fmt.Sprintf("Skill %s completed.", name)), nil
-}
-
-func mcpToolInLease(tools []*mcp.Tool, wanted string) bool {
-	_, ok := mcpToolForLease(tools, wanted)
-	return ok
 }
 
 func mcpToolForLease(tools []*mcp.Tool, wanted string) (*mcp.Tool, bool) {

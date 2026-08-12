@@ -164,6 +164,15 @@ func (s *Store) Claim(ctx context.Context, key Key, fingerprint string, ttl time
 	case StateInDoubt:
 		return Claim{Kind: ClaimInDoubt, Record: record}, nil
 	case StatePending:
+		// The owner may be running in this process (it won an insert race or
+		// lease takeover above): wait on its flight instead of reporting a
+		// foreign pending record.
+		s.mu.Lock()
+		active, ok := s.flights[identity]
+		s.mu.Unlock()
+		if ok && active.fingerprint == fingerprint {
+			return Claim{Kind: ClaimWait, Done: active.done}, nil
+		}
 		if now.Sub(record.UpdatedAt) >= PendingLease {
 			result, updateErr := s.db.ExecContext(ctx, `UPDATE clean_idempotency_records
 				SET updated_at = ? WHERE remote_session_id = ? AND principal_id = ? AND operation = ?
@@ -275,6 +284,35 @@ func (s *Store) UpdatePending(ctx context.Context, key Key, fingerprint string, 
 		string(response), string(metadata), s.now().UTC().UnixMilli(), key.RemoteSessionID, key.PrincipalID,
 		key.Operation, key.Value, fingerprint, StatePending)
 	return err
+}
+
+// Abandon deletes a pending record that was claimed but rejected before any
+// effect ran (for example semantic preflight rejected the request). It only
+// removes records still in pending state with the matching fingerprint, so a
+// completed effect is never touched and a retry starts from a clean slate.
+func (s *Store) Abandon(ctx context.Context, key Key, fingerprint string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("idempotency store database is required")
+	}
+	if !key.valid() || strings.TrimSpace(fingerprint) == "" {
+		return fmt.Errorf("idempotency key and fingerprint are required")
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM clean_idempotency_records
+		WHERE remote_session_id = ? AND principal_id = ? AND operation = ? AND idempotency_key = ? AND fingerprint = ? AND state = ?`,
+		key.RemoteSessionID, key.PrincipalID, key.Operation, key.Value, fingerprint, StatePending)
+	if err != nil {
+		return err
+	}
+	// Only an actual deletion releases the in-process flight. A wrong
+	// fingerprint or a non-pending record leaves the owner (if any) untouched,
+	// so the next identical Claim must keep waiting on the live flight instead
+	// of reporting a foreign pending record.
+	if affected, err := result.RowsAffected(); err != nil {
+		return err
+	} else if affected == 1 {
+		s.finishFlight(key.identity())
+	}
+	return nil
 }
 
 func (s *Store) finishFlight(identity string) {

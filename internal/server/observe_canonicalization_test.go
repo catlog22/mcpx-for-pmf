@@ -16,11 +16,9 @@ func TestObserveCanonicalizesUniqueTargets(t *testing.T) {
 		{name: "default session", args: map[string]any{"remote_session_id": "rs_1"}, want: "session"},
 		{name: "execution task", args: map[string]any{"remote_session_id": "rs_1", "execution_task_id": "task_1"}, want: "task"},
 		{name: "plan task", args: map[string]any{"remote_session_id": "rs_1", "plan_task_id": "pt_1"}, want: "plan"},
-		{name: "edit diff", args: map[string]any{"remote_session_id": "rs_1", "edit_id": "edit_1"}, want: "diff"},
 		{name: "history keyword", args: map[string]any{"remote_session_id": "rs_1", "keyword": "panic"}, want: "history"},
 		{name: "explicit logs", args: map[string]any{"remote_session_id": "rs_1", "view": "logs", "execution_task_id": "task_1"}, want: "logs"},
 		{name: "conflicting targets", args: map[string]any{"remote_session_id": "rs_1", "execution_task_id": "task_1", "keyword": "panic"}, want: ""},
-		{name: "ambiguous path", args: map[string]any{"remote_session_id": "rs_1", "path": "internal"}, want: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -54,8 +52,20 @@ func TestObservePublicSchemaMatchesCanonicalSemantics(t *testing.T) {
 	for _, raw := range view["enum"].([]any) {
 		values[raw.(string)] = true
 	}
-	if !values["task"] || values["status"] {
-		t.Fatalf("observe view enum must use task instead of status: %+v", values)
+	for _, required := range []string{"session", "task", "plan", "history", "logs"} {
+		if !values[required] {
+			t.Fatalf("observe view enum missing %q: %+v", required, values)
+		}
+	}
+	for _, removed := range []string{"status", "changes", "diff"} {
+		if values[removed] {
+			t.Fatalf("observe view enum exposes removed view %q: %+v", removed, values)
+		}
+	}
+	for _, removedField := range []string{"edit_id", "include_diff", "path", "offset"} {
+		if properties[removedField] != nil {
+			t.Fatalf("observe schema exposes removed field %q: %s", removedField, encoded)
+		}
 	}
 	if properties["stdout_offset"] == nil || properties["stderr_offset"] == nil {
 		t.Fatalf("observe logs must accept server next_action offsets: %s", encoded)

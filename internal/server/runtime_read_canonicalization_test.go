@@ -48,6 +48,10 @@ func TestRuntimeReadAndProgressSchemasMatchSimplifiedProtocol(t *testing.T) {
 			}
 		}
 	}
+	runtimeProperties, _ := runtimeSchema["properties"].(map[string]any)
+	if runtimeProperties["include_skill_details"] != nil {
+		t.Fatalf("runtime_read must not expose the retired include_skill_details side channel: %s", runtimeEncoded)
+	}
 
 	progressTool := rt.toolIndex["progress"]
 	progressEncoded, err := json.Marshal(progressTool.InputSchema)

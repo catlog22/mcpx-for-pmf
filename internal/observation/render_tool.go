@@ -314,9 +314,8 @@ func toolAction(tool string, raw []byte) (string, string) {
 	verb := actionVerb(tool, action)
 	label := ""
 
-	// Special case: skill/MCP calls via extension_manage (or skill_execute) should display
-	// the skill/MCP name in terminal observation instead of "extension_manage".
-	if (tool == "extension_manage" || tool == "skill_execute" || tool == "skill_call" || tool == "mcp_call") && (action == "call" || tool == "skill_call" || tool == "mcp_call") {
+	// Extension calls display the concrete Skill/MCP target instead of a session id.
+	if (tool == "skill_tool" || tool == "mcp_tool") && action == "call" {
 		if kind, ok := input["kind"].(string); ok {
 			kind = strings.ToLower(strings.TrimSpace(kind))
 			if kind == "skill" {
@@ -372,9 +371,9 @@ func toolAction(tool string, raw []byte) (string, string) {
 		label = workspaceStateLabel(stringValue(input["view"]))
 	case "screenshot_capture":
 		label = "screenshot"
-	case "skill_call":
+	case "skill_tool":
 		label = stringValue(input["name"])
-	case "mcp_call":
+	case "mcp_tool":
 		label = stringValue(input["server"])
 		if toolName := stringValue(input["tool"]); toolName != "" {
 			label += "/" + toolName
@@ -431,8 +430,11 @@ func actionVerb(tool, action string) string {
 		return "Created"
 	case "plan_transition":
 		return "Updated"
-	case "skill_call", "mcp_call":
-		return "Called"
+	case "skill_tool", "mcp_tool":
+		if action == "call" {
+			return "Called"
+		}
+		return "Read"
 	case "secret_provide":
 		return "Provided"
 	}

@@ -119,9 +119,13 @@ func TestCapabilityListIncludesInstructionsSkillsAndRoleState(t *testing.T) {
 	ctx := authContextForCapabilities()
 	created := callEnvelope(t, runtime.toolSessionOpen, ctx, map[string]any{"workspace": "project"})
 	createdData := created["data"].(map[string]any)
-	openedSkills := createdData["skills"].(map[string]any)["items"].([]any)
+	openedInventory := createdData["extension_inventory"].(map[string]any)
+	openedSkills := openedInventory["skills"].([]any)
 	if len(openedSkills) != 1 || openedSkills[0].(map[string]any)["name"] != "review" {
-		t.Fatalf("session_open skills should follow server config: %+v", createdData["skills"])
+		t.Fatalf("session_open skills should follow server config: %+v", openedInventory)
+	}
+	if skill := openedSkills[0].(map[string]any); len(skill) > 2 || skill["description"] == nil || skill["revision"] != nil || skill["arguments_schema"] != nil || skill["instructions"] != nil {
+		t.Fatalf("session_open skill inventory must stay compact: %+v", skill)
 	}
 	remoteID, _ := created["remote_session_id"].(string)
 	response := callEnvelope(t, runtime.toolCapabilityList, ctx, map[string]any{"remote_session_id": remoteID})
@@ -146,9 +150,18 @@ func TestCapabilityListIncludesInstructionsSkillsAndRoleState(t *testing.T) {
 	if len(instructions) != 2 {
 		t.Fatalf("instructions: %+v", instructions)
 	}
-	skills := data["skills"].(map[string]any)["items"].([]any)
+	extensionInventory := data["extension_inventory"].(map[string]any)
+	skills := extensionInventory["skills"].([]any)
 	if len(skills) != 1 || skills[0].(map[string]any)["name"] != "review" {
 		t.Fatalf("skills: %+v", skills)
+	}
+	if data["skills"] != nil || data["upstream_mcp"] != nil {
+		t.Fatalf("runtime capability must use compact extension_inventory: %+v", data)
+	}
+	for _, removed := range []string{"skill_revision", "mcp_revision"} {
+		if revisions[removed] != nil {
+			t.Fatalf("runtime capability must not expose %s: %+v", removed, revisions)
+		}
 	}
 	tools := data["tools"].([]any)
 	foundEdit := false

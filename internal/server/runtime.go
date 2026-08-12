@@ -889,7 +889,6 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 		session = &resolved
 	}
 	effective := r.effectiveConfig(wsPath)
-	includeSkillDetails := boolPayload(envReq.Payload, "include_skill_details")
 	servers := []map[string]any{}
 	if manager, managerErr := r.mcpManagerForWorkspace(wsPath); managerErr == nil {
 		servers = manager.List()
@@ -899,10 +898,7 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 		loadedSkills = skill.LoadAll(effective.Discovery.Skills.Dirs, wsPath)
 	}
 	fullSkills := skillItems(loadedSkills)
-	skills := fullSkills
-	if !includeSkillDetails {
-		skills = skillSummaryItems(loadedSkills)
-	}
+	skills := skillSummaryItems(loadedSkills)
 	tools := r.runtimeToolCapabilities(effective, session)
 	fullToolManifest := r.registeredToolManifest()
 
@@ -910,15 +906,14 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 	clientProtocol := clientProtocolCapabilities()
 	toolSchemaRevision := r.currentToolSchemaRevision()
 	data := map[string]any{
-		"capability_version":    cleanCoreCapabilityVersion,
-		"capability_groups":     capabilityGroups(),
-		"limits":                publishedLimits(),
-		"schema_source":         "tools/list",
-		"include_skill_details": includeSkillDetails,
-		"agent_guidance":        guidance,
-		"client_protocol":       clientProtocol,
-		"workspace":             map[string]any{"name": ws.Name},
-		"tools":                 tools,
+		"capability_version": cleanCoreCapabilityVersion,
+		"capability_groups":  capabilityGroups(),
+		"limits":             publishedLimits(),
+		"schema_source":      "tools/list",
+		"agent_guidance":     guidance,
+		"client_protocol":    clientProtocol,
+		"workspace":          map[string]any{"name": ws.Name},
+		"tools":              tools,
 		"runtime": map[string]any{
 			"version":                  r.build.Version,
 			"build_commit":             r.build.Commit,
@@ -932,9 +927,9 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 			"order": []string{"global", "project", "directory"}, "documents": r.agentInstructions(wsPath),
 			"list_action": nextAction("runtime_read", map[string]any{"view": "instructions"}),
 		},
-		"skills": map[string]any{"enabled": effective.Discovery.Skills.Enabled, "items": skills, "manage_tool": "discover"},
-		"upstream_mcp": map[string]any{
-			"enabled": effective.Discovery.MCP.Enabled, "servers": servers, "manage_tool": "discover",
+		"extension_inventory": map[string]any{
+			"skills":      compactSkillMaps(skills),
+			"mcp_servers": compactMCPServerInventory(servers),
 		},
 		"resources": []map[string]any{
 			{"kind": "task_logs", "uri_template": "mcpx://remote-sessions/{remote_session_id}/tasks/{execution_task_id}/logs", "mime_type": "text/plain"},
@@ -944,7 +939,7 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 			"bootstrap":      []string{"workspace", "session"},
 			"source_change":  []string{"read", "edit", "execute", "observe"},
 			"plan_delivery":  []string{"plan", "edit", "execute", "artifact", "observe"},
-			"extension_call": []string{"discover", "skill_call", "mcp_call"},
+			"extension_call": []string{"skill_tool", "mcp_tool"},
 		},
 	}
 	instrDocs := r.agentInstructions(wsPath)
@@ -952,8 +947,6 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 		"tool_schema_revision":         toolSchemaRevision,
 		"capability_manifest_revision": capabilityManifestRevision(fullToolManifest, fullSkills, servers, instrDocs, guidance, clientProtocol),
 		"guidance_revision":            agentGuidanceRevision(),
-		"skill_revision":               skillRevision(fullSkills),
-		"mcp_revision":                 mcpRevision(servers),
 		"instruction_revision":         instructionRevision(instrDocs),
 		"session_capability_revision":  sessionCapabilityRevision(session),
 		"client_protocol_revision":     clientProtocolRevision(),

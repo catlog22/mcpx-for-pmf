@@ -356,8 +356,7 @@ func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server) {
 
 	r.addTool(s, supportTool("runtime_read", toolDesc["runtime_read"], map[string]any{
 		"remote_session_id": remoteSession, "workspace": workspace, "view": enumSchema("读取视图；省略时默认 capabilities，anchor_path/paths 出现时推导 instructions", "capabilities", "project", "instructions"),
-		"include_skill_details": booleanSchema("返回 Skill 详情"),
-		"anchor_path":           stringSchema("指令锚点路径；出现时可省略 view"), "paths": arraySchema(map[string]any{"type": "string"}, "指令路径；出现时可省略 view"),
+		"anchor_path": stringSchema("指令锚点路径；出现时可省略 view"), "paths": arraySchema(map[string]any{"type": "string"}, "指令路径；出现时可省略 view"),
 	}, nil, readOnlyToolAnnotation), r.toolRuntimeRead)
 	r.addTool(s, supportTool("environment_read", toolDesc["environment_read"], map[string]any{
 		"remote_session_id": remoteSession, "workspace": workspace, "view": enumSchema("读取视图；省略时 snapshot_id 推导 compare，否则默认 current", "current", "compare"),
@@ -415,12 +414,40 @@ func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server) {
 	}
 	r.addTool(s, cleanActionTool("artifact", toolDesc["artifact"], artifactCommon, artifactBranches, artifactToolAnnotation), r.toolArtifactClean)
 
-	discoverCommon := map[string]any{"remote_session_id": remoteSession, "kind": enumSchema("发现对象类型；server/include_tools 出现时可省略并推导 mcp，其余歧义场景需显式 skill 或 mcp", "skill", "mcp"), "view": enumSchema("发现视图；name/server/include_tools 出现时推导 describe，否则默认 list", "list", "describe"), "query": stringSchema("关键词"), "name": stringSchema("Skill 或 MCP 名称；出现时可省略 view，但 kind 仍需可确定"), "server": stringSchema("MCP Server 名称；出现时可省略 kind/view"), "include_tools": booleanSchema("返回 MCP 上游工具 schema；true 时可省略 kind/view"), "execution_mode": enumSchema("执行模式", "sync", "async")}
-	r.addTool(s, cleanCoreTool("discover", toolDesc["discover"], discoverCommon, []string{"remote_session_id"}, readOnlyToolAnnotation), r.toolDiscover)
-	skillCommon := map[string]any{"remote_session_id": remoteSession, "purpose": stringSchema("调用 Skill 的用户目标"), "name": stringSchema("必须来自 discover 的 Skill 名称"), "arguments": map[string]any{"type": "object", "additionalProperties": true}, "discovery_id": stringSchema("discover 返回的 discovery_id"), "discovery_revision": stringSchema("discover 返回的 discovery_revision"), "user_confirmed": booleanSchema("用户已确认同一 Skill 调用"), "idempotency_key": stringSchema("同一调用重试时复用的幂等键"), "execution_mode": enumSchema("执行模式", "sync", "async")}
-	r.addTool(s, cleanCoreTool("skill_call", toolDesc["skill_call"], skillCommon, []string{"remote_session_id", "purpose", "name", "discovery_id", "discovery_revision"}, commandExecutionToolAnnotation), r.toolSkillCallClean)
-	mcpCommon := map[string]any{"remote_session_id": remoteSession, "purpose": stringSchema("调用上游 MCP 的用户目标"), "server": stringSchema("必须来自 discover 的 MCP Server"), "tool": stringSchema("必须来自 discover 的上游工具"), "arguments": map[string]any{"type": "object", "additionalProperties": true}, "discovery_id": stringSchema("discover 返回的 discovery_id"), "discovery_revision": stringSchema("discover 返回的 discovery_revision"), "user_confirmed": booleanSchema("用户已确认同一 MCP 调用"), "idempotency_key": stringSchema("同一调用重试时复用的幂等键"), "execution_mode": enumSchema("执行模式", "sync", "async")}
-	r.addTool(s, cleanCoreTool("mcp_call", toolDesc["mcp_call"], mcpCommon, []string{"remote_session_id", "purpose", "server", "tool", "discovery_id", "discovery_revision"}, commandExecutionToolAnnotation), r.toolMCPCallClean)
+	skillCommon := map[string]any{
+		"remote_session_id": remoteSession,
+		"query":             stringSchema("按关键词筛选 Skill"),
+		"name":              stringSchema("Skill 名称"),
+		"purpose":           stringSchema("调用 Skill 的用户目标"),
+		"arguments":         map[string]any{"type": "object", "additionalProperties": true},
+		"user_confirmed":    booleanSchema("用户已确认同一 Skill 调用"),
+		"idempotency_key":   stringSchema("同一调用重试时复用的幂等键"),
+		"execution_mode":    enumSchema("执行模式", "sync", "async"),
+	}
+	skillBranches := map[string]actionSchemaBranch{
+		"list":     {Description: "列出或搜索当前 Session 可用 Skill。", Required: []string{"remote_session_id"}},
+		"describe": {Description: "读取某个 Skill 的详细能力、instructions 与参数 schema。", Required: []string{"remote_session_id", "name"}},
+		"call":     {Description: "调用 Skill；Runtime 负责 revision 与参数校验。", Required: []string{"remote_session_id", "purpose", "name"}},
+	}
+	r.addTool(s, cleanActionTool("skill_tool", toolDesc["skill_tool"], skillCommon, skillBranches, skillToolAnnotation), r.toolSkillTool)
+
+	mcpCommon := map[string]any{
+		"remote_session_id": remoteSession,
+		"query":             stringSchema("按关键词筛选 MCP Server"),
+		"server":            stringSchema("MCP Server 名称"),
+		"tool":              stringSchema("上游 MCP Tool 名称"),
+		"purpose":           stringSchema("调用上游 MCP 的用户目标"),
+		"arguments":         map[string]any{"type": "object", "additionalProperties": true},
+		"user_confirmed":    booleanSchema("用户已确认同一 MCP 调用"),
+		"idempotency_key":   stringSchema("同一调用重试时复用的幂等键"),
+		"execution_mode":    enumSchema("执行模式", "sync", "async"),
+	}
+	mcpBranches := map[string]actionSchemaBranch{
+		"list":     {Description: "列出 MCP Servers；提供 server 时列出该 Server 的 Tools。", Required: []string{"remote_session_id"}},
+		"describe": {Description: "读取某个 MCP Tool 的完整 input schema。", Required: []string{"remote_session_id", "server", "tool"}},
+		"call":     {Description: "调用上游 MCP Tool；Runtime 负责当前 schema 与参数校验。", Required: []string{"remote_session_id", "purpose", "server", "tool"}},
+	}
+	r.addTool(s, cleanActionTool("mcp_tool", toolDesc["mcp_tool"], mcpCommon, mcpBranches, mcpToolAnnotation), r.toolMCPTool)
 
 	r.addTool(s, supportTool("screenshot_capture", toolDesc["screenshot_capture"], map[string]any{
 		"remote_session_id": remoteSession, "purpose": stringSchema("截取屏幕的用户目标和范围"),

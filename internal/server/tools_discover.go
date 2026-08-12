@@ -3,19 +3,19 @@ package server
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"mcpx/internal/approval"
 	"mcpx/internal/envelope"
+	"mcpx/internal/idempotency"
 	"mcpx/internal/mcpproxy"
 	"mcpx/internal/mcpresult"
 	"mcpx/internal/remotesession"
 	"mcpx/internal/skill"
 )
-
-const discoveryLeaseTTL = 10 * time.Minute
 
 type discoveryLease struct {
 	ID              string
@@ -25,333 +25,482 @@ type discoveryLease struct {
 	WorkspacePath   string
 	Kind            string
 	Object          string
-	ExpiresAt       time.Time
-	ArgumentsSchema map[string]any
-	MCPTools        []*mcp.Tool
 }
 
-func (r *Runtime) toolDiscover(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	req, _, _ = canonicalDiscoverRequest(req)
+func (r *Runtime) toolSkillTool(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	switch action := toolAction(req); action {
+	case "list":
+		return r.skillToolList(ctx, req)
+	case "describe":
+		return r.skillToolDescribe(ctx, req)
+	case "call":
+		return r.withCleanIdempotency(ctx, req, "skill_tool", mcpresult.Arguments(req), r.toolSkillExecute, r.preflightSkillToolCall)
+	default:
+		envReq, _, fail := r.remoteRequest(ctx, req)
+		if fail != nil {
+			return fail, nil
+		}
+		return r.terminalError(envReq, envReq.RemoteSessionID, envReq.Workspace, "INVALID_ACTION", fmt.Sprintf("skill_tool does not support action %q", action))
+	}
+}
+
+func (r *Runtime) skillToolList(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	envReq, _, session, fail := r.changeRequest(ctx, req, false)
+	if fail != nil {
+		return fail, nil
+	}
+	effective := r.effectiveConfig(session.WorkspacePath)
+	if !effective.Discovery.Skills.Enabled {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "SKILL_DISABLED", "skills are disabled")
+	}
+	items := skill.LoadAll(effective.Discovery.Skills.Dirs, session.WorkspacePath)
+	items = filterSkillsByQuery(items, strings.TrimSpace(stringPayload(envReq.Payload, "query")))
+	return r.remoteResult(envReq, session.ID, session.WorkspaceName, map[string]any{"skills": compactSkillInventory(items)})
+}
+
+func (r *Runtime) skillToolDescribe(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, session, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil
 	}
-	kind := strings.ToLower(strings.TrimSpace(stringPayload(envReq.Payload, "kind")))
-	view := strings.ToLower(strings.TrimSpace(stringPayload(envReq.Payload, "view")))
-	if view == "" {
-		view = "list"
-	}
-	if kind != "skill" && kind != "mcp" {
-		return r.terminalError(envReq, session.ID, session.WorkspaceName, "DISCOVERY_KIND_INVALID", "kind must be skill or mcp")
-	}
-	if view != "list" && view != "describe" {
-		return r.terminalError(envReq, session.ID, session.WorkspaceName, "DISCOVERY_VIEW_INVALID", "view must be list or describe")
-	}
-	if kind == "skill" {
-		return r.discoverSkill(ctx, envReq, principal.ID, session, view)
-	}
-	return r.discoverMCP(ctx, envReq, principal.ID, session, view)
-}
-
-func canonicalDiscoverRequest(req *mcp.CallToolRequest) (*mcp.CallToolRequest, string, string) {
-	args := mcpresult.Arguments(req)
-	kind := strings.ToLower(strings.TrimSpace(stringPayload(args, "kind")))
-	view := strings.ToLower(strings.TrimSpace(stringPayload(args, "view")))
-	server := strings.TrimSpace(stringPayload(args, "server"))
-	name := strings.TrimSpace(stringPayload(args, "name"))
-	includeTools := boolPayload(args, "include_tools")
-	updates := map[string]any{}
-	if kind == "" && (server != "" || includeTools) {
-		kind = "mcp"
-		updates["kind"] = kind
-	}
-	if view == "" {
-		if server != "" || name != "" || includeTools {
-			view = "describe"
-		} else {
-			view = "list"
-		}
-		updates["view"] = view
-	}
-	if len(updates) > 0 {
-		req = forwardedRequest(req, updates)
-	}
-	return req, kind, view
-}
-
-func (r *Runtime) discoverSkill(ctx context.Context, envReq envelope.Request, principalID string, session remotesession.Session, view string) (*mcp.CallToolResult, error) {
 	effective := r.effectiveConfig(session.WorkspacePath)
 	if !effective.Discovery.Skills.Enabled {
-		return r.terminalError(envReq, session.ID, session.WorkspaceName, "disabled", "skill discovery is disabled")
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "SKILL_DISABLED", "skills are disabled")
 	}
-	skills := skill.LoadAll(effective.Discovery.Skills.Dirs, session.WorkspacePath)
-	query := strings.TrimSpace(stringPayload(envReq.Payload, "query"))
 	name := strings.TrimSpace(stringPayload(envReq.Payload, "name"))
-	if view == "list" && name == "" {
-		items := skillItems(filterSkillsByQuery(skills, query))
-		return r.remoteResult(envReq, session.ID, session.WorkspaceName, map[string]any{
-			"kind": "skill", "view": "list", "skills": items,
-			"discovery_required_for_call": true,
-		})
-	}
-	if name == "" {
-		return r.discoveryTargetRequired(envReq, session, "skill", "name", "discover the selected Skill before calling it")
-	}
-	item, found := skill.Find(skills, name)
-	if !found {
+	items := skill.LoadAll(effective.Discovery.Skills.Dirs, session.WorkspacePath)
+	sk, ok := skill.Find(items, name)
+	if !ok {
 		return r.terminalError(envReq, session.ID, session.WorkspaceName, "SKILL_NOT_FOUND", fmt.Sprintf("skill %q was not found", name))
 	}
-	descriptor := skillItems([]skill.Skill{item})[0]
+	descriptor := skillItems([]skill.Skill{sk})[0]
 	revision, _ := descriptor["revision"].(string)
-	lease := r.upsertDiscoveryLease(discoveryLease{
-		Revision: revision, RemoteSessionID: session.ID, PrincipalID: principalID,
+	r.upsertDiscoveryLease(discoveryLease{
+		Revision: revision, RemoteSessionID: session.ID, PrincipalID: principal.ID,
 		WorkspacePath: session.WorkspacePath, Kind: "skill", Object: name,
-		ArgumentsSchema: item.Manifest.ArgumentsSchema,
 	})
-	descriptor["discovery_id"] = lease.ID
-	descriptor["discovery_revision"] = lease.Revision
-	descriptor["expires_at"] = lease.ExpiresAt
-	return r.remoteResult(envReq, session.ID, session.WorkspaceName, map[string]any{
-		"kind": "skill", "view": "describe", "skill": descriptor,
-		"discovery_id": lease.ID, "discovery_revision": lease.Revision, "expires_at": lease.ExpiresAt,
-		"invocation_template": map[string]any{
-			"tool": "skill_call",
-			"arguments": map[string]any{
-				"remote_session_id": session.ID, "name": name, "arguments": map[string]any{},
-				"discovery_id": lease.ID, "discovery_revision": lease.Revision,
-			},
-			"required_client_fields": []string{"purpose"},
-		},
-	})
+	risk := skillExecutionRisk(sk)
+	result := map[string]any{
+		"name":             sk.Manifest.Name,
+		"description":      sk.Manifest.Description,
+		"arguments_schema": descriptor["arguments_schema"],
+		"execution_mode":   descriptor["kind"],
+		"permissions":      sk.Manifest.Permissions,
+		"risk":             risk.publicData(),
+	}
+	if instructions, err := skillInstructions(sk); err == nil && instructions != "" {
+		result["instructions"] = instructions
+	}
+	return r.remoteResult(envReq, session.ID, session.WorkspaceName, result)
 }
 
-func (r *Runtime) discoverMCP(ctx context.Context, envReq envelope.Request, principalID string, session remotesession.Session, view string) (*mcp.CallToolResult, error) {
-	effective := r.effectiveConfig(session.WorkspacePath)
-	if !effective.Discovery.MCP.Enabled {
-		return r.terminalError(envReq, session.ID, session.WorkspaceName, "disabled", "MCP discovery is disabled")
+func skillInstructions(sk skill.Skill) (string, error) {
+	if sk.Manifest.Runtime != "markdown" && sk.Manifest.Format != "skill_md" {
+		return "", nil
 	}
-	manager, err := r.mcpManagerForWorkspace(session.WorkspacePath)
+	path, err := skill.ResolveEntry(sk)
 	if err != nil {
-		return r.terminalError(envReq, session.ID, session.WorkspaceName, "MCP_CONFIG_ERROR", err.Error())
+		return "", err
 	}
-	serverName := strings.TrimSpace(stringPayload(envReq.Payload, "server"))
-	if serverName == "" {
-		serverName = strings.TrimSpace(stringPayload(envReq.Payload, "name"))
+	body, err := os.ReadFile(path)
+	if err != nil && (sk.Manifest.Entry == "" || sk.Manifest.Entry == "SKILL.md") {
+		if alt, altErr := skill.ResolveEntryName(sk, "skill.md"); altErr == nil {
+			if altBody, altErr2 := os.ReadFile(alt); altErr2 == nil {
+				return string(altBody), nil
+			}
+		}
 	}
-	includeTools := boolPayload(envReq.Payload, "include_tools")
-	if view == "list" && serverName == "" {
-		items := filterExtensionItemsByQuery(manager.List(), strings.TrimSpace(stringPayload(envReq.Payload, "query")))
-		return r.remoteResult(envReq, session.ID, session.WorkspaceName, map[string]any{
-			"kind": "mcp", "view": "list", "servers": items,
-			"discovery_required_for_call": true,
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+func compactSkillInventory(skills []skill.Skill) []map[string]any {
+	items := make([]map[string]any, 0, len(skills))
+	for _, sk := range skills {
+		items = append(items, map[string]any{
+			"name":        sk.Manifest.Name,
+			"description": sk.Manifest.Description,
 		})
 	}
-	if serverName == "" {
-		return r.discoveryTargetRequired(envReq, session, "mcp", "server", "discover the selected MCP server with include_tools=true before calling it")
-	}
-	if !includeTools {
-		includeTools = true
-	}
-	serverConfig, found := manager.ServerConfig(serverName)
-	if !found {
-		return r.terminalError(envReq, session.ID, session.WorkspaceName, "MCP_SERVER_NOT_FOUND", fmt.Sprintf("MCP server %q is not configured", serverName))
-	}
-	tools, err := mcpproxy.ListTools(ctx, serverConfig)
-	if err != nil {
-		return r.terminalError(envReq, session.ID, session.WorkspaceName, "MCP_DISCOVERY_FAILED", err.Error())
-	}
-	revision := mcpRevision(tools)
-	lease := r.upsertDiscoveryLease(discoveryLease{
-		Revision: revision, RemoteSessionID: session.ID, PrincipalID: principalID,
-		WorkspacePath: session.WorkspacePath, Kind: "mcp", Object: serverName, MCPTools: tools,
-	})
-	server := map[string]any{"name": serverName, "tools": tools, "tools_revision": revision,
-		"discovery_id": lease.ID, "discovery_revision": lease.Revision, "expires_at": lease.ExpiresAt}
-	return r.remoteResult(envReq, session.ID, session.WorkspaceName, map[string]any{
-		"kind": "mcp", "view": "describe", "server": server,
-		"discovery_id": lease.ID, "discovery_revision": lease.Revision, "expires_at": lease.ExpiresAt,
-		"invocation_template": map[string]any{
-			"tool": "mcp_call",
-			"arguments": map[string]any{
-				"remote_session_id": session.ID, "server": serverName, "arguments": map[string]any{},
-				"discovery_id": lease.ID, "discovery_revision": lease.Revision,
-			},
-			"required_client_fields": []string{"purpose", "tool"},
-		},
-	})
+	return items
 }
 
-func (r *Runtime) upsertDiscoveryLease(input discoveryLease) discoveryLease {
-	now := time.Now().UTC()
-	r.discoveryMu.Lock()
-	defer r.discoveryMu.Unlock()
-	for key, existing := range r.discoveries {
-		if existing.RemoteSessionID == input.RemoteSessionID && existing.PrincipalID == input.PrincipalID &&
-			existing.WorkspacePath == input.WorkspacePath && existing.Kind == input.Kind && existing.Object == input.Object &&
-			existing.Revision == input.Revision && existing.ExpiresAt.After(now) {
-			existing.ExpiresAt = now.Add(discoveryLeaseTTL)
-			r.discoveries[key] = existing
-			return existing
+func compactSkillMaps(skills []map[string]any) []map[string]any {
+	items := make([]map[string]any, 0, len(skills))
+	for _, sk := range skills {
+		item := map[string]any{"name": sk["name"]}
+		if description := sk["description"]; description != nil {
+			item["description"] = description
 		}
+		items = append(items, item)
 	}
-	input.ID = newRuntimeID("disc", 12)
-	input.ExpiresAt = now.Add(discoveryLeaseTTL)
-	key := input.ID
-	r.discoveries[key] = input
-	return input
+	return items
 }
 
-func (r *Runtime) discoveryLeaseFor(id string) (discoveryLease, bool) {
-	r.discoveryMu.Lock()
-	defer r.discoveryMu.Unlock()
-	lease, ok := r.discoveries[strings.TrimSpace(id)]
-	if !ok || !lease.ExpiresAt.After(time.Now().UTC()) {
-		if ok {
-			delete(r.discoveries, id)
-		}
-		return discoveryLease{}, false
-	}
-	return lease, true
-}
-
-func (r *Runtime) requireDiscovery(envReq envelope.Request, principalID string, session remotesession.Session, kind, object string) (discoveryLease, *mcp.CallToolResult) {
-	id := strings.TrimSpace(stringPayload(envReq.Payload, "discovery_id"))
-	revision := strings.TrimSpace(stringPayload(envReq.Payload, "discovery_revision"))
-	if id == "" || revision == "" {
-		result, _ := r.discoveryError(envReq, session, "DISCOVERY_REQUIRED", kind, object, "显式 discover 是调用资格的一部分；本次请求未发生隐式发现")
-		return discoveryLease{}, result
-	}
-	lease, ok := r.discoveryLeaseFor(id)
-	if !ok || lease.RemoteSessionID != session.ID || lease.PrincipalID != principalID || lease.WorkspacePath != session.WorkspacePath || lease.Kind != kind || lease.Object != object {
-		code := "DISCOVERY_STALE"
-		if kind == "mcp" {
-			code = "MCP_DISCOVERY_STALE"
-		}
-		result, _ := r.discoveryError(envReq, session, code, kind, object, "discovery_id 不属于当前 Remote Session、principal、Workspace 或对象")
-		return discoveryLease{}, result
-	}
-	if lease.Revision != revision {
-		code := "DISCOVERY_STALE"
-		if kind == "mcp" {
-			code = "MCP_DISCOVERY_STALE"
-		}
-		result, _ := r.discoveryError(envReq, session, code, kind, object, "discovery_revision 已失效，请重新 discover")
-		return discoveryLease{}, result
-	}
-	return lease, nil
-}
-
-func (r *Runtime) discoveryError(envReq envelope.Request, session remotesession.Session, code, kind, object, message string) (*mcp.CallToolResult, error) {
-	response := envelope.Fail(envelope.StatusError, envReq.RequestID, session.WorkspaceName, nil, code, message)
-	response.RemoteSessionID = session.ID
-	if response.Error != nil {
-		response.Error.Details["required_call_count"] = 1
-		response.Error.Details["discovery_required"] = true
-		args := map[string]any{"remote_session_id": session.ID, "kind": kind, "view": "describe"}
-		if kind == "skill" {
-			args["name"] = object
-		} else {
-			args["server"] = object
-			args["include_tools"] = true
-		}
-		addRecoveryAction(&response, "discover", "先显式 discover 当前对象，再原样复制 discovery_id 和 discovery_revision 调用", args)
-	}
-	return r.resultJSON(response)
-}
-
-func (r *Runtime) discoveryTargetRequired(envReq envelope.Request, session remotesession.Session, kind, field, reason string) (*mcp.CallToolResult, error) {
-	response := envelope.Fail(envelope.StatusError, envReq.RequestID, session.WorkspaceName, nil, "DISCOVERY_TARGET_REQUIRED", field+" is required")
-	response.RemoteSessionID = session.ID
-	if response.Error != nil {
-		response.Error.Details["required_call_count"] = 1
-		response.Error.Details["discovery_required"] = true
-		addRecoveryAction(&response, "discover", reason, map[string]any{"remote_session_id": session.ID, "kind": kind, "view": "list"})
-	}
-	return r.resultJSON(response)
-}
-
-func (r *Runtime) toolSkillCallClean(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	ctx = withCleanCoreRequest(ctx)
-	return r.withCleanIdempotency(ctx, req, "skill_call", mcpresult.Arguments(req), r.toolSkillExecute, r.preflightCleanSkillCall)
-}
-
-func (r *Runtime) toolMCPCallClean(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	ctx = withCleanCoreRequest(ctx)
-	return r.withCleanIdempotency(ctx, req, "mcp_call", mcpresult.Arguments(req), r.toolMCPCall, r.preflightCleanMCPCall)
-}
-
-// preflightCleanSkillCall validates the explicit discovery lease and the
-// current manifest without executing the Skill. It is deliberately side-effect
-// free so idempotency Claim can happen only after the call is eligible.
-func (r *Runtime) preflightCleanSkillCall(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *Runtime) preflightSkillToolCall(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, remote, fail := r.changeRequest(ctx, req, true)
 	if fail != nil {
 		return fail, nil
 	}
 	effective := r.effectiveConfig(remote.WorkspacePath)
 	if !effective.Discovery.Skills.Enabled {
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "disabled", "skill discovery is disabled")
+		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "SKILL_DISABLED", "skills are disabled")
 	}
 	name := strings.TrimSpace(stringPayload(envReq.Payload, "name"))
-	skills := skill.LoadAll(effective.Discovery.Skills.Dirs, remote.WorkspacePath)
-	sk, ok := skill.Find(skills, name)
+	sk, ok := skill.Find(skill.LoadAll(effective.Discovery.Skills.Dirs, remote.WorkspacePath), name)
 	if !ok {
-		return r.skillNotFound(envReq, remote.ID, remote.WorkspaceName, name)
+		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "SKILL_NOT_FOUND", fmt.Sprintf("skill %q was not found", name))
 	}
 	current := skillItems([]skill.Skill{sk})[0]
 	currentRevision, _ := current["revision"].(string)
-	lease, discoveryFail := r.requireDiscovery(envReq, principal.ID, remote, "skill", name)
-	if discoveryFail != nil {
-		return discoveryFail, nil
-	}
-	if lease.Revision != currentRevision {
-		result, _ := r.discoveryError(envReq, remote, "DISCOVERY_STALE", "skill", name, "Skill manifest revision changed after discover")
-		return result, nil
+	if observed, ok := r.latestDiscoveryLease(remote, principal.ID, "skill", name); ok && observed.Revision != currentRevision {
+		response := envelope.Fail(envelope.StatusError, envReq.RequestID, remote.WorkspaceName, nil, "SKILL_REVISION_CHANGED", "Skill changed after it was described")
+		response.RemoteSessionID = remote.ID
+		if response.Error != nil {
+			addRecoveryAction(&response, "skill_tool", "重新读取 Skill 详情后再调用", map[string]any{
+				"action": "describe", "remote_session_id": remote.ID, "name": name,
+			})
+		}
+		return r.resultJSON(response)
 	}
 	arguments, argumentsOK := envReq.Payload["arguments"].(map[string]any)
 	if raw, exists := envReq.Payload["arguments"]; exists && raw != nil && !argumentsOK {
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "SKILL_ARGUMENTS_INVALID", "arguments must be an object")
+		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "SKILL_ARGUMENT_INVALID", "arguments must be an object")
 	}
 	if err := validateDiscoveryArguments(sk.Manifest.ArgumentsSchema, arguments); err != nil {
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "SKILL_ARGUMENTS_INVALID", err.Error())
+		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "SKILL_ARGUMENT_INVALID", err.Error())
+	}
+	risk := skillExecutionRisk(sk)
+	if confirmation := r.extensionConfirmationGate(ctx, envReq, principal.ID, remote, "skill_tool", name, currentRevision, risk); confirmation != nil {
+		return confirmation, nil
 	}
 	return nil, nil
 }
 
-// preflightCleanMCPCall performs all local checks needed before a durable
-// idempotency claim. It never starts the upstream process or calls the tool.
-func (r *Runtime) preflightCleanMCPCall(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	envReq, principal, remote, fail := r.changeRequest(ctx, req, true)
+func (r *Runtime) toolMCPTool(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	switch action := toolAction(req); action {
+	case "list":
+		return r.mcpToolList(ctx, req)
+	case "describe":
+		return r.mcpToolDescribe(ctx, req)
+	case "call":
+		return r.mcpToolCallWithObservedSession(ctx, req)
+	default:
+		envReq, _, fail := r.remoteRequest(ctx, req)
+		if fail != nil {
+			return fail, nil
+		}
+		return r.terminalError(envReq, envReq.RemoteSessionID, envReq.Workspace, "INVALID_ACTION", fmt.Sprintf("mcp_tool does not support action %q", action))
+	}
+}
+
+func (r *Runtime) mcpToolList(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	envReq, _, session, fail := r.changeRequest(ctx, req, false)
 	if fail != nil {
 		return fail, nil
 	}
-	if !r.effectiveConfig(remote.WorkspacePath).Discovery.MCP.Enabled {
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "disabled", "MCP discovery is disabled")
+	if !r.effectiveConfig(session.WorkspacePath).Discovery.MCP.Enabled {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "MCP_SERVER_UNAVAILABLE", "upstream MCP is disabled")
+	}
+	manager, err := r.mcpManagerForWorkspace(session.WorkspacePath)
+	if err != nil {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "MCP_SERVER_UNAVAILABLE", err.Error())
+	}
+	serverName := strings.TrimSpace(stringPayload(envReq.Payload, "server"))
+	if serverName == "" {
+		servers := filterExtensionItemsByQuery(manager.List(), strings.TrimSpace(stringPayload(envReq.Payload, "query")))
+		return r.remoteResult(envReq, session.ID, session.WorkspaceName, map[string]any{"servers": compactMCPServerInventory(servers)})
+	}
+	cfg, ok := manager.ServerConfig(serverName)
+	if !ok {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "MCP_SERVER_NOT_FOUND", fmt.Sprintf("MCP server %q is not configured", serverName))
+	}
+	tools, err := mcpproxy.ListTools(ctx, cfg)
+	if err != nil {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "MCP_SERVER_UNAVAILABLE", err.Error())
+	}
+	items := make([]map[string]any, 0, len(tools))
+	for _, tool := range tools {
+		if tool == nil {
+			continue
+		}
+		items = append(items, map[string]any{"name": tool.Name, "description": tool.Description})
+	}
+	return r.remoteResult(envReq, session.ID, session.WorkspaceName, map[string]any{"server": serverName, "tools": items})
+}
+
+func compactMCPServerInventory(servers []map[string]any) []map[string]any {
+	items := make([]map[string]any, 0, len(servers))
+	for _, server := range servers {
+		item := map[string]any{"name": server["name"]}
+		if description := server["description"]; description != nil {
+			item["description"] = description
+		}
+		if state := server["state"]; state != nil {
+			item["state"] = state
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+func (r *Runtime) mcpToolDescribe(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	envReq, principal, session, fail := r.changeRequest(ctx, req, false)
+	if fail != nil {
+		return fail, nil
+	}
+	if !r.effectiveConfig(session.WorkspacePath).Discovery.MCP.Enabled {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "MCP_SERVER_UNAVAILABLE", "upstream MCP is disabled")
 	}
 	serverName := strings.TrimSpace(stringPayload(envReq.Payload, "server"))
 	toolName := strings.TrimSpace(stringPayload(envReq.Payload, "tool"))
-	lease, discoveryFail := r.requireDiscovery(envReq, principal.ID, remote, "mcp", serverName)
-	if discoveryFail != nil {
-		return discoveryFail, nil
+	manager, err := r.mcpManagerForWorkspace(session.WorkspacePath)
+	if err != nil {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "MCP_SERVER_UNAVAILABLE", err.Error())
 	}
-	upstream, found := mcpToolForLease(lease.MCPTools, toolName)
-	if !found {
-		result, _ := r.discoveryError(envReq, remote, "MCP_DISCOVERY_STALE", "mcp", serverName, fmt.Sprintf("MCP tool %q was not present in the discovered schema", toolName))
-		return result, nil
+	cfg, ok := manager.ServerConfig(serverName)
+	if !ok {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "MCP_SERVER_NOT_FOUND", fmt.Sprintf("MCP server %q is not configured", serverName))
+	}
+	tools, err := mcpproxy.ListTools(ctx, cfg)
+	if err != nil {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "MCP_SERVER_UNAVAILABLE", err.Error())
+	}
+	upstream, ok := mcpToolForLease(tools, toolName)
+	if !ok {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "MCP_TOOL_NOT_FOUND", fmt.Sprintf("MCP tool %q was not found on server %q", toolName, serverName))
+	}
+	revision := mcpRevision([]*mcp.Tool{upstream})
+	r.upsertDiscoveryLease(discoveryLease{
+		Revision: revision, RemoteSessionID: session.ID, PrincipalID: principal.ID,
+		WorkspacePath: session.WorkspacePath, Kind: "mcp", Object: serverName + "/" + toolName,
+	})
+	risk := mcpExecutionRisk(upstream)
+	return r.remoteResult(envReq, session.ID, session.WorkspaceName, map[string]any{
+		"server":       serverName,
+		"tool":         toolName,
+		"description":  upstream.Description,
+		"input_schema": discoverySchemaMap(upstream.InputSchema),
+		"risk":         risk.publicData(),
+	})
+}
+
+func (r *Runtime) preflightMCPToolCallOnSession(ctx context.Context, req *mcp.CallToolRequest, client *mcpproxy.ClientSession) (*mcp.CallToolResult, *mcp.Tool, error) {
+	envReq, principal, remote, fail := r.changeRequest(ctx, req, true)
+	if fail != nil {
+		return fail, nil, nil
+	}
+	serverName := strings.TrimSpace(stringPayload(envReq.Payload, "server"))
+	toolName := strings.TrimSpace(stringPayload(envReq.Payload, "tool"))
+	tools, err := client.ListTools(ctx)
+	if err != nil {
+		result, resultErr := r.terminalError(envReq, remote.ID, remote.WorkspaceName, "MCP_SERVER_UNAVAILABLE", err.Error())
+		return result, nil, resultErr
+	}
+	upstream, ok := mcpToolForLease(tools, toolName)
+	if !ok {
+		result, resultErr := r.terminalError(envReq, remote.ID, remote.WorkspaceName, "MCP_TOOL_NOT_FOUND", fmt.Sprintf("MCP tool %q was not found on server %q", toolName, serverName))
+		return result, nil, resultErr
+	}
+	currentRevision := mcpRevision([]*mcp.Tool{upstream})
+	object := serverName + "/" + toolName
+	if observed, ok := r.latestDiscoveryLease(remote, principal.ID, "mcp", object); ok && observed.Revision != currentRevision {
+		response := envelope.Fail(envelope.StatusError, envReq.RequestID, remote.WorkspaceName, nil, "MCP_TOOL_SCHEMA_CHANGED", "MCP tool schema changed after it was described")
+		response.RemoteSessionID = remote.ID
+		if response.Error != nil {
+			addRecoveryAction(&response, "mcp_tool", "重新读取 MCP Tool schema 后再调用", map[string]any{
+				"action": "describe", "remote_session_id": remote.ID, "server": serverName, "tool": toolName,
+			})
+		}
+		result, resultErr := r.resultJSON(response)
+		return result, nil, resultErr
 	}
 	arguments, argumentsOK := envReq.Payload["arguments"].(map[string]any)
 	if raw, exists := envReq.Payload["arguments"]; exists && raw != nil && !argumentsOK {
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "MCP_ARGUMENTS_INVALID", "arguments must be an object")
+		result, resultErr := r.terminalError(envReq, remote.ID, remote.WorkspaceName, "MCP_ARGUMENT_INVALID", "arguments must be an object")
+		return result, nil, resultErr
 	}
 	if err := validateDiscoveryArguments(discoverySchemaMap(upstream.InputSchema), arguments); err != nil {
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "MCP_ARGUMENTS_INVALID", err.Error())
+		result, resultErr := r.terminalError(envReq, remote.ID, remote.WorkspaceName, "MCP_ARGUMENT_INVALID", err.Error())
+		return result, nil, resultErr
 	}
-	manager, err := r.mcpManagerForWorkspace(remote.WorkspacePath)
-	if err != nil {
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "mcp_config_error", err.Error())
+	risk := mcpExecutionRisk(upstream)
+	if confirmation := r.extensionConfirmationGate(ctx, envReq, principal.ID, remote, "mcp_tool", object, currentRevision, risk); confirmation != nil {
+		return confirmation, nil, nil
 	}
-	if _, ok := manager.ServerConfig(serverName); !ok {
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "not_found", "mcp server not configured")
+	return nil, upstream, nil
+}
+
+type extensionRisk struct {
+	ReadOnly             bool
+	Destructive          bool
+	Idempotent           bool
+	OpenWorld            bool
+	ConfirmationRequired bool
+	Classification       string
+	Permissions          []string
+}
+
+func (risk extensionRisk) publicData() map[string]any {
+	data := map[string]any{
+		"read_only": risk.ReadOnly, "destructive": risk.Destructive, "idempotent": risk.Idempotent,
+		"open_world": risk.OpenWorld, "confirmation_required": risk.ConfirmationRequired,
+		"classification": risk.Classification,
 	}
-	return nil, nil
+	if len(risk.Permissions) > 0 {
+		data["permissions"] = append([]string(nil), risk.Permissions...)
+	}
+	return data
+}
+
+func skillExecutionRisk(sk skill.Skill) extensionRisk {
+	if sk.Manifest.Runtime == "markdown" || sk.Manifest.Format == "skill_md" {
+		return extensionRisk{ReadOnly: true, Idempotent: true, Classification: "skill_instruction_read", Permissions: append([]string(nil), sk.Manifest.Permissions...)}
+	}
+	destructive := false
+	for _, permission := range sk.Manifest.Permissions {
+		normalized := strings.ToLower(strings.TrimSpace(permission))
+		if strings.Contains(normalized, "delete") || strings.Contains(normalized, "remove") || strings.Contains(normalized, "destructive") {
+			destructive = true
+		}
+	}
+	return extensionRisk{
+		Destructive: destructive, OpenWorld: true, ConfirmationRequired: true,
+		Classification: "skill_executable", Permissions: append([]string(nil), sk.Manifest.Permissions...),
+	}
+}
+
+func mcpExecutionRisk(tool *mcp.Tool) extensionRisk {
+	if tool == nil || tool.Annotations == nil {
+		return extensionRisk{OpenWorld: true, ConfirmationRequired: true, Classification: "upstream_mcp_unknown_risk"}
+	}
+	readOnly := tool.Annotations.ReadOnlyHint
+	// MCP defines destructiveHint=true as the default for non-read-only
+	// tools. An omitted hint must therefore remain confirmation-gated.
+	destructive := !readOnly
+	if tool.Annotations.DestructiveHint != nil {
+		destructive = *tool.Annotations.DestructiveHint
+	}
+	openWorld := true
+	if tool.Annotations.OpenWorldHint != nil {
+		openWorld = *tool.Annotations.OpenWorldHint
+	}
+	return extensionRisk{
+		ReadOnly: readOnly, Destructive: destructive, Idempotent: tool.Annotations.IdempotentHint, OpenWorld: openWorld,
+		ConfirmationRequired: destructive || !readOnly || openWorld,
+		Classification:       "upstream_mcp_annotations",
+	}
+}
+
+func extensionConfirmationContentKey(principalID, operation, target, revision string, payload map[string]any) string {
+	return skillRevision(strings.Join([]string{
+		principalID, operation, target, revision, stringPayload(payload, "purpose"), cleanIdempotencyFingerprint(operation, payload),
+	}, "\x00"))
+}
+
+func (r *Runtime) pendingExtensionConfirmation(remoteSessionID, principalID, operation, contentKey string) (approval.Pending, bool) {
+	for _, pending := range r.approvals.ListRemoteSession(remoteSessionID) {
+		if pending.PrincipalID == principalID && pending.Tool == operation && pending.ContentKey == contentKey {
+			return pending, true
+		}
+	}
+	return approval.Pending{}, false
+}
+
+func (r *Runtime) extensionReplayKnown(ctx context.Context, remote remotesession.Session, principalID, operation string, payload map[string]any) bool {
+	if r.idempotency == nil || !boolPayload(payload, "user_confirmed") {
+		return false
+	}
+	value := strings.TrimSpace(stringPayload(payload, "idempotency_key"))
+	if value == "" {
+		return false
+	}
+	// Only a completed request proves the same operation was confirmed and
+	// executed before. A pending placeholder — including the caller's own
+	// just-claimed record — must not bypass the confirmation gate.
+	record, ok, err := r.idempotency.Lookup(ctx, idempotency.Key{RemoteSessionID: remote.ID, PrincipalID: principalID, Operation: operation, Value: value})
+	if err != nil || !ok {
+		return false
+	}
+	return record.State == idempotency.StateSucceeded || record.State == idempotency.StateFailed
+}
+
+func (r *Runtime) extensionConfirmationGate(ctx context.Context, envReq envelope.Request, principalID string, remote remotesession.Session, operation, target, revision string, risk extensionRisk) *mcp.CallToolResult {
+	if !risk.ConfirmationRequired {
+		return nil
+	}
+	contentKey := extensionConfirmationContentKey(principalID, operation, target, revision, envReq.Payload)
+	pending, pendingOK := r.pendingExtensionConfirmation(remote.ID, principalID, operation, contentKey)
+	if boolPayload(envReq.Payload, "user_confirmed") && (pendingOK || r.extensionReplayKnown(ctx, remote, principalID, operation, envReq.Payload)) {
+		return nil
+	}
+	if !pendingOK {
+		var err error
+		pending, err = r.approvals.PutPending(approval.Pending{
+			Tool: operation, Summary: target, Purpose: stringPayload(envReq.Payload, "purpose"), Scope: "workspace",
+			RequestID: envReq.RequestID, Workspace: remote.WorkspaceName, RemoteSessionID: remote.ID,
+			PrincipalID: principalID, ContentKey: contentKey,
+		})
+		if err != nil {
+			result, _ := r.terminalError(envReq, remote.ID, remote.WorkspaceName, "CONFIRMATION_STORE_ERROR", err.Error())
+			return result
+		}
+	}
+	data := map[string]any{
+		"target": target, "purpose": stringPayload(envReq.Payload, "purpose"), "risk": risk.publicData(),
+		"confirmation_required": true, "user_confirmed_required": true,
+		"summary": "该扩展调用可能产生副作用；请向用户展示目标、用途和风险，确认后以相同业务参数设置 user_confirmed=true 重试。",
+	}
+	response := envelope.Fail(envelope.StatusNeedConfirmation, envReq.RequestID, remote.WorkspaceName, data, "USER_CONFIRMATION_REQUIRED", "扩展调用等待用户语义确认")
+	response.RemoteSessionID = remote.ID
+	if response.Error != nil {
+		arguments := map[string]any{"action": "call", "remote_session_id": remote.ID, "purpose": stringPayload(envReq.Payload, "purpose"), "user_confirmed": true}
+		for _, key := range []string{"name", "server", "tool", "idempotency_key"} {
+			if value, ok := envReq.Payload[key]; ok {
+				arguments[key] = value
+			}
+		}
+		// Extension arguments may contain a secret. Keep the target and require
+		// the caller to reuse its original arguments instead of echoing them
+		// into an error/recovery payload.
+		addRecoveryAction(&response, operation, "用户确认后使用相同扩展目标、原始 arguments 和用途重试，并设置 user_confirmed=true", arguments)
+	}
+	result, _ := r.resultJSON(response)
+	_ = pending
+	return result
+}
+
+func (r *Runtime) consumeExtensionConfirmation(remoteSessionID, principalID, operation, contentKey string) {
+	if pending, ok := r.pendingExtensionConfirmation(remoteSessionID, principalID, operation, contentKey); ok {
+		_, _ = r.approvals.Consume(pending.ID)
+	}
+}
+
+func (r *Runtime) upsertDiscoveryLease(input discoveryLease) discoveryLease {
+	r.discoveryMu.Lock()
+	defer r.discoveryMu.Unlock()
+	for key, existing := range r.discoveries {
+		if existing.RemoteSessionID == input.RemoteSessionID && existing.PrincipalID == input.PrincipalID &&
+			existing.WorkspacePath == input.WorkspacePath && existing.Kind == input.Kind && existing.Object == input.Object {
+			input.ID = existing.ID
+			r.discoveries[key] = input
+			return input
+		}
+	}
+	input.ID = newRuntimeID("ext", 12)
+	r.discoveries[input.ID] = input
+	return input
+}
+
+func (r *Runtime) latestDiscoveryLease(session remotesession.Session, principalID, kind, object string) (discoveryLease, bool) {
+	r.discoveryMu.Lock()
+	defer r.discoveryMu.Unlock()
+	for _, lease := range r.discoveries {
+		if lease.RemoteSessionID == session.ID && lease.PrincipalID == principalID && lease.WorkspacePath == session.WorkspacePath && lease.Kind == kind && lease.Object == object {
+			return lease, true
+		}
+	}
+	return discoveryLease{}, false
 }

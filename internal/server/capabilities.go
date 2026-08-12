@@ -12,7 +12,7 @@ import (
 	"mcpx/internal/remotesession"
 )
 
-const cleanCoreCapabilityVersion = "clean-core-p9"
+const cleanCoreCapabilityVersion = "clean-core-p10"
 
 const clientProtocolVersion = "2"
 
@@ -51,7 +51,7 @@ func clientProtocolRevision() string { return hashRevision(clientProtocolCapabil
 
 func capabilityGroups() map[string][]string {
 	return map[string][]string{
-		"core":    {"workspace", "session", "read", "edit", "move_out", "observe", "progress", "execute", "plan", "artifact", "discover", "skill_call", "mcp_call"},
+		"core":    {"workspace", "session", "read", "edit", "move_out", "observe", "progress", "execute", "plan", "artifact", "skill_tool", "mcp_tool"},
 		"support": {"operation_batch", "operation_manage", "runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide"},
 	}
 }
@@ -80,9 +80,8 @@ var toolCapabilityDefinitions = []toolCapabilityDefinition{
 	{Name: "execute", Domain: "command", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "terminal"},
 	{Name: "plan", Domain: "plan", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "artifact", Domain: "artifact", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
-	{Name: "discover", Domain: "extension", RequiresRemoteSession: true},
-	{Name: "skill_call", Domain: "extension", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "skills"},
-	{Name: "mcp_call", Domain: "extension", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "mcp"},
+	{Name: "skill_tool", Domain: "extension", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "skills"},
+	{Name: "mcp_tool", Domain: "extension", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "mcp"},
 	// Support tools intentionally remain outside the core workflow but share
 	// the same remote_session_id contract; their definitions are listed above.
 	{Name: "runtime_read", Domain: "runtime"},

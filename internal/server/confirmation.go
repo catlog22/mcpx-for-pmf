@@ -2,13 +2,17 @@ package server
 
 import "mcpx/internal/approval"
 
-// pendingConfirmationItems builds the session bootstrap view for commands that
-// still need an explicit user confirmation.
+// pendingConfirmationItems builds the session bootstrap view for all operations
+// that still need an explicit user confirmation.
 func pendingConfirmationItems(pending []approval.Pending) []map[string]any {
 	items := make([]map[string]any, 0, len(pending))
 	for _, pendingItem := range pending {
+		tool := pendingItem.Tool
+		if tool == "command_execute" {
+			tool = "execute"
+		}
 		item := map[string]any{
-			"tool":                    "execute",
+			"tool":                    tool,
 			"summary":                 pendingItem.Summary,
 			"workspace":               pendingItem.Workspace,
 			"created_at":              pendingItem.CreatedAt,

@@ -62,6 +62,24 @@ var artifactToolAnnotation = toolAnnotation{
 	}},
 }
 
+var skillToolAnnotation = toolAnnotation{
+	ReadOnly: false, Destructive: true, Idempotent: false, OpenWorld: true,
+	Meta: mcp.Meta{"mcpx/action_risk": map[string]any{
+		"list":     riskDescriptor(true, false, true, false, "skill_inventory_read"),
+		"describe": riskDescriptor(true, false, true, false, "skill_definition_read"),
+		"call":     riskDescriptor(false, true, false, true, "skill_execution_dynamic_risk"),
+	}},
+}
+
+var mcpToolAnnotation = toolAnnotation{
+	ReadOnly: false, Destructive: true, Idempotent: false, OpenWorld: true,
+	Meta: mcp.Meta{"mcpx/action_risk": map[string]any{
+		"list":     riskDescriptor(true, false, true, true, "upstream_mcp_capability_read"),
+		"describe": riskDescriptor(true, false, true, true, "upstream_mcp_schema_read"),
+		"call":     riskDescriptor(false, true, false, true, "upstream_mcp_dynamic_risk"),
+	}},
+}
+
 func riskDescriptor(readOnly, destructive, idempotent, openWorld bool, classification string) map[string]any {
 	return map[string]any{
 		"read_only": readOnly, "destructive": destructive, "idempotent": idempotent,
@@ -99,7 +117,6 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"description":                  stringSchema("开发目标或会话描述"),
 		"client_request_id":            stringSchema("客户端幂等键"),
 		"include_instructions_content": booleanSchema("是否内联返回指令内容"),
-		"include_upstream_tools":       booleanSchema("是否返回上游 MCP 工具"),
 		"include_project_tasks":        booleanSchema("是否返回项目任务"),
 		"mode":                         enumSchema("关闭模式；出现时省略 action 也会推导 close", "closed", "archived"),
 	}, nil, sessionToolAnnotation), r.toolSession)
@@ -227,9 +244,8 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 	r.addTool(s, cleanCoreTool("observe", desc["observe"], map[string]any{
 		"remote_session_id":  remoteSession,
 		"workspace":          workspace,
-		"view":               enumSchema("观察视图；省略时 Runtime 仅在目标唯一时推导，完全无目标参数时默认为 session", "session", "task", "plan", "history", "changes", "logs", "diff"),
+		"view":               enumSchema("观察视图；省略时 Runtime 仅在目标唯一时推导，完全无目标参数时默认为 session", "session", "task", "plan", "history", "logs"),
 		"limit":              numberSchema("返回数量限制"),
-		"offset":             numberSchema("diff 视图的字节偏移"),
 		"cursor":             stringSchema("分页游标"),
 		"call_id":            stringSchema("按调用关联 ID 过滤 history"),
 		"event_ids":          arraySchema(map[string]any{"type": "string"}, "按事件 sequence ID 过滤 history"),
@@ -242,13 +258,10 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"statuses":           arraySchema(map[string]any{"type": "string"}, "按事件状态过滤 history"),
 		"created_after":      stringSchema("仅返回此时间之后的事件；支持 RFC3339、YYYY-MM-DD 或 Unix 毫秒"),
 		"created_before":     stringSchema("仅返回此时间之前的事件；支持 RFC3339、YYYY-MM-DD 或 Unix 毫秒"),
-		"edit_id":            stringSchema("edit 返回的变更 ID；view=diff 时使用"),
 		"plan_task_id":       stringSchema("Plan Task ID；view=plan 时使用，也可用于 history 过滤"),
 		"execution_task_id":  stringSchema("执行 Task ID；view=task/logs 时使用，也可用于 history 过滤"),
 		"stdout_offset":      numberSchema("view=logs 的 stdout 字节偏移；可原样使用服务端 next_action 返回值"),
 		"stderr_offset":      numberSchema("view=logs 的 stderr 字节偏移；可原样使用服务端 next_action 返回值"),
-		"include_diff":       booleanSchema("是否包含完整 Unified Diff"),
-		"path":               path,
 	}, []string{"remote_session_id"}, readOnlyToolAnnotation), r.toolObserve)
 
 	r.addTool(s, cleanCoreTool("progress", desc["progress"], map[string]any{

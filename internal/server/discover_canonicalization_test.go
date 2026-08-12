@@ -1,85 +1,115 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
-	"mcpx/internal/mcpresult"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"mcpx/internal/skill"
 )
 
-func TestDiscoverCanonicalizesOnlyUniqueSemantics(t *testing.T) {
-	tests := []struct {
-		name     string
-		args     map[string]any
-		wantKind string
-		wantView string
-	}{
-		{name: "skill list", args: map[string]any{"kind": "skill"}, wantKind: "skill", wantView: "list"},
-		{name: "skill describe", args: map[string]any{"kind": "skill", "name": "review"}, wantKind: "skill", wantView: "describe"},
-		{name: "mcp server", args: map[string]any{"server": "dbx"}, wantKind: "mcp", wantView: "describe"},
-		{name: "mcp include tools", args: map[string]any{"include_tools": true}, wantKind: "mcp", wantView: "describe"},
-		{name: "ambiguous name", args: map[string]any{"name": "something"}, wantKind: "", wantView: "describe"},
-		{name: "ambiguous list", args: map[string]any{}, wantKind: "", wantView: "list"},
-		{name: "explicit mcp list", args: map[string]any{"kind": "mcp", "view": "list"}, wantKind: "mcp", wantView: "list"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, kind, view := canonicalDiscoverRequest(mcpresult.Request(tt.args))
-			if kind != tt.wantKind || view != tt.wantView {
-				t.Fatalf("kind/view=%q/%q want=%q/%q", kind, view, tt.wantKind, tt.wantView)
-			}
-		})
-	}
-}
-
-func TestSkillInventoryUsesExplicitInvocationTemplate(t *testing.T) {
+func TestSkillInventoryDoesNotExposeLegacyDiscoveryProtocol(t *testing.T) {
 	items := skillItems([]skill.Skill{{Manifest: skill.Manifest{
 		Name: "review", Description: "review code", Runtime: "markdown", Format: "skill_md",
 	}, Dir: "/tmp/review", Source: "/tmp"}})
 	if len(items) != 1 {
 		t.Fatalf("skill items=%+v", items)
 	}
-	item := items[0]
-	if item["invocation"] != nil {
-		t.Fatalf("skill inventory must not expose incomplete executable invocation: %+v", item)
+	encoded, err := json.Marshal(items[0])
+	if err != nil {
+		t.Fatal(err)
 	}
-	template, _ := item["invocation_template"].(map[string]any)
-	if template["tool"] != "skill_call" || template["requires_discovery"] != true {
-		t.Fatalf("skill invocation template=%+v", template)
-	}
-	arguments, _ := template["arguments"].(map[string]any)
-	if arguments["discovery_required"] != nil {
-		t.Fatalf("template arguments must only contain public skill_call fields: %+v", arguments)
-	}
-	required, _ := template["required_client_fields"].([]string)
-	for _, field := range []string{"remote_session_id", "purpose", "discovery_id", "discovery_revision"} {
-		found := false
-		for _, value := range required {
-			if value == field {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Fatalf("template missing required client field %q: %+v", field, template)
+	text := string(encoded)
+	for _, legacy := range []string{"discover", "skill_call", "discovery_id", "discovery_revision", "invocation_template"} {
+		if strings.Contains(text, legacy) {
+			t.Fatalf("skill inventory exposes legacy protocol %q: %s", legacy, text)
 		}
 	}
 }
 
-func TestDiscoverSchemaDoesNotRequireInferableDiscriminators(t *testing.T) {
+func TestExtensionToolSchemasUseUnifiedActionsWithoutPublicRevisionTokens(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	tool := rt.toolIndex["discover"]
-	encoded, err := json.Marshal(tool.InputSchema)
-	if err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"skill_tool", "mcp_tool"} {
+		tool, ok := rt.toolIndex[name]
+		if !ok {
+			t.Fatalf("missing %s", name)
+		}
+		encoded, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(encoded)
+		for _, action := range []string{"list", "describe", "call"} {
+			if !strings.Contains(text, `"`+action+`"`) {
+				t.Fatalf("%s schema missing action %q: %s", name, action, text)
+			}
+		}
+		for _, legacy := range []string{"discovery_id", "discovery_revision"} {
+			if strings.Contains(text, legacy) {
+				t.Fatalf("%s schema exposes legacy token %q: %s", name, legacy, text)
+			}
+		}
 	}
-	var schema map[string]any
-	if err := json.Unmarshal(encoded, &schema); err != nil {
-		t.Fatal(err)
+	for _, removed := range []string{"discover", "skill_call", "mcp_call"} {
+		if _, exists := rt.toolIndex[removed]; exists {
+			t.Fatalf("legacy public tool %s must not be registered", removed)
+		}
 	}
-	required, _ := schema["required"].([]any)
-	if !containsSchemaRequired(required, "remote_session_id") || containsSchemaRequired(required, "kind") || containsSchemaRequired(required, "view") {
-		t.Fatalf("discover discriminators must be Runtime-inferable where possible: %s", encoded)
+}
+
+func TestMCPExecutionRiskUsesConservativeAnnotationDefaults(t *testing.T) {
+	falseValue := false
+	trueValue := true
+
+	closedReadOnly := mcpExecutionRisk(&mcp.Tool{Annotations: &mcp.ToolAnnotations{
+		ReadOnlyHint: true, DestructiveHint: &falseValue, OpenWorldHint: &falseValue,
+	}})
+	if closedReadOnly.ConfirmationRequired || !closedReadOnly.ReadOnly || closedReadOnly.OpenWorld {
+		t.Fatalf("closed read-only MCP risk=%+v", closedReadOnly)
+	}
+
+	openReadOnly := mcpExecutionRisk(&mcp.Tool{Annotations: &mcp.ToolAnnotations{
+		ReadOnlyHint: true, DestructiveHint: &falseValue, OpenWorldHint: &trueValue,
+	}})
+	if !openReadOnly.ConfirmationRequired || !openReadOnly.OpenWorld {
+		t.Fatalf("open-world MCP call must be confirmation-gated=%+v", openReadOnly)
+	}
+
+	unknown := mcpExecutionRisk(&mcp.Tool{})
+	if !unknown.ConfirmationRequired || !unknown.OpenWorld {
+		t.Fatalf("missing MCP annotations must remain confirmation-gated=%+v", unknown)
+	}
+}
+
+func TestDiscoveryObservationLivesForTheRemoteSession(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
+	remoteID, _ := opened["remote_session_id"].(string)
+	if remoteID == "" {
+		t.Fatalf("open session=%+v", opened)
+	}
+	rt.upsertDiscoveryLease(discoveryLease{
+		RemoteSessionID: remoteID, PrincipalID: "test-principal", WorkspacePath: "workspace",
+		Kind: "skill", Object: "review", Revision: "rev-1",
+	})
+	rt.discoveryMu.Lock()
+	observedBeforeClose := len(rt.discoveries)
+	rt.discoveryMu.Unlock()
+	if observedBeforeClose != 1 {
+		t.Fatalf("discovery observation=%d, want 1", observedBeforeClose)
+	}
+
+	closed := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "close", "remote_session_id": remoteID})
+	if !statusOK(closed) {
+		t.Fatalf("close session=%+v", closed)
+	}
+	rt.discoveryMu.Lock()
+	observedAfterClose := len(rt.discoveries)
+	rt.discoveryMu.Unlock()
+	if observedAfterClose != 0 {
+		t.Fatalf("closed session must clear its discovery observations, remaining=%d", observedAfterClose)
 	}
 }

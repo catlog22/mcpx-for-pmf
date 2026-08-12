@@ -12,7 +12,7 @@ func TestQuerySupportsSemanticFiltersAndNewestCursor(t *testing.T) {
 	created := time.Date(2026, 8, 4, 10, 0, 0, 0, time.UTC)
 	first, err := store.Append(context.Background(), Event{
 		Workspace: "mcpx", RemoteSessionID: "session_1", RequestID: "req_1", OperationID: "task_1",
-		Tool: "skill_call", Type: TypeToolCompleted, Status: "succeeded", Purpose: "review refresh token",
+		Tool: "skill_tool", Type: TypeToolCompleted, Status: "succeeded", Purpose: "review refresh token",
 		SkillName: "code-review", Summary: "review completed", CreatedAt: created,
 	})
 	if err != nil {

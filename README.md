@@ -6,7 +6,7 @@ Streamable HTTP 把本地 Workspace、源码、变更、命令、任务、环境
 
 MCPX 的重点不是增加一个聊天界面，而是提供一套可审计、可恢复、对模型友好
 的开发工具协议：客户端可以跨连接恢复同一个 Remote Session，模型可以用文件 SHA、
-Edit ID、Task ID、discovery revision 和能力版本避免重复读取和无效重试。
+Edit ID、Task ID 和能力版本避免重复读取和无效重试；Skill/MCP 的 revision 与 schema 一致性由 Runtime 内部管理。
 
 ## 能力概览
 
@@ -21,7 +21,7 @@ Edit ID、Task ID、discovery revision 和能力版本避免重复读取和无�
 | Project Task | 从项目配置中发现测试、构建和检查任务，并解析诊断信息 |
 | Workspace State | 读取 Git 状态、快照、差异、监听结果和项目记忆 |
 | Environment | 查看操作系统、架构、Shell、容器、资源、文件系统和工具链 |
-| Extension | 发现并调用配置的 Skill 与上游 MCP Server |
+| Extension | Session 建立时曝光 compact inventory，并通过统一 `skill_tool` / `mcp_tool` 按需 list、describe、call |
 | Artifact | 注册、列出和分页读取测试报告、构建产物、覆盖率和日志 |
 | Screenshot | 截取显示器或屏幕区域，并通过 MCP ImageContent 返回 |
 | Security | OAuth、Bearer、Remote Session ACL、命令/文件策略和语义确认 |
@@ -56,7 +56,7 @@ Runtime 边界内；所有有状态操作都绑定 `remote_session_id`，并通�
 ## 公开工具
 
 `tools/list` 是工具名称、描述、参数 Schema 和 Annotation 的唯一权威来源。
-当前公开工具共 20 个，分为 13 个 core tools 和 7 个 support tools：
+当前公开工具共 19 个，分为 12 个 core tools 和 7 个 support tools：
 
 | 领域 | 工具 | 主要用途 |
 | --- | --- | --- |
@@ -65,14 +65,13 @@ Runtime 边界内；所有有状态操作都绑定 `remote_session_id`，并通�
 | Core | `read` | 读取、搜索、列举或组装 Workspace 源码上下文；环境事实使用 `environment_read` |
 | Core | `edit` | 创建、更新或重命名 Workspace 文件；使用 SHA revision guard 和幂等语义，不提供删除 |
 | Core | `move_out` | `prepare` 冻结明确的文件/目录/symlink manifest；用户确认后 `submit` 仅携带 `confirmation_uuid` |
-| Core | `observe` | 查看 session、Execution Task、Plan Task、history、changes、logs 或 diff |
+| Core | `observe` | 查看 session、Execution Task、Plan Task、history 或 logs；Workspace 静态内容使用 `read` |
 | Core | `progress` | 发布有业务意义的用户可见里程碑、等待、阻塞或失败状态 |
 | Core | `execute` | 按策略执行命令或项目 Task，以及 attach、stop、stdin |
 | Core | `plan` | create、read、advance、complete、block、replan、deliver 持久化计划 |
 | Core | `artifact` | 产物登记、列表和分片读取 |
-| Core | `discover` | 显式发现 Skill 或上游 MCP，并签发 discovery revision |
-| Core | `skill_call` | 调用已由 `discover` 返回且 revision 匹配的 Skill |
-| Core | `mcp_call` | 调用已由 `discover` 返回且 revision 匹配的上游 MCP 工具 |
+| Core | `skill_tool` | Skill 生命周期唯一入口：`list`、`describe`、`call`；Runtime 内部管理 revision |
+| Core | `mcp_tool` | MCP Server/Tool 唯一入口：`list`、`describe`、`call`；Runtime 内部管理 schema revision |
 | Support | `operation_batch` | 并发或按依赖 DAG 执行多个公开工具操作 |
 | Support | `operation_manage` | 查询、等待、读取结果、取消和恢复异步 Operation |
 | Support | `runtime_read` | 读取运行时能力、项目摘要或适用指令 |
@@ -95,9 +94,9 @@ MCPX 同时处理两类 Session：
 | `remote_session_id` | SQLite 持久化业务标识 | Workspace、角色、Edit、Task、Plan、操作、快照和产物的主键 |
 
 客户端应始终原样保存并复用服务端返回的 `remote_session_id`、`edit_id`、`plan_id`、
-`plan_task_id`、`execution_task_id`、`operation_id`、`artifact_id`、`discovery_id` 和
-`discovery_revision`，不能自行缩写、猜测或从历史日志重建这些标识。Plan Task 与
-执行 Task 是不同命名空间，不存在兼容的通用 `task_id` 字段。
+`plan_task_id`、`execution_task_id`、`operation_id` 和 `artifact_id`，不能自行缩写、猜测或从历史日志重建这些标识。
+Skill/MCP 的 revision token 不再公开给模型；`describe` 与 `call` 之间的一致性由 Runtime 重新校验。
+Plan Task 与执行 Task 是不同命名空间，不存在兼容的通用 `task_id` 字段。
 
 MCPX 只提供 Streamable HTTP 的 `/mcp` 端点，不提供旧版 HTTP+SSE 的 `/sse`
 或 `/message` 兼容端点。
@@ -206,7 +205,7 @@ mcpx update [flags]              从 GitHub Release 检查并安装新版本
 ```bash
 ./bin/mcpx update --check
 ./bin/mcpx update
-./bin/mcpx update --version 0.8.6
+./bin/mcpx update --version 0.9.0
 ```
 
 `update` 会选择当前平台对应的 GitHub Release 产物，校验 `checksums.txt` 中的 SHA-256，
@@ -419,12 +418,13 @@ curl -sS -m 5 \
 2. 使用 `session(action="open", workspace="...")` 创建 Remote Session；省略 `action` 也默认 open。
 3. 保存服务端返回的完整 `remote_session_id`。恢复已有会话时再次调用
    `session(action="open", remote_session_id="...")`，不要改写、缩写或重建这个 ID。
-4. `session` bootstrap 已返回工具能力、Skill、上游 MCP、适用指令、项目摘要和一组 revision；
-   需要单独刷新能力时调用 `runtime_read(view="capabilities")`。
+4. `session` bootstrap 已返回工具能力、compact Skill/MCP inventory、适用指令、项目摘要和一组 Runtime revision；
+   不返回完整 Skill instructions 或 MCP Tool schema。需要单独刷新能力时调用
+   `runtime_read(view="capabilities")`；需要扩展详情时按需调用 `skill_tool` / `mcp_tool` 的 `describe`。
 5. 客户端可以缓存 `tool_schema_revision`、`capability_manifest_revision`、`guidance_revision`、
-   `instruction_revision`、`skill_revision`、`mcp_revision`、`session_capability_revision` 和
-   `client_protocol_revision`，再与后续 bootstrap / `runtime_read` 返回值比较，按变化范围刷新本地缓存。
-   当前公开 Schema 不接受 `known_revisions` 参数。
+   `instruction_revision`、`session_capability_revision` 和 `client_protocol_revision`，再与后续 bootstrap /
+   `runtime_read` 返回值比较，按变化范围刷新本地缓存。Skill revision 与 MCP Tool schema revision 由 Runtime
+   在 `describe → call` 间维护和复核，不作为公开缓存字段。当前公开 Schema 不接受 `known_revisions` 参数。
 
 ARC 2.0 将工具 effect 与 Agent 语义轨迹分开：`purpose` 只描述本次工具操作的作用，
 `plan_id`、`plan_task_id`、`execution_task_id`、`operation_id` 用于绑定执行上下文。Client Protocol Activity V3 直接嵌入会话内 MCP 工具参数：可选 `activity` 对象允许同一次调用同时提供 `intent`、`hypothesis`、`evidence`、`conclusion`、`next`、`status`，但只应填写本次发生实质变化的字段，不重复未变化内容。`intent` 是整个工作 turn 的目标并开启新 turn；`hypothesis` 是待验证且可被推翻的暂定判断；`evidence` 只写刚获得的可核验事实；`conclusion` 写由 evidence 支持的当前判断；`next` 表示立即要执行且与当前 tool call 对齐的动作；`status` 只用于无法归入前五类的阶段、等待或阻塞变化。Runtime 按固定顺序展开非空字段，并自动生成 `turn_id`、`sequence`、`state=preparing_action`、`related_call_id`。旧 `/mcp/activity` HTTP ingress 已移除。服务端只把已经接受并持久化的真实 Activity snapshot 放入 `structuredContent.context.activity` 和 `_meta["mcpx.result"].mcpx.result.context.activity`；ARC 不直接复制 raw tool input，也不会从工具结果反推、伪造 Activity。`reasoning_summary`、`progress_summary`、`next_step` 不再属于 ARC context。
@@ -602,16 +602,21 @@ plan(create) → plan(advance) → edit/execute → artifact(register) → plan(
 `source_offset`/`next_source_offset` 始终使用源文件 byte 坐标。UTF-8/UTF-16 文本通过
 `delivery_encoding=utf-8` 返回 `text`，二进制通过 `delivery_encoding=base64` 返回 `base64`，不会把任意字节伪装成文本。
 
-Skill/MCP 必须先显式发现：
+`session(action="open")` 默认返回 compact `extension_inventory`：Skill 仅包含用于 relevance routing 的轻量信息，MCP 默认只到 Server 级，不注入完整 Skill instructions 或全部 MCP Tool schema。典型路径：
 
 ```text
-discover(kind="skill", view="describe", name="...") → skill_call(... discovery_id, discovery_revision)
-discover(kind="mcp", view="describe", server="...", include_tools=true) → mcp_call(... discovery_id, discovery_revision)
+session(open)
+  → skill_tool(action="list|describe|call", ...)
+  → mcp_tool(action="list|describe|call", ...)
 ```
 
-跳过 discover 会得到 `DISCOVERY_REQUIRED`，其中明确包含
-`required_call_count=1`、`discovery_required=true` 和下一次 discover 参数；这次
-额外调用是公开的交互成本，不由服务端隐式完成。revision 失效时重新 discover。
+Skill：不知道有哪些能力时 `list`；知道名称但缺少使用规则时 `describe`；信息充分时直接 `call`。
+MCP：不知道 Server 时 `list`；知道 Server 但不知道 Tools 时 `list(server=...)`；缺少 Tool schema 时 `describe`；参数充分时 `call`。
+模型不再提交 `discovery_id` / `discovery_revision`；Runtime 在 `call` 前重新检查当前 Skill revision 或 MCP Tool schema，发生变化时返回结构化 recovery，要求重新 `describe`。
+
+`skill_tool` 与 `mcp_tool` 的顶层 MCP annotation 按最坏情况声明为可破坏、开放世界调用；Runtime 再根据本次选中的对象做实际决策。文档型 Skill，以及上游明确标注为只读且 closed-world 的 Tool 可直接调用；可执行 Skill、缺少风险 annotation 的上游 Tool，以及任何可写、可破坏或开放世界调用都会先返回 `waiting_confirmation`。用户确认后，使用相同业务参数并设置 `user_confirmed=true` 重试；服务端只接受与当前目标、revision、参数摘要和用途匹配的 pending confirmation。恢复动作不会回显 extension arguments，避免把可能的 Secret 写入错误响应或日志。
+
+MCP 的 `call` 在同一个已初始化的上游实例内完成 `tools/list`、schema 校验和 `tools/call`，不会先检查实例 A、再执行实例 B。Session inventory 与 `mcp_tool(action=list)` 只返回 Server 名称、description 和状态，用于第一轮 relevance routing；完整 Tool schema 仍需按需 `describe`。
 
 ### 6. 批量和异步操作
 

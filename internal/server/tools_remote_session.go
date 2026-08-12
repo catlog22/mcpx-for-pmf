@@ -179,6 +179,13 @@ func (r *Runtime) toolRemoteSessionClose(ctx context.Context, req *mcp.CallToolR
 	if err != nil {
 		return r.remoteError(envReq, remoteSessionID, "", err)
 	}
+	r.discoveryMu.Lock()
+	for id, observed := range r.discoveries {
+		if observed.RemoteSessionID == remoteSessionID {
+			delete(r.discoveries, id)
+		}
+	}
+	r.discoveryMu.Unlock()
 	return r.remoteResult(envReq, remoteSessionID, session.WorkspaceName, session)
 }
 

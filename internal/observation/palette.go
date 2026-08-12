@@ -70,7 +70,7 @@ func actionColor(tool string, failed bool, mode ColorMode) string {
 	switch strings.ToLower(strings.TrimSpace(tool)) {
 	case "execute", "command_execute", "command_run":
 		return pickColor(ansiAmber, ansiTrueAmber, mode)
-	case "read", "context_query", "source_read", "discover", "skill_call", "observe", "runtime_read", "progress":
+	case "read", "context_query", "source_read", "skill_tool", "observe", "runtime_read", "progress":
 		return pickColor(ansiCyan, ansiTrueCyan, mode)
 	case "file_read", "artifact":
 		return pickColor(ansiBlue, ansiTrueBlue, mode)
@@ -78,7 +78,7 @@ func actionColor(tool string, failed bool, mode ColorMode) string {
 		return pickColor(ansiGreen, ansiTrueGreen, mode)
 	case "plan":
 		return pickColor(ansiYellow, ansiTrueYellow, mode)
-	case "session", "session_open", "workspace_list", "session.lifecycle", "mcp_call":
+	case "session", "session_open", "workspace_list", "session.lifecycle", "mcp_tool":
 		return pickColor(ansiMagenta, ansiTrueMagenta, mode)
 	case "observer.notice":
 		return pickColor(ansiGray, ansiTrueMuted, mode)

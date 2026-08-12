@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -253,7 +254,7 @@ func TestCleanCorePlanEvidenceAndArtifactWorkflow(t *testing.T) {
 	}
 }
 
-func TestCleanCoreDiscoveryIsAnExplicitExtraCall(t *testing.T) {
+func TestCleanCoreSkillToolDoesNotRequirePublicRevisionTokens(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	workspace, _ := rt.reg.Get("demo")
 	rt.cfg.Discovery.Skills.Enabled = true
@@ -268,58 +269,151 @@ func TestCleanCoreDiscoveryIsAnExplicitExtraCall(t *testing.T) {
 	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
 	remoteID := opened["remote_session_id"].(string)
 
-	skipped := callEnvelope(t, rt.toolSkillCallClean, context.Background(), map[string]any{
-		"remote_session_id": remoteID, "purpose": "call the documentation skill", "name": "docs", "arguments": map[string]any{}, "idempotency_key": "skill-discovery-idem-1",
-	})
-	if statusOK(skipped) || errorCode(skipped) != "discovery_required" {
-		t.Fatalf("skill call without discover=%+v", skipped)
-	}
-	if details, _ := skipped["error"].(map[string]any)["details"].(map[string]any); details["required_call_count"] != float64(1) || details["discovery_required"] != true {
-		t.Fatalf("discovery cost was not exposed=%+v", skipped)
-	}
-	if len(rt.discoveries) != 0 {
-		t.Fatalf("skill call implicitly discovered a lease: %+v", rt.discoveries)
-	}
-
-	discovered := callEnvelope(t, rt.toolDiscover, context.Background(), map[string]any{
-		"remote_session_id": remoteID, "kind": "skill", "view": "describe", "name": "docs",
-	})
-	if !statusOK(discovered) {
-		t.Fatalf("skill discover=%+v", discovered)
-	}
-	discoveryData := discovered["data"].(map[string]any)
-	called := callEnvelope(t, rt.toolSkillCallClean, context.Background(), map[string]any{
-		"remote_session_id": remoteID, "purpose": "call the documentation skill", "name": "docs", "arguments": map[string]any{},
-		"idempotency_key": "skill-discovery-idem-1",
-		"discovery_id":    discoveryData["discovery_id"], "discovery_revision": discoveryData["discovery_revision"],
+	called := callEnvelope(t, rt.toolSkillTool, context.Background(), map[string]any{
+		"action": "call", "remote_session_id": remoteID, "purpose": "call the documentation skill", "name": "docs", "arguments": map[string]any{},
 	})
 	calledData := called["data"].(map[string]any)
 	if !statusOK(called) || !strings.Contains(calledData["content"].(string), "# Docs") {
-		t.Fatalf("skill call after explicit discover=%+v", called)
+		t.Fatalf("direct skill_tool call=%+v", called)
 	}
 
-	// A manifest revision change invalidates the old lease and makes the next
-	// call explain that another explicit discover is required.
+	described := callEnvelope(t, rt.toolSkillTool, context.Background(), map[string]any{
+		"action": "describe", "remote_session_id": remoteID, "name": "docs",
+	})
+	if !statusOK(described) {
+		t.Fatalf("skill_tool describe=%+v", described)
+	}
+	describedData := described["data"].(map[string]any)
+	if describedData["discovery_id"] != nil || describedData["discovery_revision"] != nil {
+		t.Fatalf("skill_tool describe leaked public revision tokens: %+v", describedData)
+	}
+	if !strings.Contains(describedData["instructions"].(string), "# Docs") {
+		t.Fatalf("skill_tool describe missing instructions: %+v", describedData)
+	}
+
 	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: docs\ndescription: changed documentation\nruntime: markdown\n---\n\n# Docs v2\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	stale := callEnvelope(t, rt.toolSkillCallClean, context.Background(), map[string]any{
-		"remote_session_id": remoteID, "purpose": "call the documentation skill", "name": "docs", "arguments": map[string]any{},
-		"discovery_id": discoveryData["discovery_id"], "discovery_revision": discoveryData["discovery_revision"],
+	changed := callEnvelope(t, rt.toolSkillTool, context.Background(), map[string]any{
+		"action": "call", "remote_session_id": remoteID, "purpose": "call the changed documentation skill", "name": "docs", "arguments": map[string]any{},
 	})
-	if statusOK(stale) || errorCode(stale) != "discovery_stale" {
-		t.Fatalf("stale skill discovery=%+v", stale)
+	if statusOK(changed) || errorCode(changed) != "skill_revision_changed" {
+		t.Fatalf("changed skill revision=%+v", changed)
 	}
 }
 
-func TestCleanCoreMCPDiscoveryRequiresExtraCall(t *testing.T) {
+func TestSkillToolListValidationRiskConfirmationAndManifestRevision(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	workspace, _ := rt.reg.Get("demo")
+	rt.cfg.Discovery.Skills.Enabled = true
+	rt.cfg.Discovery.Skills.Dirs = []string{".skills"}
+	skillDir := filepath.Join(workspace.Path, ".skills", "publish")
+	if err := os.MkdirAll(skillDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `name: publish
+description: publish a checked value
+runtime: python
+entry: run.py
+permissions:
+  - workspace-write
+arguments_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    value:
+      type: string
+  required: [value]
+`
+	if err := os.WriteFile(filepath.Join(skillDir, "skill.yaml"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "run.py"), []byte("print('published')\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
+	remoteID := opened["remote_session_id"].(string)
+
+	listed := callEnvelope(t, rt.toolSkillTool, context.Background(), map[string]any{
+		"action": "list", "remote_session_id": remoteID, "query": "checked",
+	})
+	if !statusOK(listed) {
+		t.Fatalf("skill list=%+v", listed)
+	}
+	skills := asMapSlice(listed["data"].(map[string]any)["skills"])
+	if len(skills) != 1 || skills[0]["name"] != "publish" {
+		t.Fatalf("skill query inventory=%+v", listed)
+	}
+	missing := callEnvelope(t, rt.toolSkillTool, context.Background(), map[string]any{
+		"action": "describe", "remote_session_id": remoteID, "name": "missing",
+	})
+	if statusOK(missing) || errorCode(missing) != "skill_not_found" {
+		t.Fatalf("missing skill=%+v", missing)
+	}
+	described := callEnvelope(t, rt.toolSkillTool, context.Background(), map[string]any{
+		"action": "describe", "remote_session_id": remoteID, "name": "publish",
+	})
+	if !statusOK(described) {
+		t.Fatalf("skill describe=%+v", described)
+	}
+	describedData := described["data"].(map[string]any)
+	risk, _ := describedData["risk"].(map[string]any)
+	if risk["confirmation_required"] != true || risk["destructive"] != false {
+		t.Fatalf("executable skill risk=%+v", risk)
+	}
+	invalid := callEnvelope(t, rt.toolSkillTool, context.Background(), map[string]any{
+		"action": "call", "remote_session_id": remoteID, "purpose": "publish checked value", "name": "publish", "arguments": map[string]any{"extra": "x"},
+	})
+	if statusOK(invalid) || errorCode(invalid) != "skill_argument_invalid" {
+		t.Fatalf("skill invalid arguments=%+v", invalid)
+	}
+	request := map[string]any{
+		"action": "call", "remote_session_id": remoteID, "purpose": "publish checked value", "name": "publish", "arguments": map[string]any{"value": "secret-not-in-recovery"},
+	}
+	waiting := callEnvelope(t, rt.toolSkillTool, context.Background(), request)
+	if waiting["status"] != "waiting_confirmation" || errorCode(waiting) != "user_confirmation_required" {
+		t.Fatalf("skill confirmation=%+v", waiting)
+	}
+	encodedWaiting, err := json.Marshal(waiting)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encodedWaiting), "secret-not-in-recovery") {
+		t.Fatalf("confirmation response must not echo extension arguments: %s", encodedWaiting)
+	}
+	confirmed := cloneMap(request)
+	confirmed["user_confirmed"] = true
+	completed := callEnvelope(t, rt.toolSkillTool, context.Background(), confirmed)
+	if !statusOK(completed) || !strings.Contains(completed["data"].(map[string]any)["stdout"].(string), "published") {
+		t.Fatalf("confirmed executable skill=%+v", completed)
+	}
+
+	changedManifest := strings.Replace(manifest, "required: [value]", "required: [replacement]", 1)
+	if err := os.WriteFile(filepath.Join(skillDir, "skill.yaml"), []byte(changedManifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed := callEnvelope(t, rt.toolSkillTool, context.Background(), map[string]any{
+		"action": "call", "remote_session_id": remoteID, "purpose": "publish checked value", "name": "publish", "arguments": map[string]any{"replacement": "v2"},
+	})
+	if statusOK(changed) || errorCode(changed) != "skill_revision_changed" {
+		t.Fatalf("manifest-only skill revision change=%+v", changed)
+	}
+}
+
+func TestCleanCoreMCPToolDoesNotRequirePublicRevisionTokens(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	rt.cfg.Discovery.MCP.Enabled = true
 	workspace, _ := rt.reg.Get("demo")
 	script := filepath.Join(t.TempDir(), "fake_mcp.py")
 	serverCode := `#!/usr/bin/env python3
 import json
+import os
 import sys
+
+start_log = os.environ.get("MCPX_TEST_START_LOG")
+if start_log:
+    with open(start_log, "a", encoding="utf-8") as f:
+        f.write("started\n")
 
 def send(message):
     sys.stdout.write(json.dumps(message, separators=(',', ':')) + "\n")
@@ -348,39 +442,188 @@ for line in sys.stdin:
 	if err := os.WriteFile(script, []byte(serverCode), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	startLog := filepath.Join(t.TempDir(), "fake-mcp-starts.log")
 	if err := config.WriteMCPFile(config.ProjectMCPPath(workspace.Path), config.MCPFile{MCPServers: map[string]config.MCPServer{
-		"fake": {Command: "python3", Args: []string{script}},
+		"fake": {Description: "Echo values for contract tests", Command: "python3", Args: []string{script}, Env: map[string]string{"MCPX_TEST_START_LOG": startLog}},
 	}}); err != nil {
 		t.Fatal(err)
 	}
 	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
 	remoteID := opened["remote_session_id"].(string)
 
-	withoutDiscover := callEnvelope(t, rt.toolMCPCallClean, context.Background(), map[string]any{
-		"remote_session_id": remoteID, "purpose": "call the fake MCP", "server": "fake", "tool": "echo", "arguments": map[string]any{"value": "one"}, "idempotency_key": "mcp-discovery-idem-1",
+	described := callEnvelope(t, rt.toolMCPTool, context.Background(), map[string]any{
+		"action": "describe", "remote_session_id": remoteID, "server": "fake", "tool": "echo",
 	})
-	if statusOK(withoutDiscover) || errorCode(withoutDiscover) != "discovery_required" {
-		t.Fatalf("MCP call without discover=%+v", withoutDiscover)
+	if !statusOK(described) {
+		t.Fatalf("mcp_tool describe=%+v", described)
 	}
-	if len(rt.discoveries) != 0 {
-		t.Fatalf("MCP call implicitly discovered a lease: %+v", rt.discoveries)
+	describedData := described["data"].(map[string]any)
+	if describedData["discovery_id"] != nil || describedData["discovery_revision"] != nil || describedData["input_schema"] == nil {
+		t.Fatalf("mcp_tool describe contract=%+v", describedData)
+	}
+	startsBeforeCall := fakeMCPStartCount(t, startLog)
+	callRequest := map[string]any{
+		"action": "call", "remote_session_id": remoteID, "purpose": "call the fake MCP", "server": "fake", "tool": "echo", "arguments": map[string]any{"value": "one"},
+	}
+	waiting := callEnvelope(t, rt.toolMCPTool, context.Background(), callRequest)
+	if waiting["status"] != "waiting_confirmation" || errorCode(waiting) != "user_confirmation_required" {
+		t.Fatalf("unannotated upstream call must require confirmation=%+v", waiting)
+	}
+	startsAfterPreflight := fakeMCPStartCount(t, startLog)
+	if startsAfterPreflight != startsBeforeCall+1 {
+		t.Fatalf("preflight must start exactly one upstream instance: before=%d after=%d", startsBeforeCall, startsAfterPreflight)
+	}
+	confirmedRequest := cloneMap(callRequest)
+	confirmedRequest["user_confirmed"] = true
+	confirmed := callEnvelope(t, rt.toolMCPTool, context.Background(), confirmedRequest)
+	if !statusOK(confirmed) {
+		t.Fatalf("confirmed mcp_tool call=%+v", confirmed)
+	}
+	if startsAfterConfirmed := fakeMCPStartCount(t, startLog); startsAfterConfirmed != startsAfterPreflight+1 {
+		t.Fatalf("schema check and call must share one upstream instance: before=%d after=%d", startsAfterPreflight, startsAfterConfirmed)
+	}
+}
+
+func TestMCPToolContractCoversInventoryErrorsSchemaAndUpstreamFailure(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	rt.cfg.Discovery.MCP.Enabled = true
+	workspace, _ := rt.reg.Get("demo")
+	schemaPath := filepath.Join(t.TempDir(), "echo-schema.json")
+	if err := os.WriteFile(schemaPath, []byte(`{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(t.TempDir(), "contract_mcp.py")
+	serverCode := `#!/usr/bin/env python3
+import json
+import os
+import sys
+
+def send(message):
+    sys.stdout.write(json.dumps(message, separators=(',', ':')) + "\n")
+    sys.stdout.flush()
+
+def current_tools():
+    with open(os.environ["MCPX_TEST_SCHEMA"], "r", encoding="utf-8") as f:
+        schema = json.load(f)
+    closed_read = {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}
+    return [
+        {"name": "echo", "description": "echo schema-bound value", "inputSchema": schema, "annotations": closed_read},
+        {"name": "fail", "description": "return a structured upstream failure", "inputSchema": {"type":"object"}, "annotations": closed_read},
+    ]
+
+for line in sys.stdin:
+    try:
+        request = json.loads(line)
+    except Exception:
+        continue
+    request_id = request.get("id")
+    if request_id is None:
+        continue
+    method = request.get("method")
+    if method == "initialize":
+        send({"jsonrpc":"2.0", "id":request_id, "result":{"protocolVersion":"2025-11-25", "capabilities":{"tools":{}}, "serverInfo":{"name":"contract", "version":"1"}}})
+    elif method == "tools/list":
+        send({"jsonrpc":"2.0", "id":request_id, "result":{"tools":current_tools()}})
+    elif method == "tools/call":
+        if request.get("params", {}).get("name") == "fail":
+            send({"jsonrpc":"2.0", "id":request_id, "result":{"content":[{"type":"text", "text":"upstream rejected request"}], "isError":True}})
+        else:
+            value = request.get("params", {}).get("arguments", {}).get("value", "")
+            send({"jsonrpc":"2.0", "id":request_id, "result":{"content":[{"type":"text", "text":"echo:" + value}], "isError":False}})
+    else:
+        send({"jsonrpc":"2.0", "id":request_id, "error":{"code":-32601, "message":"method not found"}})
+`
+	if err := os.WriteFile(script, []byte(serverCode), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteMCPFile(config.ProjectMCPPath(workspace.Path), config.MCPFile{MCPServers: map[string]config.MCPServer{
+		"contract": {Description: "Contract-test MCP server", Command: "python3", Args: []string{script}, Env: map[string]string{"MCPX_TEST_SCHEMA": schemaPath}},
+		"offline":  {Description: "Unavailable server", Command: "mcpx-command-that-does-not-exist"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
+	remoteID := opened["remote_session_id"].(string)
+
+	servers := callEnvelope(t, rt.toolMCPTool, context.Background(), map[string]any{
+		"action": "list", "remote_session_id": remoteID, "query": "contract",
+	})
+	if !statusOK(servers) {
+		t.Fatalf("mcp server list=%+v", servers)
+	}
+	serverItems := asMapSlice(servers["data"].(map[string]any)["servers"])
+	if len(serverItems) != 1 || serverItems[0]["name"] != "contract" || serverItems[0]["description"] != "Contract-test MCP server" {
+		t.Fatalf("compact MCP inventory must support relevance routing: %+v", servers)
+	}
+	tools := callEnvelope(t, rt.toolMCPTool, context.Background(), map[string]any{
+		"action": "list", "remote_session_id": remoteID, "server": "contract",
+	})
+	if !statusOK(tools) || len(asMapSlice(tools["data"].(map[string]any)["tools"])) != 2 {
+		t.Fatalf("mcp tool list=%+v", tools)
+	}
+	unknownServer := callEnvelope(t, rt.toolMCPTool, context.Background(), map[string]any{
+		"action": "list", "remote_session_id": remoteID, "server": "missing",
+	})
+	if statusOK(unknownServer) || errorCode(unknownServer) != "mcp_server_not_found" {
+		t.Fatalf("unknown MCP server=%+v", unknownServer)
+	}
+	unknownTool := callEnvelope(t, rt.toolMCPTool, context.Background(), map[string]any{
+		"action": "describe", "remote_session_id": remoteID, "server": "contract", "tool": "missing",
+	})
+	if statusOK(unknownTool) || errorCode(unknownTool) != "mcp_tool_not_found" {
+		t.Fatalf("unknown MCP tool=%+v", unknownTool)
+	}
+	unavailable := callEnvelope(t, rt.toolMCPTool, context.Background(), map[string]any{
+		"action": "list", "remote_session_id": remoteID, "server": "offline",
+	})
+	if statusOK(unavailable) || errorCode(unavailable) != "mcp_server_unavailable" {
+		t.Fatalf("unavailable MCP server=%+v", unavailable)
 	}
 
-	discovered := callEnvelope(t, rt.toolDiscover, context.Background(), map[string]any{
-		"remote_session_id": remoteID, "kind": "mcp", "view": "describe", "server": "fake", "include_tools": true,
+	described := callEnvelope(t, rt.toolMCPTool, context.Background(), map[string]any{
+		"action": "describe", "remote_session_id": remoteID, "server": "contract", "tool": "echo",
 	})
-	if !statusOK(discovered) {
-		t.Fatalf("MCP discover=%+v", discovered)
+	if !statusOK(described) {
+		t.Fatalf("echo describe=%+v", described)
 	}
-	discoveryData := discovered["data"].(map[string]any)
-	called := callEnvelope(t, rt.toolMCPCallClean, context.Background(), map[string]any{
-		"remote_session_id": remoteID, "purpose": "call the fake MCP", "server": "fake", "tool": "echo", "arguments": map[string]any{"value": "one"},
-		"idempotency_key": "mcp-discovery-idem-1",
-		"discovery_id":    discoveryData["discovery_id"], "discovery_revision": discoveryData["discovery_revision"],
+	describedRisk, _ := described["data"].(map[string]any)["risk"].(map[string]any)
+	if describedRisk["read_only"] != true || describedRisk["confirmation_required"] != false {
+		t.Fatalf("upstream annotations must drive call policy: %+v", describedRisk)
+	}
+	if err := os.WriteFile(schemaPath, []byte(`{"type":"object","properties":{"replacement":{"type":"string"}},"required":["replacement"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	schemaChanged := callEnvelope(t, rt.toolMCPTool, context.Background(), map[string]any{
+		"action": "call", "remote_session_id": remoteID, "purpose": "call schema-changed echo", "server": "contract", "tool": "echo", "arguments": map[string]any{"replacement": "v2"},
 	})
-	if !statusOK(called) {
-		t.Fatalf("MCP call after discover=%+v", called)
+	if statusOK(schemaChanged) || errorCode(schemaChanged) != "mcp_tool_schema_changed" {
+		t.Fatalf("MCP schema change=%+v", schemaChanged)
 	}
+
+	failDescription := callEnvelope(t, rt.toolMCPTool, context.Background(), map[string]any{
+		"action": "describe", "remote_session_id": remoteID, "server": "contract", "tool": "fail",
+	})
+	if !statusOK(failDescription) {
+		t.Fatalf("fail describe=%+v", failDescription)
+	}
+	failed := callEnvelope(t, rt.toolMCPTool, context.Background(), map[string]any{
+		"action": "call", "remote_session_id": remoteID, "purpose": "observe an upstream failure", "server": "contract", "tool": "fail", "arguments": map[string]any{},
+	})
+	if statusOK(failed) || errorCode(failed) != "mcp_call_failed" {
+		t.Fatalf("upstream MCP failure=%+v", failed)
+	}
+}
+
+func fakeMCPStartCount(t *testing.T, path string) int {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(string(body), "started\n")
 }
 
 func cloneMap(input map[string]any) map[string]any {

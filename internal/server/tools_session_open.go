@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -12,7 +11,6 @@ import (
 
 	"mcpx/internal/audit"
 	"mcpx/internal/instruction"
-	"mcpx/internal/mcpproxy"
 	"mcpx/internal/observation"
 	"mcpx/internal/projecttask"
 	"mcpx/internal/remotesession"
@@ -32,7 +30,6 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 	if v, ok := envReq.Payload["include_instructions_content"].(bool); ok {
 		includeInstrContent = v
 	}
-	includeUpstreamTools, _ := envReq.Payload["include_upstream_tools"].(bool)
 	includeProjectTasks := false
 	if v, ok := envReq.Payload["include_project_tasks"].(bool); ok {
 		includeProjectTasks = v
@@ -84,12 +81,8 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 	bootstrap.Add(7)
 	go func() {
 		defer bootstrap.Done()
-		if manager, err := r.mcpManagerForWorkspace(wsPath); err == nil {
-			items := manager.List()
-			if includeUpstreamTools && effective.Discovery.MCP.Enabled {
-				items = r.enrichServersWithTools(ctx, manager, items)
-			}
-			servers = items
+		if manager, err := r.mcpManagerForWorkspace(wsPath); err == nil && effective.Discovery.MCP.Enabled {
+			servers = manager.List()
 		}
 	}()
 	go func() {
@@ -158,8 +151,6 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		"tool_schema_revision":         r.currentToolSchemaRevision(),
 		"capability_manifest_revision": capabilityManifestRevision(toolManifest, skills, servers, docs, guidance, clientProtocol),
 		"guidance_revision":            agentGuidanceRevision(),
-		"skill_revision":               skillRevision(skills),
-		"mcp_revision":                 mcpRevision(servers),
 		"instruction_revision":         instructionRevision(docs),
 		"session_capability_revision":  sessionCapabilityRevision(&session),
 		"client_protocol_revision":     clientProtocolRevision(),
@@ -183,11 +174,13 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		"agent_guidance":  guidance,
 		"client_protocol": clientProtocol,
 		"tools":           tools,
-		"skills":          map[string]any{"enabled": effective.Discovery.Skills.Enabled, "items": skills},
-		"upstream_mcp":    map[string]any{"enabled": effective.Discovery.MCP.Enabled, "servers": servers},
-		"instructions":    instructionPayload,
-		"project":         project,
-		"project_tasks":   tasks,
+		"extension_inventory": map[string]any{
+			"skills":      compactSkillMaps(skills),
+			"mcp_servers": compactMCPServerInventory(servers),
+		},
+		"instructions":  instructionPayload,
+		"project":       project,
+		"project_tasks": tasks,
 		"git": map[string]any{
 			"head": gitHead, "tree_digest": treeDigest,
 		},
@@ -201,7 +194,7 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 			"bootstrap":      []string{"workspace", "session"},
 			"source_change":  []string{"read", "edit", "execute", "observe"},
 			"plan_delivery":  []string{"plan", "edit", "execute", "artifact", "observe"},
-			"extension_call": []string{"discover", "skill_call", "mcp_call"},
+			"extension_call": []string{"skill_tool", "mcp_tool"},
 		},
 		"opened_at": time.Now().UTC().Format(time.RFC3339),
 	}
@@ -214,62 +207,4 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		Tool: "session", Status: "ok",
 	})
 	return compactToolResult(data, fmt.Sprintf("Session %s opened for workspace %s.", session.ID, session.WorkspaceName)), nil
-}
-
-func (r *Runtime) enrichServersWithTools(ctx context.Context, manager *mcpproxy.Manager, servers []map[string]any) []map[string]any {
-	out := make([]map[string]any, len(servers))
-	if len(servers) == 0 {
-		return out
-	}
-	workerCount := len(servers)
-	if workerCount > 4 {
-		workerCount = 4
-	}
-	jobs := make(chan int)
-	var wait sync.WaitGroup
-	wait.Add(workerCount)
-	for worker := 0; worker < workerCount; worker++ {
-		go func() {
-			defer wait.Done()
-			for index := range jobs {
-				server := servers[index]
-				item := make(map[string]any, len(server)+3)
-				for key, value := range server {
-					item[key] = value
-				}
-				name, _ := server["name"].(string)
-				cfg, ok := manager.ServerConfig(name)
-				if !ok {
-					item["tools_error"] = "not_configured"
-					out[index] = item
-					continue
-				}
-				discoverCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-				tools, err := mcpproxy.ListTools(discoverCtx, cfg)
-				cancel()
-				if err != nil {
-					item["tools_error"] = err.Error()
-					item["tools"] = []any{}
-				} else {
-					serialized := make([]map[string]any, 0, len(tools))
-					for _, tool := range tools {
-						raw, _ := json.Marshal(tool)
-						var asMap map[string]any
-						_ = json.Unmarshal(raw, &asMap)
-						serialized = append(serialized, asMap)
-					}
-					item["tools"] = serialized
-					item["tools_revision"] = mcpRevision(serialized)
-					item["tools_error"] = nil
-				}
-				out[index] = item
-			}
-		}()
-	}
-	for index := range servers {
-		jobs <- index
-	}
-	close(jobs)
-	wait.Wait()
-	return out
 }

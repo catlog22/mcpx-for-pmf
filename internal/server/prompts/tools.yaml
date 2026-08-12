@@ -5,7 +5,7 @@ tools:
   read: 读取、搜索、列举或组装 Workspace 源码上下文；view 在语义唯一时可省略，items[] 支持批量文件读取。环境事实使用 environment_read。
   edit: 创建、更新或重命名 Workspace 文件；使用 revision guard 和幂等语义，不提供删除。删除/移出使用 move_out。
   move_out: 安全移出明确文件、目录或 symlink；prepare 冻结 manifest，用户确认后 submit 仅携带服务端 confirmation_uuid。
-  observe: 查看会话、执行 Task、Plan Task、历史、变更、日志或 diff；目标唯一时可省略 view，任务日志支持流式 offset 续读。
+  observe: 查看会话、执行 Task、Plan Task、历史或日志；目标唯一时可省略 view，任务日志支持流式 offset 续读。
   progress: 发布用户可见进度与终态；过程仅用于有业务意义的里程碑、等待、阻塞或失败，任务正常完成并准备最终回复前必须用 completed + result 汇报一次最终结果。
   execute: 按策略执行命令或项目任务并处理 attach/stop/stdin；purpose 必须描述真实目标和副作用，长命令返回 execution_task_id。
   plan: 创建、读取、推进、阻塞、重规划或交付持久化计划。
@@ -14,9 +14,8 @@ tools:
   runtime_read: 读取 MCPX 运行时能力、项目摘要或适用指令。
   environment_read: 读取当前主机/工具链环境或与已保存快照比较。
   environment: 保存当前环境快照。
-  discover: 发现或描述 Skill 与上游 MCP，并签发可验证的 discovery revision。
-  skill_call: 调用已由 discover 返回并匹配 revision 的 Skill。
-  mcp_call: 调用已由 discover 返回并匹配 revision 的上游 MCP 工具。
+  skill_tool: 统一完成 Skill 的 list、describe 与 call；Runtime 内部负责 revision 一致性。
+  mcp_tool: 统一完成 MCP Server/Tool 的 list、describe 与 call；Runtime 内部负责 schema revision 一致性。
   artifact: 登记、列出或分片读取 MCPX 开发产物。
   screenshot_capture: 按明确 purpose 截取显示器或屏幕区域。
   secret_provide: 按明确 purpose 向当前会话提供仅驻留内存的 Secret。

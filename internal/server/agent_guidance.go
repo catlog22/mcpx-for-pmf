@@ -161,20 +161,6 @@ func normalizePublicAction(tool string, arguments map[string]any) (string, map[s
 	case "workspace_state":
 		tool = "observe"
 		setView(action)
-	case "extension_manage":
-		kind, _ := result["kind"].(string)
-		if action == "call" && strings.EqualFold(kind, "skill") {
-			tool = "skill_call"
-			delete(result, "action")
-			delete(result, "kind")
-		} else if action == "call" && strings.EqualFold(kind, "mcp") {
-			tool = "mcp_call"
-			delete(result, "action")
-			delete(result, "kind")
-		} else {
-			tool = "discover"
-			setView(action)
-		}
 	case "artifact_manage":
 		tool = "artifact"
 		result["action"] = action
@@ -197,7 +183,7 @@ func normalizePublicAction(tool string, arguments map[string]any) (string, map[s
 
 func isCleanPublicTool(tool string) bool {
 	switch tool {
-	case "session", "read", "edit", "move_out", "observe", "progress", "execute", "plan", "artifact", "discover", "skill_call", "mcp_call",
+	case "session", "read", "edit", "move_out", "observe", "progress", "execute", "plan", "artifact", "skill_tool", "mcp_tool",
 		"operation_batch", "operation_manage", "runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide":
 		return true
 	default:

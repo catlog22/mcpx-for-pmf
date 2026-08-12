@@ -94,6 +94,17 @@ func TestHumanTextSummarizesErrorWithoutProtocolDiagnostics(t *testing.T) {
 	}
 }
 
+func TestUnifiedExtensionToolRenderingUsesConcreteTarget(t *testing.T) {
+	verb, label := toolAction("skill_tool", []byte(`{"action":"call","remote_session_id":"rs_hidden","name":"brainstorming"}`))
+	if verb != "Called" || label != "brainstorming" {
+		t.Fatalf("skill_tool rendering verb=%q label=%q", verb, label)
+	}
+	verb, label = toolAction("mcp_tool", []byte(`{"action":"call","remote_session_id":"rs_hidden","server":"dbx","tool":"query"}`))
+	if verb != "Called" || label != "dbx/query" {
+		t.Fatalf("mcp_tool rendering verb=%q label=%q", verb, label)
+	}
+}
+
 func TestRenderTextShowsNestedFailureWithoutProtocolDiagnostics(t *testing.T) {
 	var output bytes.Buffer
 	if err := RenderText(&output, Event{

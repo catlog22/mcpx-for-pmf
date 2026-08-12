@@ -216,7 +216,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	expectedTools := []string{
 		"workspace", "session", "read", "edit", "move_out", "observe", "progress",
 		"operation_batch", "operation_manage",
-		"execute", "plan", "artifact", "discover", "skill_call", "mcp_call",
+		"execute", "plan", "artifact", "skill_tool", "mcp_tool",
 		"runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide",
 	}
 	if len(byName) != len(expectedTools) {
@@ -339,9 +339,19 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	if !strings.Contains(string(contextSchema), `"mode"`) || !strings.Contains(string(contextSchema), `"items"`) || !strings.Contains(string(contextSchema), `"entries_cursor"`) || !strings.Contains(string(contextSchema), `"entries_limit"`) {
 		t.Fatalf("read schema must expose file and direct-entry pagination fields: %s", contextSchema)
 	}
-	extensionSchema, _ := json.Marshal(byName["discover"].InputSchema)
-	if !strings.Contains(string(extensionSchema), "view") || !strings.Contains(string(extensionSchema), "include_tools") || !strings.Contains(string(extensionSchema), "server") {
-		t.Fatalf("discover schema incomplete: %s", extensionSchema)
+	for _, extensionName := range []string{"skill_tool", "mcp_tool"} {
+		extensionSchema, _ := json.Marshal(byName[extensionName].InputSchema)
+		text := string(extensionSchema)
+		for _, action := range []string{"list", "describe", "call"} {
+			if !strings.Contains(text, `"`+action+`"`) {
+				t.Fatalf("%s schema missing action %q: %s", extensionName, action, extensionSchema)
+			}
+		}
+		for _, legacy := range []string{"discovery_id", "discovery_revision"} {
+			if strings.Contains(text, legacy) {
+				t.Fatalf("%s schema exposes legacy field %q: %s", extensionName, legacy, extensionSchema)
+			}
+		}
 	}
 	planSchema, _ := json.Marshal(byName["plan"].InputSchema)
 	for _, forbidden := range []string{"presentation", "renderer", "show_source", "density"} {
@@ -358,8 +368,10 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 
 	needsPurpose := func(name string, args map[string]any) bool {
 		switch name {
-		case "edit", "execute", "plan", "operation_batch", "skill_call", "mcp_call", "screenshot_capture", "secret_provide":
+		case "edit", "execute", "plan", "operation_batch", "screenshot_capture", "secret_provide":
 			return true
+		case "skill_tool", "mcp_tool":
+			return fmt.Sprint(args["action"]) == "call"
 		case "move_out":
 			return fmt.Sprint(args["action"]) == "prepare"
 		case "artifact":
@@ -514,7 +526,6 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		"label":                        "acceptance",
 		"include_instructions_content": true,
 		"include_project_tasks":        true,
-		"include_upstream_tools":       false,
 	})
 	if opened["status"] != "ok" && opened["ok"] != true {
 		t.Fatalf("session_open: %+v", opened)
@@ -538,12 +549,21 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	}
 	revs, _ := openData["revisions"].(map[string]any)
 	for _, key := range []string{
-		"tool_schema_revision", "capability_manifest_revision", "guidance_revision", "skill_revision",
-		"mcp_revision", "instruction_revision", "session_capability_revision", "client_protocol_revision",
+		"tool_schema_revision", "capability_manifest_revision", "guidance_revision",
+		"instruction_revision", "session_capability_revision", "client_protocol_revision",
 	} {
 		if revs[key] == nil || revs[key] == "" {
 			t.Fatalf("missing revision %s: %+v", key, revs)
 		}
+	}
+	for _, removed := range []string{"skill_revision", "mcp_revision"} {
+		if revs[removed] != nil {
+			t.Fatalf("session_open must not expose extension revision %s: %+v", removed, revs)
+		}
+	}
+	extensions, _ := openData["extension_inventory"].(map[string]any)
+	if extensions == nil || extensions["skills"] == nil || extensions["mcp_servers"] == nil || openData["skills"] != nil || openData["upstream_mcp"] != nil {
+		t.Fatalf("session_open extension inventory contract: %+v", openData)
 	}
 	mcpxMeta, _ := openData["mcpx"].(map[string]any)
 	if mcpxMeta["version"] != "0.9.0-test" {
@@ -857,10 +877,13 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		t.Fatalf("zero match should fail: %+v", nomatch)
 	}
 
-	changes := call("observe", map[string]any{"remote_session_id": remoteID, "view": "changes", "limit": 10})
-	changesData, _ := changes["data"].(map[string]any)
-	changeItems, _ := changesData["changes"].([]any)
-	if !statusOK(changes) || len(changeItems) == 0 {
-		t.Fatalf("observe changes did not expose clean edit event: %+v", changes)
+	for _, removedView := range []string{"changes", "diff"} {
+		removed := call("observe", map[string]any{"remote_session_id": remoteID, "view": removedView})
+		if statusOK(removed) {
+			t.Fatalf("observe must reject removed view %q: %+v", removedView, removed)
+		}
+		if body, _ := removed["error"].(map[string]any); strings.ToUpper(fmt.Sprint(body["code"])) != "INVALID_ACTION" {
+			t.Fatalf("observe removed view %q must return INVALID_ACTION: %+v", removedView, removed)
+		}
 	}
 }

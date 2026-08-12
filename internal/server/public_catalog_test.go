@@ -20,7 +20,7 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	want := []string{
 		"workspace", "session", "read", "edit", "move_out", "observe", "progress",
 		"operation_batch", "operation_manage",
-		"execute", "plan", "artifact", "discover", "skill_call", "mcp_call",
+		"execute", "plan", "artifact", "skill_tool", "mcp_tool",
 		"runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide",
 	}
 	got := make([]string, 0, len(runtime.listedToolMap()))
@@ -32,7 +32,7 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("public tool catalog = %v, want %v", got, want)
 	}
-	for _, legacy := range []string{"change", "change_read", "change_prepare", "change_execute", "change_manage", "move_out_prepare", "submit_move_out", "command_run", "command_execute", "task_read", "task", "plan_read", "extension_discover", "artifact_read"} {
+	for _, legacy := range []string{"change", "change_read", "change_prepare", "change_execute", "change_manage", "move_out_prepare", "submit_move_out", "command_run", "command_execute", "task_read", "task", "plan_read", "extension_discover", "artifact_read", "discover", "skill_call", "mcp_call"} {
 		if runtime.toolHandlers[legacy] != nil {
 			t.Fatalf("legacy handler %q must not be dispatchable", legacy)
 		}
@@ -197,6 +197,23 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 			}
 		}
 	}
+	for _, toolName := range []string{"skill_tool", "mcp_tool"} {
+		tool := runtime.listedToolMap()[toolName]
+		if tool.Annotations == nil || tool.Annotations.ReadOnlyHint || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint || tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
+			t.Fatalf("%s top-level annotations must conservatively represent call risk: %+v", toolName, tool.Annotations)
+		}
+		risk, _ := tool.Meta["mcpx/action_risk"].(map[string]any)
+		for _, action := range []string{"list", "describe"} {
+			entry, ok := risk[action].(map[string]any)
+			if !ok || entry["read_only"] != true || entry["destructive"] != false || entry["idempotent"] != true {
+				t.Fatalf("%s %s must be read-only: %+v", toolName, action, entry)
+			}
+		}
+		callRisk, ok := risk["call"].(map[string]any)
+		if !ok || callRisk["read_only"] != false || callRisk["destructive"] != true || callRisk["idempotent"] != false || callRisk["open_world"] != true {
+			t.Fatalf("%s call risk=%+v", toolName, callRisk)
+		}
+	}
 	progressTool := runtime.listedToolMap()["progress"]
 	var progressSchema map[string]any
 	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(progressTool), &progressSchema); err != nil {
@@ -225,13 +242,27 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	observeProperties, _ := observeSchema["properties"].(map[string]any)
-	for _, field := range []string{"workspace", "view", "event_ids", "request_ids", "operation_ids", "plan_task_ids", "execution_task_ids", "plan_task_id", "execution_task_id", "edit_id", "keyword", "kinds", "statuses", "created_after", "created_before"} {
+	for _, field := range []string{"workspace", "view", "event_ids", "request_ids", "operation_ids", "plan_task_ids", "execution_task_ids", "plan_task_id", "execution_task_id", "keyword", "kinds", "statuses", "created_after", "created_before"} {
 		if observeProperties[field] == nil {
 			t.Fatalf("observe history schema missing %q: %s", field, mcpresult.ToolSchemaJSON(observeTool))
 		}
 	}
-	if observeProperties["room_id"] != nil || observeProperties["task_id"] != nil || observeProperties["task_ids"] != nil || observeProperties["changeset_ids"] != nil {
-		t.Fatalf("observe schema exposes removed fields: %s", mcpresult.ToolSchemaJSON(observeTool))
+	for _, removed := range []string{"room_id", "task_id", "task_ids", "changeset_ids", "edit_id", "include_diff", "path", "offset"} {
+		if observeProperties[removed] != nil {
+			t.Fatalf("observe schema exposes removed field %q: %s", removed, mcpresult.ToolSchemaJSON(observeTool))
+		}
+	}
+	viewSchema, _ := observeProperties["view"].(map[string]any)
+	viewValues, _ := viewSchema["enum"].([]any)
+	for _, wantView := range []string{"session", "task", "plan", "history", "logs"} {
+		if !containsSchemaRequired(viewValues, wantView) {
+			t.Fatalf("observe view enum missing %q: %v", wantView, viewValues)
+		}
+	}
+	for _, removedView := range []string{"changes", "diff"} {
+		if containsSchemaRequired(viewValues, removedView) {
+			t.Fatalf("observe view enum exposes removed view %q: %v", removedView, viewValues)
+		}
 	}
 	for _, toolName := range []string{"plan", "execute"} {
 		var schema map[string]any

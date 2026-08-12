@@ -185,7 +185,7 @@ func TestCleanCoreEditAppliesIdempotentlyAndReportsStale(t *testing.T) {
 	}
 }
 
-func TestCleanCoreObserveChangesReturnsInlineDiff(t *testing.T) {
+func TestCleanCoreObserveRejectsChangesView(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
 	remoteID := opened["remote_session_id"].(string)
@@ -205,12 +205,16 @@ func TestCleanCoreObserveChangesReturnsInlineDiff(t *testing.T) {
 	response := callEnvelope(t, rt.toolObserve, context.Background(), map[string]any{
 		"remote_session_id": remoteID, "view": "changes",
 	})
-	if !statusOK(response) {
-		t.Fatalf("observe failed: %+v", response)
+	if statusOK(response) || errorCode(response) != "invalid_action" {
+		t.Fatalf("observe changes must be rejected: %+v", response)
 	}
-	changes := asMapSlice(response["data"].(map[string]any)["changes"])
-	if len(changes) != 1 || !strings.Contains(changes[0]["diff_summary"].(string), "+new") {
-		t.Fatalf("observe changes=%+v", changes)
+	// Runtime may still record file_change events internally for audit/history;
+	// removing observe(changes) only removes the ambiguous public view.
+	events, _, err := rt.observation.store.Query(context.Background(), observation.HistoryQuery{
+		Workspace: "demo", SessionID: remoteID, Kinds: []string{observation.TypeFileChanged}, Limit: 20,
+	})
+	if err != nil || len(events) != 1 || !strings.Contains(string(events[0].Output), "+new") {
+		t.Fatalf("internal file_change observation missing: events=%+v err=%v", events, err)
 	}
 }
 
@@ -286,15 +290,11 @@ func TestCleanCoreEditBoundsLargeDiffAndPaginatesFullDiff(t *testing.T) {
 		t.Fatalf("large diff byte count=%v", data["diff_bytes"])
 	}
 	editID := data["edit_id"].(string)
-	page := callEnvelope(t, rt.toolObserve, context.Background(), map[string]any{
+	removedDiff := callEnvelope(t, rt.toolObserve, context.Background(), map[string]any{
 		"remote_session_id": remoteID, "view": "diff", "edit_id": editID, "offset": 0, "limit": 1024,
 	})
-	if !statusOK(page) {
-		t.Fatalf("diff page failed: %+v", page)
-	}
-	pageData := page["data"].(map[string]any)
-	if pageData["eof"] == true || pageData["next_offset"] == nil || pageData["diff"] == "" {
-		t.Fatalf("diff page did not expose continuation: %+v", pageData)
+	if statusOK(removedDiff) || errorCode(removedDiff) != "invalid_action" {
+		t.Fatalf("observe diff must be rejected: %+v", removedDiff)
 	}
 
 	events, _, err := rt.observation.store.Query(context.Background(), observation.HistoryQuery{
