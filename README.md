@@ -205,7 +205,7 @@ mcpx update [flags]              从 GitHub Release 检查并安装新版本
 ```bash
 ./bin/mcpx update --check
 ./bin/mcpx update
-./bin/mcpx update --version 0.9.5
+./bin/mcpx update --version 0.9.6
 ```
 
 `update` 会选择当前平台对应的 GitHub Release 产物，校验 `checksums.txt` 中的 SHA-256，
