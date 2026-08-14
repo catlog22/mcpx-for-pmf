@@ -162,7 +162,7 @@ type LoggingConfig struct {
 	Dir        string `yaml:"dir"`
 }
 
-// MCPFile is ~/.mcpx/.mcp.json / project .mcpx/.mcp.json
+// MCPFile is ~/.mcpx/.mcp.json or a workspace .mcp.json overlay.
 type MCPFile struct {
 	MCPServers map[string]MCPServer `json:"mcpServers"`
 }

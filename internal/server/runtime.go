@@ -637,7 +637,7 @@ func (r *Runtime) logStartupInventory(log interface {
 	mcpSeen := map[string]bool{}
 	var mcpNames []string
 	addMCP := func(name, typ, command, scope, wsName, source string) {
-		key := scope + ":" + wsName + ":" + name
+		key := scope + ":" + wsName + ":" + source + ":" + name
 		if mcpSeen[key] {
 			return
 		}
@@ -659,10 +659,11 @@ func (r *Runtime) logStartupInventory(log interface {
 		addMCP(name, srv.Type, srv.Command, "global", "", gPath)
 	}
 	for _, ws := range workspaces {
-		pPath := config.ProjectMCPPath(ws.Path)
-		pMCP, _ := config.LoadMCPFile(pPath)
-		for name, srv := range pMCP.MCPServers {
-			addMCP(name, srv.Type, srv.Command, "workspace", ws.Name, pPath)
+		for _, pPath := range config.ProjectMCPConfigPaths(ws.Path) {
+			pMCP, _ := config.LoadMCPFile(pPath)
+			for name, srv := range pMCP.MCPServers {
+				addMCP(name, srv.Type, srv.Command, "workspace", ws.Name, pPath)
+			}
 		}
 	}
 	log.Info("mcp_summary", "count", len(uniqueStrings(mcpNames)), "names", strings.Join(uniqueStrings(mcpNames), ","))

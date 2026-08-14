@@ -26,31 +26,35 @@ func LoadMCPFile(path string) (MCPFile, error) {
 	return out, nil
 }
 
-// MergeMCP merges global then project by server name (project wins).
-func MergeMCP(global, project MCPFile) MCPFile {
+// MergeMCP merges files in order by server name; later files win.
+func MergeMCP(files ...MCPFile) MCPFile {
 	out := MCPFile{MCPServers: map[string]MCPServer{}}
-	for k, v := range global.MCPServers {
-		out.MCPServers[k] = v
-	}
-	for k, v := range project.MCPServers {
-		out.MCPServers[k] = v
+	for _, file := range files {
+		for k, v := range file.MCPServers {
+			out.MCPServers[k] = v
+		}
 	}
 	return out
 }
 
-// LoadMergedMCP loads global + project MCP JSON for a workspace.
+// LoadMergedMCP loads global then workspace MCP JSON files for a workspace.
 func LoadMergedMCP(workspacePath string) (MCPFile, error) {
 	gPath, err := GlobalMCPPath()
 	if err != nil {
 		return MCPFile{}, err
 	}
+	files := make([]MCPFile, 0, 1+len(ProjectMCPConfigPaths(workspacePath)))
 	g, err := LoadMCPFile(gPath)
 	if err != nil {
 		return MCPFile{}, err
 	}
-	p, err := LoadMCPFile(ProjectMCPPath(workspacePath))
-	if err != nil {
-		return MCPFile{}, err
+	files = append(files, g)
+	for _, path := range ProjectMCPConfigPaths(workspacePath) {
+		file, err := LoadMCPFile(path)
+		if err != nil {
+			return MCPFile{}, err
+		}
+		files = append(files, file)
 	}
-	return MergeMCP(g, p), nil
+	return MergeMCP(files...), nil
 }

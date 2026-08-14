@@ -294,8 +294,13 @@ security:
 
 ### 上游 MCP
 
-全局配置使用 `~/.mcpx/.mcp.json`，项目级配置使用
-`{workspace}/.mcpx/.mcp.json`。项目级同名 Server 覆盖全局配置。
+全局配置使用 `~/.mcpx/.mcp.json`。项目级按以下顺序合并，后出现的同名 Server 覆盖前面的：
+
+1. `{workspace}/.mcp.json`
+2. `{workspace}/.agents/mcp.json`
+3. `{workspace}/.mcpx/.mcp.json`
+
+缺失文件视为空配置。项目级同名 Server 覆盖全局配置；`.mcpx/.mcp.json` 是 MCPX 原生覆盖层，优先级最高。
 
 ```json
 {
