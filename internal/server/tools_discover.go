@@ -395,8 +395,11 @@ func mcpExecutionRisk(tool *mcp.Tool) extensionRisk {
 }
 
 func extensionConfirmationContentKey(principalID, operation, target, revision string, payload map[string]any) string {
+	// purpose is semantic/audit context only. Confirmation matching must follow
+	// the actual effect fingerprint so a rephrased requirement does not create
+	// a new approval for the same target, revision, and arguments.
 	return skillRevision(strings.Join([]string{
-		principalID, operation, target, revision, stringPayload(payload, "purpose"), cleanIdempotencyFingerprint(operation, payload),
+		principalID, operation, target, revision, cleanIdempotencyFingerprint(operation, payload),
 	}, "\x00"))
 }
 

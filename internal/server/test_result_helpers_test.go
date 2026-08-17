@@ -66,6 +66,26 @@ func decodeToolResult(t *testing.T, result *mcp.CallToolResult) map[string]any {
 		return map[string]any{"status": "succeeded", "data": envelope}
 	}
 
+	// 4) Transparent mcp_tool results intentionally keep the upstream
+	// CallToolResult shape. The proxy-owned metadata still exposes enough
+	// replay state for tests that need the unified harness view.
+	if result.Meta != nil {
+		if _, ok := result.Meta[mcpMetaTool]; ok {
+			status := "ok"
+			if result.IsError {
+				status = "failed"
+			}
+			data := map[string]any{}
+			if replay, ok := result.Meta[mcpMetaReplay]; ok {
+				data["idempotent_replay"] = replay
+			}
+			if remoteSessionID, ok := result.Meta[mcpMetaRemoteSessionID]; ok {
+				data["remote_session_id"] = remoteSessionID
+			}
+			return map[string]any{"status": status, "data": data}
+		}
+	}
+
 	t.Fatalf("tool returned no decodable result: %+v", result)
 	return nil
 }
