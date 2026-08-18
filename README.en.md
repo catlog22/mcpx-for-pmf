@@ -3,9 +3,10 @@
 > **Fork notice**: This repository is a local fork of [opentokenz/mcpx](https://github.com/opentokenz/mcpx) ("mcpx for pmf").
 > It keeps all upstream capabilities and adds Pi Agent / Maestro ecosystem integrations (see `docs/mcpx-for-pmf/`):
 >
-> - **Maestro skill package**: `examples/skills/maestro/` wraps the `maestro search/load/knowledge` CLI, exposed to any MCP client via `skill_tool`.
-> - **`pi_execute` tool**: dispatches plan tasks to the local Pi Agent (`pi -p` headless), closing the Plan evidence loop.
+> - **`pi_execute` tool**: dispatches plan tasks to the local Pi Agent (`pi -p` headless, with system prompt injection), closing the Plan evidence loop.
+> - **Pi plugin skill discovery**: scans `pi-maestro-flow/.pi/skills`, exposed to any MCP client via `skill_tool list/describe`.
 > - **Workspace auto-registration**: paired with the `pi-maestro-flow` extension, auto-runs `mcpx workspace register` for the current project on startup.
+> - **E2E verification script**: `scripts/e2e-mcpx.mjs` (raw JSON-RPC client, no SDK dependency).
 
 **An MCP Runtime connecting AI to local development environments.**
 

@@ -3,9 +3,10 @@
 > **Fork 说明**：本仓库是 [opentokenz/mcpx](https://github.com/opentokenz/mcpx) 的本地 fork（"mcpx for pmf"），
 > 在保持上游全部能力的基础上，针对 Pi Agent / Maestro 生态增加以下增量（详见 `docs/mcpx-for-pmf/`）：
 >
-> - **Maestro skill 包**：`examples/skills/maestro/` 封装 `maestro search/load/knowledge` CLI，经 `skill_tool` 暴露给任意 MCP 客户端。
-> - **`pi_execute` 工具**：将 plan 任务下发到本地 Pi Agent（`pi -p` 无头执行），完成 Plan 证据闭环。
+> - **`pi_execute` 工具**：将 plan 任务下发到本地 Pi Agent（`pi -p` 无头执行，支持 system 提示注入），完成 Plan 证据闭环。
+> - **Pi 插件 skill 识别**：扫描 `pi-maestro-flow/.pi/skills`，经 `skill_tool list/describe` 暴露给任意 MCP 客户端。
 > - **工作区自动注册**：配合 `pi-maestro-flow` 插件，启动时自动 `mcpx workspace register` 当前项目。
+> - **端到端验证脚本**：`scripts/e2e-mcpx.mjs`（raw JSON-RPC 客户端，无需 SDK）。
 
 MCPX 是运行在本地开发环境中的 MCP Runtime（网关）。它通过
 Streamable HTTP 把本地 Workspace、源码、变更、命令、任务、环境和扩展能力
