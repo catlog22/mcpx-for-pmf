@@ -429,7 +429,7 @@ func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server) {
 		"remote_session_id": remoteSession, "purpose": stringSchema("本次 Pi 窗口操作的用户目标"),
 		"window": stringSchema("目标 Pi 窗口：display_name、owner_id 或唯一前缀（send 用）"),
 		"message": stringSchema(fmt.Sprintf("委派给 Pi 窗口的任务消息；最大 %d 字节，不允许控制字符", piPeerMaxCommandBytes)),
-		"mode": enumSchema("投递模式；steer 打断当前 turn，follow_up 排队（默认）", "steer", "follow_up"),
+		"mode": enumSchema("投递模式；steer 注入当前 turn（默认），follow_up 排队", "steer", "follow_up"),
 		"plan_id": stringSchema("关联的 Plan ID（可选；与 plan_task_id 成对提供）"),
 		"plan_task_id": stringSchema("关联的 Plan Task ID（可选）；投递被接受后自动推进为 in_progress"),
 		"wait_time_ms": numberSchema("等待窗口回执的毫秒数；默认 30000，最大 120000"),

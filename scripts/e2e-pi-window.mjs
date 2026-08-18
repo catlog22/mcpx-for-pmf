@@ -76,7 +76,7 @@ const first = windows[0];
 console.log("target window:", JSON.stringify(first));
 
 // 2) send -> confirmation gate
-const sendArgs = { action: "send", remote_session_id: remoteId, window: first.owner_id ?? first.display_name, message, mode: "follow_up", purpose: "e2e verify pi window dispatch" };
+const sendArgs = { action: "send", remote_session_id: remoteId, window: first.owner_id ?? first.display_name, message, mode: "steer", purpose: "e2e verify pi window dispatch" };
 const gated = await rpc("tools/call", { name: "pi_window", arguments: sendArgs });
 const gatedText = textOf(gated);
 console.log("confirmation gate status:", /waiting_confirmation|user_confirmation_required/i.test(gatedText) ? "CONFIRMATION_REQUIRED (expected)" : "unexpected", gatedText.slice(0, 300));

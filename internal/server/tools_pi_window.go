@@ -389,6 +389,11 @@ func (r *Runtime) piWindowSend(ctx context.Context, envReq envelope.Request, pri
 	message := stringPayload(envReq.Payload, "message")
 	action := strings.TrimSpace(stringPayload(envReq.Payload, "mode"))
 	if action == "" {
+		// Default to steer: inject into the target window's current turn so the
+		// task is handled immediately instead of queueing behind its work.
+		action = "steer"
+	}
+	if action == "" {
 		action = "follow_up"
 	}
 	if action != "steer" && action != "follow_up" {

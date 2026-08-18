@@ -170,13 +170,16 @@ func TestPiWindowToolListAndConfirmationGate(t *testing.T) {
 			t.Fatalf("list failed: %+v", listed)
 		}
 
-		// send without confirmation -> confirmation required
+		// send without confirmation -> confirmation required (default mode steer)
 		response := callEnvelope(t, rt.toolPiWindow, context.Background(), map[string]any{
 			"action": "send", "remote_session_id": remoteID,
 			"window": strings.Repeat("1", 32), "message": "please do X",
 		})
 		if errorCode(response) != "user_confirmation_required" {
 			t.Fatalf("expected user_confirmation_required, got %+v", response)
+		}
+		if data, _ := response["data"].(map[string]any); data == nil || data["action"] != "steer" {
+			t.Fatalf("expected default steer mode in confirmation data, got %+v", response)
 		}
 
 		// send to unknown window
