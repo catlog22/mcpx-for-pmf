@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -408,6 +409,21 @@ func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server) {
 		"deliver":  {Properties: map[string]any{"plan_id": stringSchema("Plan ID")}, Required: []string{"remote_session_id", "purpose", "plan_id"}},
 	}
 	r.addTool(s, cleanActionTool("plan", toolDesc["plan"], planCommon, planBranches, planToolAnnotation), r.toolPlanClean)
+
+	piExecuteCommon := map[string]any{
+		"remote_session_id": remoteSession, "purpose": stringSchema("本次 Pi 委派的用户目标"),
+		"prompt":            stringSchema(fmt.Sprintf("委派给本地 Pi Agent 的任务指令；默认 companion 式直接执行，最大 %d 字节", maxPiPromptBytes)),
+		"plan_id":           stringSchema("关联的 Plan ID（可选；与 plan_task_id 成对提供）"),
+		"plan_task_id":      stringSchema("关联的 Plan Task ID（可选）；执行成功后自动 complete_task，失败自动 block_task，均记录 execute 证据"),
+		"model":             stringSchema("Pi 模型选择（可选；省略使用 Pi 全局配置）"),
+		"system":            stringSchema("附加系统提示注入（--append-system-prompt）；用于携带计划上下文、约束或背景（可选）"),
+		"yield_time_ms":     numberSchema("内联等待毫秒数；超时返回 execution_task_id 供 execute attach 延续"),
+		"timeout_seconds":   numberSchema("Pi 进程硬超时秒数"),
+		"user_confirmed":    booleanSchema("用户已确认本次委派；服务端仍会校验待确认摘要"),
+	}
+	r.addTool(s, cleanActionTool("pi_execute", toolDesc["pi_execute"], piExecuteCommon, map[string]actionSchemaBranch{
+		"run": {Description: "将任务委派给本地 Pi Agent 执行；进程经执行 Task 持久化，可通过 execute attach/stop 延续。", Properties: map[string]any{}, Required: []string{"remote_session_id", "purpose", "prompt"}},
+	}, commandExecutionToolAnnotation), r.toolPiExecute)
 
 	artifactCommon := map[string]any{"remote_session_id": remoteSession, "purpose": stringSchema("本次产物操作的用户目标"), "idempotency_key": stringSchema("同一登记操作重试时复用的幂等键"), "execution_mode": enumSchema("执行模式", "sync", "async")}
 	artifactBranches := map[string]actionSchemaBranch{
