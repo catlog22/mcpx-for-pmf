@@ -425,6 +425,21 @@ func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server) {
 		"run": {Description: "将任务委派给本地 Pi Agent 执行；进程经执行 Task 持久化，可通过 execute attach/stop 延续。", Properties: map[string]any{}, Required: []string{"remote_session_id", "purpose", "prompt"}},
 	}, commandExecutionToolAnnotation), r.toolPiExecute)
 
+	piWindowCommon := map[string]any{
+		"remote_session_id": remoteSession, "purpose": stringSchema("本次 Pi 窗口操作的用户目标"),
+		"window": stringSchema("目标 Pi 窗口：display_name、owner_id 或唯一前缀（send 用）"),
+		"message": stringSchema(fmt.Sprintf("委派给 Pi 窗口的任务消息；最大 %d 字节，不允许控制字符", piPeerMaxCommandBytes)),
+		"mode": enumSchema("投递模式；steer 打断当前 turn，follow_up 排队（默认）", "steer", "follow_up"),
+		"plan_id": stringSchema("关联的 Plan ID（可选；与 plan_task_id 成对提供）"),
+		"plan_task_id": stringSchema("关联的 Plan Task ID（可选）；投递被接受后自动推进为 in_progress"),
+		"wait_time_ms": numberSchema("等待窗口回执的毫秒数；默认 30000，最大 120000"),
+		"user_confirmed": booleanSchema("用户已确认向该窗口派发；服务端校验目标窗口与消息摘要"),
+	}
+	r.addTool(s, cleanActionTool("pi_window", toolDesc["pi_window"], piWindowCommon, map[string]actionSchemaBranch{
+		"list": {Description: "列出当前工作区可发现的 Pi 窗口（自动注册的活跃窗口）。", Properties: map[string]any{}, Required: []string{"remote_session_id"}},
+		"send": {Description: "向指定 Pi 窗口投递任务消息；始终要求用户确认（先 list 展示窗口，用户确认后带 user_confirmed=true 重试）。", Properties: map[string]any{}, Required: []string{"remote_session_id", "purpose", "window", "message"}},
+	}, commandExecutionToolAnnotation), r.toolPiWindow)
+
 	artifactCommon := map[string]any{"remote_session_id": remoteSession, "purpose": stringSchema("本次产物操作的用户目标"), "idempotency_key": stringSchema("同一登记操作重试时复用的幂等键"), "execution_mode": enumSchema("执行模式", "sync", "async")}
 	artifactBranches := map[string]actionSchemaBranch{
 		"register": {Properties: map[string]any{"path": path, "name": stringSchema("显示名称"), "kind": enumSchema("产物类型", "test_report", "coverage", "build", "screenshot", "log", "other"), "mime_type": stringSchema("MIME 类型")}, Required: []string{"remote_session_id", "purpose", "path"}},

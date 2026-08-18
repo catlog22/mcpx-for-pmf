@@ -4,9 +4,24 @@
 
 | 增量 | 位置 | 说明 |
 | --- | --- | --- |
-| `pi_execute` 工具 | `internal/server/tools_pi_execute.go` | 将 plan 任务委派给本地 Pi Agent（`pi -p --no-session --approve`，无 shell 解析），支持 system 提示注入，Plan 证据闭环（成功 complete / 失败 block） |
+| `pi_window` 工具 | `internal/server/tools_pi_window.go` | 发现运行中的 Pi 窗口并消息投递（workspace-peer 文件协议，与 teammate-send 同通道）：`list` 列出自动注册的活跃窗口，`send` 先确认后投递（steer/follow_up），可关联 plan 任务 |
+| `pi_execute` 工具 | `internal/server/tools_pi_execute.go` | 回退通道：无窗口在线时 spawn `pi -p` 执行（companion 式 + system 注入 + plan 证据闭环） |
 | Pi 插件 skill 识别 | 全局配置 `discovery.skills.extra_dirs` | 扫描 `pi-maestro-flow/.pi/skills`，经 `skill_tool list/describe` 暴露 |
 | 工作区自动注册 | pi-maestro-flow 插件侧 | 插件启动时自动 `mcpx workspace register` 当前项目 |
+
+## 推荐流程（窗口委派，无需启动新进程）
+
+```text
+用户启动 pi（窗口自动注册：~/.pi/teammate/workspaces/{workspaceId}/runtime/owners/）
+        │
+前端（远程 Web 经 mcpx）
+  1. pi_window list           → 展示可发现的 Pi 窗口（display_name / owner_id / 活跃度）
+  2. 询问用户选择目标窗口
+  3. pi_window send           → 服务端返回 USER_CONFIRMATION_REQUIRED（窗口 + 消息摘要）
+  4. 用户确认后 user_confirmed=true 重试
+  5. mcpx 写命令 mailbox → 目标窗口消费 → teammate-message 注入主会话 → 触发新一轮 turn
+  6. 回执 accepted/queued → 前端可继续 plan 流程
+```
 
 ## 快速开始
 
@@ -16,25 +31,20 @@ go build -o bin/mcpx ./cmd/mcpx-server
 
 # 2. 启动（注册工作区）
 ./bin/mcpx --workspace /path/to/project
-# 或运行中注册：mcpx workspace register /path/to/project
 
-# 3. Pi skill 识别（~/.mcpx/config.yaml）
+# 3. Pi 窗口发现前提：在该工作区启动任意 pi 窗口（pi-maestro-teammate 自动发布快照）
+
+# 4. Pi skill 识别（~/.mcpx/config.yaml）
 # discovery:
 #   skills:
-#     extra_dirs:
+#     dirs:
 #       - D:/pi-maestro-flow/.pi/skills
-
-# 4. pi_execute 白名单（默认 allow 策略下无需配置；如需收紧）
-# security:
-#   commands:
-#     allow:
-#       - "^pi(\\s|$)"
 ```
 
-## 远程 Web 规划 → 本地 Pi Agent 闭环
+## 协议说明（对齐 pi-maestro-teammate workspace-peers v1）
 
-1. 远程客户端（ChatGPT/Claude 等）经 Streamable HTTP 连接 mcpx，`session open` 绑定工作区；
-2. `plan create`（goal + tasks）→ 远程 Web 侧规划；
-3. `pi_execute`（`plan_id` + `plan_task_id` + `prompt`，可选 `system` 注入）→ mcpx 无头启动本地 Pi Agent 执行；
-4. 进程在任务系统持久化（可 `execute attach/stop` 延续）；结束后自动 `plan complete_task`（exit 0）或 `block_task`（失败），证据为 execute 类型；
-5. 远程客户端 `plan read` 查看任务状态与证据，继续推进后续任务。
+- 窗口发现：`~/.pi/teammate/workspaces/{sha256(normalizedCwd)}/runtime/owners/{ownerId}.json`（20s 新鲜窗口）
+- 命令投递：`.../commands/{toOwnerId}/{commandId}.json`（targetCorrelationId=`window-main-session`，messageKind=`request`，source=`system`，TTL 5 分钟）
+- 回执：`.../responses/{fromOwnerId}/{commandId}.json`（accepted/rejected/expired/error）
+- mcpx 身份：`~/.mcpx/pi-peer-identity.json`（fromOwnerId/fromOwnerNonce，幂等复用）
+- 端到端脚本：`scripts/e2e-pi-window.mjs`（raw JSON-RPC，确认门控 + 投递验证）

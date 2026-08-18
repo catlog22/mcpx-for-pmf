@@ -3,7 +3,8 @@
 > **Fork notice**: This repository is a local fork of [opentokenz/mcpx](https://github.com/opentokenz/mcpx) ("mcpx for pmf").
 > It keeps all upstream capabilities and adds Pi Agent / Maestro ecosystem integrations (see `docs/mcpx-for-pmf/`):
 >
-> - **`pi_execute` tool**: dispatches plan tasks to the local Pi Agent (`pi -p` headless, with system prompt injection), closing the Plan evidence loop.
+> - **`pi_window` tool**: discovers running Pi windows and delivers tasks (same channel as teammate-send): `list` shows windows, user confirms, `send` (steer/follow_up) injects a teammate-message into the target window's main session and triggers a new turn.
+> - **`pi_execute` tool**: fallback channel — headless `pi -p` execution (companion style + system injection + Plan evidence loop) when no window is online.
 > - **Pi plugin skill discovery**: scans `pi-maestro-flow/.pi/skills`, exposed to any MCP client via `skill_tool list/describe`.
 > - **Workspace auto-registration**: paired with the `pi-maestro-flow` extension, auto-runs `mcpx workspace register` for the current project on startup.
 > - **E2E verification script**: `scripts/e2e-mcpx.mjs` (raw JSON-RPC client, no SDK dependency).

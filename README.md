@@ -3,7 +3,8 @@
 > **Fork 说明**：本仓库是 [opentokenz/mcpx](https://github.com/opentokenz/mcpx) 的本地 fork（"mcpx for pmf"），
 > 在保持上游全部能力的基础上，针对 Pi Agent / Maestro 生态增加以下增量（详见 `docs/mcpx-for-pmf/`）：
 >
-> - **`pi_execute` 工具**：将 plan 任务下发到本地 Pi Agent（`pi -p` 无头执行，支持 system 提示注入），完成 Plan 证据闭环。
+> - **`pi_window` 工具**：发现运行中的 Pi 窗口并投递任务（同 teammate-send 通道）：先 list 展示窗口，用户确认后 send（steer/follow_up），窗口主会话以 teammate-message 接收并触发新一轮 turn。
+> - **`pi_execute` 工具**：回退通道——无窗口在线时 `pi -p` 无头执行（companion 式 + system 注入 + Plan 证据闭环）。
 > - **Pi 插件 skill 识别**：扫描 `pi-maestro-flow/.pi/skills`，经 `skill_tool list/describe` 暴露给任意 MCP 客户端。
 > - **工作区自动注册**：配合 `pi-maestro-flow` 插件，启动时自动 `mcpx workspace register` 当前项目。
 > - **端到端验证脚本**：`scripts/e2e-mcpx.mjs`（raw JSON-RPC 客户端，无需 SDK）。
