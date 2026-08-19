@@ -1,0 +1,28 @@
+{
+  "name": "mcpx-for-pmf",
+  "version": "0.9.7",
+  "license": "Apache-2.0",
+  "description": "mcpx for pmf — MCP Runtime gateway with Pi Agent integration (pi_execute / pi_window), forked from the Apache-2.0 mcpx project. npm distribution wrapper: installs the platform binary to ~/.mcpx/bin and exposes the `mcpx` command.",
+  "type": "module",
+  "bin": {
+    "mcpx": "bin/mcpx-cli.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/npm-install.mjs"
+  },
+  "files": [
+    "bin",
+    "scripts"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcpx",
+    "mcp",
+    "mcp-server",
+    "pi",
+    "maestro",
+    "tunnel"
+  ]
+}

@@ -838,6 +838,12 @@ git diff --check
 
 ## 致谢
 
+本仓库是 [mcpx](https://github.com/opentokenz/mcpx) 的分支（fork），保留上游全部历史与
+Apache-2.0 许可证；在此特别致谢原项目作者与维护者创建的 MCP Runtime 网关设计、
+Go 实现、OAuth/Bearer 认证与 Cloudflare 隧道方案。本分支在此基础上新增
+Pi Agent 集成（`pi_execute` / `pi_window`）、npm 分发包装与向导支持，
+增量说明见 [docs/mcpx-for-pmf/index.md](docs/mcpx-for-pmf/index.md)。
+
 感谢 [LINUX DO](https://linux.do) 社区：**学 AI，上 LINUX DO。**
 
 ---
