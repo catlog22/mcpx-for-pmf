@@ -88,10 +88,13 @@ func runWorkspaceCommand(args []string) int {
 		printWorkspaceCommandUsage(os.Stderr)
 		return 0
 	}
-	if args[0] != "register" {
+	if args[0] != "register" && args[0] != "remove" {
 		fmt.Fprintf(os.Stderr, "workspace: unknown command %q\n", args[0])
 		printWorkspaceCommandUsage(os.Stderr)
 		return 2
+	}
+	if args[0] == "remove" {
+		return runWorkspaceRemove(args[1:])
 	}
 	return runWorkspaceRegister(args[1:])
 }
@@ -118,6 +121,31 @@ func runWorkspaceRegister(args []string) int {
 		return 1
 	}
 	fmt.Printf("已注册 Workspace：%s\n路径：%s\n", filepath.Base(absPath), absPath)
+	return 0
+}
+
+func runWorkspaceRemove(args []string) int {
+	options, err := parseWorkspaceRegisterArgs(args)
+	if err != nil {
+		if err == flag.ErrHelp {
+			printWorkspaceRegisterUsage(os.Stderr)
+			return 0
+		}
+		fmt.Fprintf(os.Stderr, "workspace remove: %v\n", err)
+		printWorkspaceRegisterUsage(os.Stderr)
+		return 2
+	}
+	path := config.ExpandHome(options.Path)
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "workspace remove: resolve path: %v\n", err)
+		return 1
+	}
+	if err := config.UnregisterWorkspace("", absPath); err != nil {
+		fmt.Fprintf(os.Stderr, "workspace remove: %v\n", err)
+		return 1
+	}
+	fmt.Printf("已移除 Workspace：%s\n路径：%s\n", filepath.Base(absPath), absPath)
 	return 0
 }
 
@@ -276,8 +304,10 @@ func printObserveUsage(w io.Writer) {
 func printWorkspaceCommandUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  mcpx workspace register <path>")
+	fmt.Fprintln(w, "  mcpx workspace remove <path>")
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "Register or update a Workspace in the global config without starting the Runtime.")
+	fmt.Fprintln(w, "Register or update a Workspace in the global config without starting the Runtime;")
+	fmt.Fprintln(w, "remove deletes the matching entry.")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "For terminal observation, use:")
 	fmt.Fprintln(w, "  mcpx observe [flags] <workspace name>")

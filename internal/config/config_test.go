@@ -213,6 +213,40 @@ func TestRegisterWorkspaceAndLoad(t *testing.T) {
 	}
 }
 
+func TestUnregisterWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MCPX_HOME", dir)
+	global := filepath.Join(dir, "config.yaml")
+	a := filepath.Join(dir, "proj-a")
+	b := filepath.Join(dir, "proj-b")
+	for _, ws := range []string{a, b} {
+		if err := os.MkdirAll(ws, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := RegisterWorkspace(global, ws); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := UnregisterWorkspace(global, a); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadGlobal(global)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Workspaces) != 1 || cfg.Workspaces[0].Path != b {
+		t.Fatalf("after remove: %+v", cfg.Workspaces)
+	}
+	// removing an unknown path is a no-op
+	if err := UnregisterWorkspace(global, filepath.Join(dir, "ghost")); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ = LoadGlobal(global)
+	if len(cfg.Workspaces) != 1 {
+		t.Fatalf("ghost removed something: %+v", cfg.Workspaces)
+	}
+}
+
 func TestMergeMCP(t *testing.T) {
 	g := MCPFile{MCPServers: map[string]MCPServer{
 		"github": {Command: "g", Type: "stdio"},

@@ -318,6 +318,34 @@ func RegisterWorkspace(globalPath, absPath string) error {
 	return WriteGlobal(globalPath, cfg)
 }
 
+// UnregisterWorkspace removes the workspace whose absolute path matches from
+// the global config file. Unknown paths are a no-op (nil error).
+func UnregisterWorkspace(globalPath, absPath string) error {
+	if globalPath == "" {
+		var err error
+		globalPath, err = GlobalConfigPath()
+		if err != nil {
+			return err
+		}
+	}
+	absPath, err := filepath.Abs(absPath)
+	if err != nil {
+		return err
+	}
+	cfg, err := LoadGlobal(globalPath)
+	if err != nil {
+		return err
+	}
+	kept := cfg.Workspaces[:0]
+	for _, workspace := range cfg.Workspaces {
+		if workspace.Path != absPath {
+			kept = append(kept, workspace)
+		}
+	}
+	cfg.Workspaces = kept
+	return WriteGlobal(globalPath, cfg)
+}
+
 // WriteGlobal writes config YAML, creating parent dirs.
 func WriteGlobal(path string, cfg Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
