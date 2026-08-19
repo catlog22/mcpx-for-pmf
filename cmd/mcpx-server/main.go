@@ -160,7 +160,7 @@ func printUsage() {
 Usage:
   mcpx [flags]                     启动 Streamable HTTP 服务
   mcpx observe [flags] <name>      终端只读观测 Workspace 事件
-  mcpx workspace register <path>  注册或更新 Workspace（不启动服务；--ttl 租约）
+  mcpx workspace register [--ttl 5m] <path>  注册或更新 Workspace（不启动服务）
   mcpx workspace remove <path>   移除已注册的 Workspace
   mcpx workspace list            列出 Workspace 与租约状态
   mcpx oauth-register [url]        动态注册 OAuth 客户端（粘贴 ChatGPT 回调 URL）

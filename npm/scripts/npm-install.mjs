@@ -14,7 +14,7 @@
 
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -33,7 +33,13 @@ const fail = (message) => {
 
 function platformAssetName() {
   const os = process.platform === "win32" ? "windows" : process.platform === "darwin" ? "darwin" : "linux";
-  const arch = process.arch === "arm64" ? "arm64" : "amd64";
+  const arch = process.arch === "arm64" ? "arm64" : process.arch === "x64" ? "amd64" : undefined;
+  if (arch === undefined) {
+    fail(`unsupported platform: ${process.platform}/${process.arch} (GoReleaser builds linux/darwin amd64+arm64 and windows amd64 only)`);
+  }
+  if (process.platform === "win32" && arch === "arm64") {
+    fail("unsupported platform: windows/arm64 (upstream does not build this artifact)");
+  }
   return `mcpx_${PKG_VERSION}_${os}_${arch}`;
 }
 
@@ -41,8 +47,11 @@ function verifyChecksum(archivePath, archiveName, checksumsText) {
   const digest = createHash("sha256").update(readFileSync(archivePath)).digest("hex");
   const line = (checksumsText ?? "").split(/\r?\n/).find((l) => l.trim().endsWith(`  ${archiveName}`));
   if (!line) {
-    log("checksums.txt entry not found; skipping verification (set MCPX_NPM_URL to a trusted mirror)");
-    return;
+    if (process.env.MCPX_NPM_SKIP_CHECKSUM === "1") {
+      log("checksum verification skipped (MCPX_NPM_SKIP_CHECKSUM=1)");
+      return;
+    }
+    fail(`checksums.txt has no entry for ${archiveName}; refusing to install an unverified binary (set MCPX_NPM_SKIP_CHECKSUM=1 to override)`);
   }
   const expected = line.trim().split(/\s+/)[0];
   if (expected !== digest) fail(`sha256 mismatch for ${archiveName}: expected ${expected}, got ${digest}`);
@@ -86,7 +95,22 @@ function findBinaryIn(dir) {
 function download(url, target, label) {
   log(`downloading ${label} …`);
   const result = spawnSync("curl", ["-fsSL", "-o", target, url], { stdio: "inherit", timeout: 300_000 });
-  if (result.status !== 0) fail(`download failed: ${url}`);
+  if (result.status !== 0) {
+    console.error(
+      `[mcpx-for-pmf] download failed: ${url}\n` +
+      `  The fork publishes no prebuilt GitHub Releases yet. Options:\n` +
+      `  - MCPX_NPM_BINARY=<path-to-zip-or-tar.gz>  install a local build\n` +
+      `  - MCPX_NPM_REPO=<owner/repo>  point at a fork that publishes releases\n` +
+      `  - MCPX_NPM_URL=<full-archive-url>  use a mirror`,
+    );
+    fail(`download failed: ${url}`);
+  }
+}
+
+function downloadText(url, label) {
+  const result = spawnSync("curl", ["-fsSL", url], { encoding: "utf8", timeout: 60_000 });
+  if (result.status !== 0) fail(`${label} download failed (status ${result.status ?? "spawn error"})`);
+  return String(result.stdout ?? "");
 }
 
 function main() {
@@ -103,12 +127,7 @@ function main() {
     if (!sourcePath) {
       const url = urlOverride ?? `https://github.com/${REPO}/releases/download/v${PKG_VERSION}/${archiveName}`;
       download(url, archivePath, archiveName);
-      const checksums = spawnSync(
-        "curl",
-        ["-fsSL", `https://github.com/${REPO}/releases/download/v${PKG_VERSION}/checksums.txt`],
-        { encoding: "utf8", timeout: 60_000 },
-      );
-      verifyChecksum(archivePath, archiveName, checksums.status === 0 ? checksums.stdout : "");
+      verifyChecksum(archivePath, archiveName, downloadText(`https://github.com/${REPO}/releases/download/v${PKG_VERSION}/checksums.txt`, "checksums.txt"));
       sourcePath = archivePath;
     }
 
@@ -116,8 +135,22 @@ function main() {
     const binary = findBinaryIn(extracted);
     if (!binary) fail("extracted archive does not contain the mcpx binary");
     mkdirSync(TARGET_DIR, { recursive: true });
-    writeFileSync(TARGET, readFileSync(binary));
-    if (process.platform !== "win32") chmodSync(TARGET, 0o755);
+    // Atomic install: temp file + rename, so a half-written binary can never
+    // shadow the previous one; a running mcpx holds the exe on Windows, so
+    // surface that clearly instead of a raw EPERM.
+    const tmpTarget = `${TARGET}.tmp-${process.pid}`;
+    try {
+      writeFileSync(tmpTarget, readFileSync(binary));
+      if (process.platform !== "win32") chmodSync(tmpTarget, 0o755);
+      rmSync(TARGET, { force: true }); // Windows rename cannot replace a live exe
+      renameSync(tmpTarget, TARGET);
+    } catch (error) {
+      rmSync(tmpTarget, { force: true });
+      if (process.platform === "win32" && error && typeof error === "object" && "code" in error) {
+        fail(`install failed (${String(error.code)}) — stop the running mcpx process first, then reinstall`);
+      }
+      throw error;
+    }
     rmSync(extracted, { recursive: true, force: true });
     log(`installed ${TARGET}`);
   } finally {

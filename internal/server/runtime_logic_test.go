@@ -30,8 +30,8 @@ func TestConfigRoundTripInNew(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rt.reg.List()) != 1 {
-		t.Fatalf("expected 1 workspace, got %d", len(rt.reg.List()))
+	if len(rt.reg.Load().List()) != 1 {
+		t.Fatalf("expected 1 workspace, got %d", len(rt.reg.Load().List()))
 	}
 }
 

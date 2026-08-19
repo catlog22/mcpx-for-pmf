@@ -28,7 +28,7 @@ func (r *Runtime) resolveExplicitWorkspace(ctx context.Context, principal auth.P
 		if name != "" && name != session.WorkspaceName {
 			return workspace.Workspace{}, remoteID, fmt.Errorf("%w: workspace does not match Remote Session", remotesession.ErrInvalidInput)
 		}
-		registered, ok := r.reg.Get(session.WorkspaceName)
+		registered, ok := r.reg.Load().Get(session.WorkspaceName)
 		if ok {
 			registered.Path = session.WorkspacePath
 			return registered, remoteID, nil
@@ -40,7 +40,7 @@ func (r *Runtime) resolveExplicitWorkspace(ctx context.Context, principal auth.P
 	if name == "" {
 		return workspace.Workspace{}, "", nil
 	}
-	registered, ok := r.reg.Get(name)
+	registered, ok := r.reg.Load().Get(name)
 	if !ok {
 		return workspace.Workspace{}, "", fmt.Errorf("%w: %q", errWorkspaceNotFound, name)
 	}

@@ -19,7 +19,7 @@ import (
 // replay, otherwise the stale revision check would reject the retry.
 func TestCleanCoreSkillToolIdempotentReplaySurvivesRevisionChange(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	rt.cfg.Discovery.Skills.Enabled = true
 	rt.cfg.Discovery.Skills.Dirs = []string{".skills"}
 	skillDir := filepath.Join(workspace.Path, ".skills", "docs")
@@ -125,7 +125,7 @@ for line in sys.stdin:
 func TestCleanCoreMCPToolIdempotentReplayDoesNotRestartUpstream(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	rt.cfg.Discovery.MCP.Enabled = true
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	startLog := writeFakeMCPTestServer(t, workspace.Path)
 	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
 	remoteID := opened["remote_session_id"].(string)
@@ -195,7 +195,7 @@ func TestCleanCoreMCPToolIdempotentReplaySurvivesConfigRemoval(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rt := newWorkspaceRuntime(t, "demo")
 			rt.cfg.Discovery.MCP.Enabled = true
-			workspace, _ := rt.reg.Get("demo")
+			workspace, _ := rt.reg.Load().Get("demo")
 			startLog := writeFakeMCPTestServer(t, workspace.Path)
 			opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
 			remoteID := opened["remote_session_id"].(string)
@@ -254,7 +254,7 @@ func TestCleanCoreMCPToolIdempotentReplaySurvivesConfigRemoval(t *testing.T) {
 func TestCleanCoreMCPToolConcurrentSameKeyRunsSingleUpstream(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	rt.cfg.Discovery.MCP.Enabled = true
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	startLog := writeFakeMCPTestServer(t, workspace.Path)
 	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
 	remoteID := opened["remote_session_id"].(string)
@@ -323,7 +323,7 @@ func TestCleanCoreMCPToolConcurrentSameKeyRunsSingleUpstream(t *testing.T) {
 func TestCleanCoreExtensionFirstConfirmedCallStillRequiresGate(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	rt.cfg.Discovery.MCP.Enabled = true
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	writeFakeMCPTestServer(t, workspace.Path)
 	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
 	remoteID := opened["remote_session_id"].(string)

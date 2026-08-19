@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -55,7 +56,7 @@ type Options struct {
 type Runtime struct {
 	opts            Options
 	cfg             config.Config
-	reg             *workspace.Registry
+	reg             atomic.Pointer[workspace.Registry]
 	approvals       *approval.Store
 	audit           *audit.Logger
 	globalCfgPath   string
@@ -73,6 +74,8 @@ type Runtime struct {
 	retention       *state.RetentionService
 	retentionCancel context.CancelFunc
 	retentionDone   chan struct{}
+	leaseSweepCancel context.CancelFunc
+	leaseSweepDone   chan struct{}
 	screenshot      screenCapturer
 	observation     *observationBridge
 	operations      *operation.Service
@@ -143,8 +146,10 @@ func New(opts Options) (*Runtime, error) {
 		return nil, err
 	}
 	// Drop workspace leases whose heartbeat stopped (window went offline).
+	// Cleanup is best-effort at startup: a transient IO error must not block
+	// the service; the sweeper keeps retrying while running.
 	if removed, cleanupErr := config.CleanupExpiredWorkspaces(globalPath); cleanupErr != nil {
-		return nil, fmt.Errorf("cleanup expired workspaces: %w", cleanupErr)
+		fmt.Printf("[mcpx] warning: cleanup expired workspaces: %v\n", cleanupErr)
 	} else if removed > 0 {
 		fmt.Printf("[mcpx] cleaned %d expired workspace lease(s)\n", removed)
 		if cfg, err = config.LoadGlobal(globalPath); err != nil {
@@ -206,7 +211,6 @@ func New(opts Options) (*Runtime, error) {
 	runtime := &Runtime{
 		opts:           opts,
 		cfg:            cfg,
-		reg:            reg,
 		approvals:      approval.NewPersistentStore(stateStore.DB()),
 		audit:          logger,
 		globalCfgPath:  globalPath,
@@ -249,12 +253,13 @@ func New(opts Options) (*Runtime, error) {
 		_ = stateStore.Close()
 		return nil, fmt.Errorf("initialize operations: %w", err)
 	}
+	runtime.reg.Store(reg)
 	runtime.operations = operations
 	taskManager.SetOutputSink(runtime.observeTaskOutput)
 	runtime.observerSocket = observation.NewSocketServer(
 		observation.SocketPath(home), runtime.observation.store, runtime.observation.broker,
 		func(name string) bool {
-			_, ok := reg.Get(strings.TrimSpace(name))
+			_, ok := runtime.reg.Load().Get(strings.TrimSpace(name))
 			return ok
 		},
 	)
@@ -361,6 +366,7 @@ func (r *Runtime) Start() error {
 		}
 	}
 	r.startRetention()
+	r.startLeaseSweeper()
 	// toolIndex is filled by addTool during registerTools.
 
 	addr := r.opts.AddrOverride
@@ -428,6 +434,7 @@ func (r *Runtime) Close() error {
 	}
 	r.closeOnce.Do(func() {
 		r.stopRetention()
+		r.stopLeaseSweeper()
 		if r.observation != nil && r.observation.async != nil {
 			r.observation.async.Close(2 * time.Second)
 		}
@@ -513,6 +520,75 @@ func (r *Runtime) stopRetention() {
 	r.retentionDone = nil
 }
 
+// startLeaseSweeper periodically drops expired workspace leases while the
+// service runs, so workspaces whose registering window went offline disappear
+// without a restart (the registry is rebuilt when anything was removed).
+func (r *Runtime) startLeaseSweeper() {
+	if r == nil || r.leaseSweepDone != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	r.leaseSweepCancel = cancel
+	r.leaseSweepDone = done
+	go func() {
+		defer close(done)
+		timer := time.NewTimer(5 * time.Minute)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			r.runLeaseSweep()
+		}
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				r.runLeaseSweep()
+			}
+		}
+	}()
+}
+
+func (r *Runtime) stopLeaseSweeper() {
+	if r == nil || r.leaseSweepCancel == nil {
+		return
+	}
+	r.leaseSweepCancel()
+	if r.leaseSweepDone != nil {
+		<-r.leaseSweepDone
+	}
+	r.leaseSweepCancel = nil
+	r.leaseSweepDone = nil
+}
+
+func (r *Runtime) runLeaseSweep() {
+	if r == nil {
+		return
+	}
+	removed, err := config.CleanupExpiredWorkspaces(r.globalCfgPath)
+	if err != nil {
+		logging.With("component", "lease_sweeper").Error("workspace lease sweep failed", "err", err)
+		return
+	}
+	if removed == 0 {
+		return
+	}
+	fmt.Printf("[mcpx] lease sweep: cleaned %d expired workspace lease(s)\n", removed)
+	cfg, err := config.LoadGlobal(r.globalCfgPath)
+	if err != nil {
+		logging.With("component", "lease_sweeper").Error("reload config after sweep", "err", err)
+		return
+	}
+	if newReg, err := workspace.NewRegistry(cfg.Workspaces); err == nil {
+		r.reg.Store(newReg)
+	}
+}
+
 func (r *Runtime) runRetention(ctx context.Context) {
 	if r == nil || r.retention == nil {
 		return
@@ -567,7 +643,7 @@ func (r *Runtime) logStartupInventory(log interface {
 	Debug(string, ...any)
 	Info(string, ...any)
 }) {
-	workspaces := r.reg.List()
+	workspaces := r.reg.Load().List()
 	log.Info("──────── inventory ────────")
 	log.Info("workspaces", "count", len(workspaces))
 	if len(workspaces) == 0 {
@@ -974,7 +1050,7 @@ func (r *Runtime) toolWorkspaceList(ctx context.Context, req *mcp.CallToolReques
 	if fail != nil {
 		return fail, nil
 	}
-	list := r.reg.List()
+	list := r.reg.Load().List()
 	items := make([]map[string]any, 0, len(list))
 	for _, w := range list {
 		items = append(items, map[string]any{

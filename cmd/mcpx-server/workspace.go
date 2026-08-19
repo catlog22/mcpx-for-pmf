@@ -89,9 +89,25 @@ func parseWorkspaceRegisterArgs(args []string) (workspaceRegisterOptions, error)
 		if err != nil {
 			return options, fmt.Errorf("invalid --ttl %q: %v", *ttl, err)
 		}
+		if parsed < 0 {
+			return options, fmt.Errorf("--ttl must be positive (got %q)", *ttl)
+		}
 		options.TTL = parsed
 	}
 	return options, nil
+}
+
+// parseWorkspaceRemoveArgs accepts a single positional path and rejects flags.
+func parseWorkspaceRemoveArgs(args []string) (workspaceRegisterOptions, error) {
+	fs := flag.NewFlagSet("workspace remove", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return workspaceRegisterOptions{}, err
+	}
+	if fs.NArg() != 1 || strings.TrimSpace(fs.Arg(0)) == "" {
+		return workspaceRegisterOptions{}, fmt.Errorf("workspace path is required")
+	}
+	return workspaceRegisterOptions{Path: strings.TrimSpace(fs.Arg(0))}, nil
 }
 
 func runWorkspaceCommand(args []string) int {
@@ -171,7 +187,7 @@ func runWorkspaceList(args []string) int {
 }
 
 func runWorkspaceRemove(args []string) int {
-	options, err := parseWorkspaceRegisterArgs(args)
+	options, err := parseWorkspaceRemoveArgs(args)
 	if err != nil {
 		if err == flag.ErrHelp {
 			printWorkspaceRegisterUsage(os.Stderr)
@@ -187,8 +203,25 @@ func runWorkspaceRemove(args []string) int {
 		fmt.Fprintf(os.Stderr, "workspace remove: resolve path: %v\n", err)
 		return 1
 	}
+	// Only report success when the entry actually existed.
+	cfg, err := config.LoadGlobal("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "workspace remove: %v\n", err)
+		return 1
+	}
+	exists := false
+	for _, workspace := range cfg.Workspaces {
+		if workspace.Path == absPath {
+			exists = true
+			break
+		}
+	}
 	if err := config.UnregisterWorkspace("", absPath); err != nil {
 		fmt.Fprintf(os.Stderr, "workspace remove: %v\n", err)
+		return 1
+	}
+	if !exists {
+		fmt.Fprintf(os.Stderr, "workspace remove: 未找到该路径（no-op）：%s\n", absPath)
 		return 1
 	}
 	fmt.Printf("已移除 Workspace：%s\n路径：%s\n", filepath.Base(absPath), absPath)
@@ -349,12 +382,12 @@ func printObserveUsage(w io.Writer) {
 
 func printWorkspaceCommandUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  mcpx workspace register <path> [--ttl 5m]")
+	fmt.Fprintln(w, "  mcpx workspace register [--ttl 5m] <path>")
 	fmt.Fprintln(w, "  mcpx workspace remove <path>")
 	fmt.Fprintln(w, "  mcpx workspace list")
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "Register (optionally with a lease TTL; expired leases are cleaned up), remove a")
-	fmt.Fprintln(w, "Workspace, or list registered Workspaces with their lease status.")
+	fmt.Fprintln(w, "Register (optionally with a lease TTL; flags precede the path, expired leases")
+	fmt.Fprintln(w, "are cleaned up), remove a Workspace, or list them with lease status.")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "For terminal observation, use:")
 	fmt.Fprintln(w, "  mcpx observe [flags] <workspace name>")
@@ -362,9 +395,10 @@ func printWorkspaceCommandUsage(w io.Writer) {
 
 func printWorkspaceRegisterUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  mcpx workspace register <path>")
+	fmt.Fprintln(w, "  mcpx workspace register [--ttl 5m] <path>")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Register or update a Workspace in the global config without starting the Runtime.")
+	fmt.Fprintln(w, "--ttl sets a lease duration; the entry expires unless renewed.")
 }
 
 func stdoutIsTTY() bool {

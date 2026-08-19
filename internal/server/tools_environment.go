@@ -35,7 +35,7 @@ func (r *Runtime) toolEnvironmentInspect(ctx context.Context, req *mcp.CallToolR
 		}
 		workspaceName, workspacePath = session.WorkspaceName, session.WorkspacePath
 	} else if workspaceName != "" {
-		workspace, ok := r.reg.Get(workspaceName)
+		workspace, ok := r.reg.Load().Get(workspaceName)
 		if !ok {
 			return r.remoteError(envReq, "", workspaceName, fmt.Errorf("%w: %q", errWorkspaceNotFound, workspaceName))
 		}

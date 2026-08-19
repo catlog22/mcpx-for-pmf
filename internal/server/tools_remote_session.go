@@ -133,7 +133,7 @@ func (r *Runtime) remoteError(envReq envelope.Request, remoteSessionID, workspac
 
 func (r *Runtime) createRemoteSession(ctx context.Context, principal auth.Principal, envReq envelope.Request, workspaceName string) (remotesession.CreateResult, error) {
 	workspaceName = strings.TrimSpace(workspaceName)
-	ws, ok := r.reg.Get(workspaceName)
+	ws, ok := r.reg.Load().Get(workspaceName)
 	if !ok {
 		return remotesession.CreateResult{}, fmt.Errorf("%w: %q", errWorkspaceNotFound, workspaceName)
 	}

@@ -283,6 +283,34 @@ func Effective(workspacePath string) (Config, error) {
 	return Merge(g, p), nil
 }
 
+// lockGlobal takes an exclusive advisory lock (~/.mcpx/config.yaml.lock) so
+// concurrent window heartbeats, CLI register/remove/list and runtime startup
+// do not interleave read-modify-write cycles on config.yaml. Stale locks
+// (older than 30s) are stolen; waits up to 10s before failing.
+func lockGlobal(globalPath string) (func(), error) {
+	lockPath := globalPath + ".lock"
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
+			_ = f.Close()
+			return func() { _ = os.Remove(lockPath) }, nil
+		}
+		if !os.IsExist(err) {
+			return nil, fmt.Errorf("create lock %s: %w", lockPath, err)
+		}
+		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > 30*time.Second {
+			_ = os.Remove(lockPath) // stale lock from a crashed process
+			continue
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("config lock busy: %s", lockPath)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // RegisterWorkspace appends or updates workspace in global config file (permanent).
 func RegisterWorkspace(globalPath, absPath string) error {
 	return RegisterWorkspaceWithTTL(globalPath, absPath, 0)
@@ -299,7 +327,12 @@ func RegisterWorkspaceWithTTL(globalPath, absPath string, ttl time.Duration) err
 			return err
 		}
 	}
-	absPath, err := filepath.Abs(absPath)
+	unlock, err := lockGlobal(globalPath)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	absPath, err = filepath.Abs(absPath)
 	if err != nil {
 		return err
 	}
@@ -315,7 +348,9 @@ func RegisterWorkspaceWithTTL(globalPath, absPath string, ttl time.Duration) err
 	}
 	found := false
 	for i := range cfg.Workspaces {
-		if cfg.Workspaces[i].Path == absPath || cfg.Workspaces[i].Name == name {
+		// Match by absolute path only: basename matching let same-named dirs
+		// hijack each other's entries and leases.
+		if cfg.Workspaces[i].Path == absPath {
 			cfg.Workspaces[i].Path = absPath
 			cfg.Workspaces[i].Name = name
 			cfg.Workspaces[i].ExpiresAt = expiresAt
@@ -343,7 +378,12 @@ func UnregisterWorkspace(globalPath, absPath string) error {
 			return err
 		}
 	}
-	absPath, err := filepath.Abs(absPath)
+	unlock, err := lockGlobal(globalPath)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	absPath, err = filepath.Abs(absPath)
 	if err != nil {
 		return err
 	}
@@ -372,6 +412,11 @@ func CleanupExpiredWorkspaces(globalPath string) (int, error) {
 			return 0, err
 		}
 	}
+	unlock, err := lockGlobal(globalPath)
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
 	cfg, err := LoadGlobal(globalPath)
 	if err != nil {
 		return 0, err
@@ -395,7 +440,10 @@ func CleanupExpiredWorkspaces(globalPath string) (int, error) {
 	return removed, nil
 }
 
-// WriteGlobal writes config YAML, creating parent dirs.
+// WriteGlobal writes config YAML atomically (temp file + rename), creating
+// parent dirs. Rename over an existing file is atomic on POSIX and Windows
+// (MoveFileEx REPLACE_EXISTING), so concurrent readers never see half-written
+// config.
 func WriteGlobal(path string, cfg Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -404,7 +452,12 @@ func WriteGlobal(path string, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	return os.Chmod(path, 0o600)

@@ -415,3 +415,35 @@ func TestRegisterWorkspaceWithTTLAndCleanup(t *testing.T) {
 		t.Fatalf("permanent entry removed: %d", removed)
 	}
 }
+
+func TestRegisterSameBasenameDifferentPaths(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MCPX_HOME", dir)
+	global := filepath.Join(dir, "config.yaml")
+	a := filepath.Join(dir, "proj", "shared") // same basename, different parents
+	b := filepath.Join(dir, "other", "shared")
+	for _, ws := range []string{a, b} {
+		if err := os.MkdirAll(ws, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := RegisterWorkspace(global, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterWorkspaceWithTTL(global, b, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadGlobal(global)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Workspaces) != 2 {
+		t.Fatalf("same-basename paths must not hijack each other: %+v", cfg.Workspaces)
+	}
+	if cfg.Workspaces[0].Path != a || cfg.Workspaces[0].ExpiresAt != nil {
+		t.Fatalf("entry A mutated: %+v", cfg.Workspaces[0])
+	}
+	if cfg.Workspaces[1].Path != b || cfg.Workspaces[1].ExpiresAt == nil {
+		t.Fatalf("entry B missing lease: %+v", cfg.Workspaces[1])
+	}
+}

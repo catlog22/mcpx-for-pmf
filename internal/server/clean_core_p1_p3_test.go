@@ -159,7 +159,7 @@ func TestCleanCoreMissingCommandUsesExecutionTaxonomy(t *testing.T) {
 func TestCleanCorePlanEvidenceAndArtifactWorkflow(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	rt.cfg.Security.Commands.Allow = append(rt.cfg.Security.Commands.Allow, `^sleep\b`)
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	path := filepath.Join(workspace.Path, "plan.txt")
 	if err := os.WriteFile(path, []byte("before\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -260,7 +260,7 @@ func TestCleanCorePlanEvidenceAndArtifactWorkflow(t *testing.T) {
 
 func TestCleanCoreSkillToolDoesNotRequirePublicRevisionTokens(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	rt.cfg.Discovery.Skills.Enabled = true
 	rt.cfg.Discovery.Skills.Dirs = []string{".skills"}
 	skillDir := filepath.Join(workspace.Path, ".skills", "docs")
@@ -308,7 +308,7 @@ func TestCleanCoreSkillToolDoesNotRequirePublicRevisionTokens(t *testing.T) {
 
 func TestSkillToolListValidationRiskConfirmationAndManifestRevision(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	rt.cfg.Discovery.Skills.Enabled = true
 	rt.cfg.Discovery.Skills.Dirs = []string{".skills"}
 	skillDir := filepath.Join(workspace.Path, ".skills", "publish")
@@ -407,7 +407,7 @@ arguments_schema:
 func TestCleanCoreMCPToolDoesNotRequirePublicRevisionTokens(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	rt.cfg.Discovery.MCP.Enabled = true
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	script := filepath.Join(t.TempDir(), "fake_mcp.py")
 	serverCode := `#!/usr/bin/env python3
 import json
@@ -494,7 +494,7 @@ for line in sys.stdin:
 func TestMCPToolContractCoversInventoryErrorsSchemaAndUpstreamFailure(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	rt.cfg.Discovery.MCP.Enabled = true
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	schemaPath := filepath.Join(t.TempDir(), "echo-schema.json")
 	if err := os.WriteFile(schemaPath, []byte(`{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -662,7 +662,7 @@ func TestDetachedExecutionOutcomeIsConsistentAcrossObserveAndAttach(t *testing.T
 		t.Skip("python3 unavailable")
 	}
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
 	remoteID := opened["remote_session_id"].(string)
 
