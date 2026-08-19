@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"mcpx/internal/config"
 	"mcpx/internal/observation"
@@ -32,6 +33,7 @@ type workspaceObserverOptions struct {
 
 type workspaceRegisterOptions struct {
 	Path string
+	TTL  time.Duration
 }
 
 func parseWorkspaceObserverArgs(args []string) (workspaceObserverOptions, error) {
@@ -74,13 +76,22 @@ func parseWorkspaceObserverArgs(args []string) (workspaceObserverOptions, error)
 func parseWorkspaceRegisterArgs(args []string) (workspaceRegisterOptions, error) {
 	fs := flag.NewFlagSet("workspace register", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	ttl := fs.String("ttl", "", "lease duration (e.g. 5m); entry expires unless the lease is renewed")
 	if err := fs.Parse(args); err != nil {
 		return workspaceRegisterOptions{}, err
 	}
 	if fs.NArg() != 1 || strings.TrimSpace(fs.Arg(0)) == "" {
 		return workspaceRegisterOptions{}, fmt.Errorf("workspace path is required")
 	}
-	return workspaceRegisterOptions{Path: strings.TrimSpace(fs.Arg(0))}, nil
+	options := workspaceRegisterOptions{Path: strings.TrimSpace(fs.Arg(0))}
+	if *ttl != "" {
+		parsed, err := time.ParseDuration(*ttl)
+		if err != nil {
+			return options, fmt.Errorf("invalid --ttl %q: %v", *ttl, err)
+		}
+		options.TTL = parsed
+	}
+	return options, nil
 }
 
 func runWorkspaceCommand(args []string) int {
@@ -88,15 +99,19 @@ func runWorkspaceCommand(args []string) int {
 		printWorkspaceCommandUsage(os.Stderr)
 		return 0
 	}
-	if args[0] != "register" && args[0] != "remove" {
+	if args[0] != "register" && args[0] != "remove" && args[0] != "list" {
 		fmt.Fprintf(os.Stderr, "workspace: unknown command %q\n", args[0])
 		printWorkspaceCommandUsage(os.Stderr)
 		return 2
 	}
-	if args[0] == "remove" {
+	switch args[0] {
+	case "remove":
 		return runWorkspaceRemove(args[1:])
+	case "list":
+		return runWorkspaceList(args[1:])
+	default:
+		return runWorkspaceRegister(args[1:])
 	}
-	return runWorkspaceRegister(args[1:])
 }
 
 func runWorkspaceRegister(args []string) int {
@@ -116,11 +131,42 @@ func runWorkspaceRegister(args []string) int {
 		fmt.Fprintf(os.Stderr, "workspace register: resolve path: %v\n", err)
 		return 1
 	}
-	if err := config.RegisterWorkspace("", absPath); err != nil {
+	if _, err := config.CleanupExpiredWorkspaces(""); err != nil {
+		fmt.Fprintf(os.Stderr, "workspace register: cleanup: %v\n", err)
+	}
+	if err := config.RegisterWorkspaceWithTTL("", absPath, options.TTL); err != nil {
 		fmt.Fprintf(os.Stderr, "workspace register: %v\n", err)
 		return 1
 	}
-	fmt.Printf("已注册 Workspace：%s\n路径：%s\n", filepath.Base(absPath), absPath)
+	lease := "永久"
+	if options.TTL > 0 {
+		lease = options.TTL.String()
+	}
+	fmt.Printf("已注册 Workspace：%s\n路径：%s\n租约：%s\n", filepath.Base(absPath), absPath, lease)
+	return 0
+}
+
+func runWorkspaceList(args []string) int {
+	removed, err := config.CleanupExpiredWorkspaces("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "workspace list: %v\n", err)
+		return 1
+	}
+	cfg, err := config.LoadGlobal("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "workspace list: %v\n", err)
+		return 1
+	}
+	for _, workspace := range cfg.Workspaces {
+		status := "active"
+		if workspace.ExpiresAt != nil {
+			status = fmt.Sprintf("lease %s（%s）", workspace.ExpiresAt.Format("2006-01-02 15:04"), time.Until(*workspace.ExpiresAt).Round(time.Second))
+		}
+		fmt.Printf("%s\t%s\t%s\n", workspace.Name, workspace.Path, status)
+	}
+	if removed > 0 {
+		fmt.Fprintf(os.Stderr, "已清理 %d 个过期 Workspace\n", removed)
+	}
 	return 0
 }
 
@@ -303,11 +349,12 @@ func printObserveUsage(w io.Writer) {
 
 func printWorkspaceCommandUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  mcpx workspace register <path>")
+	fmt.Fprintln(w, "  mcpx workspace register <path> [--ttl 5m]")
 	fmt.Fprintln(w, "  mcpx workspace remove <path>")
+	fmt.Fprintln(w, "  mcpx workspace list")
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "Register or update a Workspace in the global config without starting the Runtime;")
-	fmt.Fprintln(w, "remove deletes the matching entry.")
+	fmt.Fprintln(w, "Register (optionally with a lease TTL; expired leases are cleaned up), remove a")
+	fmt.Fprintln(w, "Workspace, or list registered Workspaces with their lease status.")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "For terminal observation, use:")
 	fmt.Fprintln(w, "  mcpx observe [flags] <workspace name>")

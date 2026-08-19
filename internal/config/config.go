@@ -1,5 +1,7 @@
 package config
 
+import "time"
+
 // Config is the Runtime YAML schema (global + project merge result).
 type Config struct {
 	Server     ServerConfig     `yaml:"server"`
@@ -117,9 +119,10 @@ type FileRules struct {
 }
 
 type WorkspaceEntry struct {
-	Name        string `yaml:"name"`
-	Path        string `yaml:"path"`
-	Description string `yaml:"description"`
+	Name        string     `yaml:"name"`
+	Path        string     `yaml:"path"`
+	Description string     `yaml:"description"`
+	ExpiresAt   *time.Time `yaml:"expires_at,omitempty"`
 }
 
 type TerminalConfig struct {

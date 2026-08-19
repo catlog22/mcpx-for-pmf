@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -352,5 +353,65 @@ func TestLoadMergedMCPRootOnly(t *testing.T) {
 	got, ok := merged.MCPServers["browser"]
 	if !ok || got.Command != "root-only" {
 		t.Fatalf("root .mcp.json not loaded: %+v", merged.MCPServers)
+	}
+}
+
+func TestRegisterWorkspaceWithTTLAndCleanup(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MCPX_HOME", dir)
+	global := filepath.Join(dir, "config.yaml")
+	ws := filepath.Join(dir, "leased-proj")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterWorkspaceWithTTL(global, ws, 50*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadGlobal(global)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Workspaces) != 1 || cfg.Workspaces[0].ExpiresAt == nil {
+		t.Fatalf("expected leased entry: %+v", cfg.Workspaces)
+	}
+	// renewing the lease keeps the entry alive past the first expiry
+	time.Sleep(60 * time.Millisecond)
+	if err := RegisterWorkspaceWithTTL(global, ws, 500*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := CleanupExpiredWorkspaces(global)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 0 {
+		t.Fatalf("renewed lease should survive: removed %d", removed)
+	}
+	// without renewal the entry expires and is cleaned up
+	time.Sleep(600 * time.Millisecond)
+	removed, err = CleanupExpiredWorkspaces(global)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("expected 1 expired lease removed, got %d", removed)
+	}
+	cfg, _ = LoadGlobal(global)
+	if len(cfg.Workspaces) != 0 {
+		t.Fatalf("workspaces after cleanup: %+v", cfg.Workspaces)
+	}
+	// permanent entries are never removed
+	perm := filepath.Join(dir, "perm-proj")
+	if err := os.MkdirAll(perm, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterWorkspace(global, perm); err != nil {
+		t.Fatal(err)
+	}
+	removed, err = CleanupExpiredWorkspaces(global)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 0 {
+		t.Fatalf("permanent entry removed: %d", removed)
 	}
 }

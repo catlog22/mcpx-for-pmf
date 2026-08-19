@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -282,8 +283,15 @@ func Effective(workspacePath string) (Config, error) {
 	return Merge(g, p), nil
 }
 
-// RegisterWorkspace appends or updates workspace in global config file.
+// RegisterWorkspace appends or updates workspace in global config file (permanent).
 func RegisterWorkspace(globalPath, absPath string) error {
+	return RegisterWorkspaceWithTTL(globalPath, absPath, 0)
+}
+
+// RegisterWorkspaceWithTTL registers a workspace with a lease. A positive ttl
+// sets expires_at = now + ttl so the entry becomes stale (and is cleaned up)
+// once the registering agent stops renewing the lease (heartbeat).
+func RegisterWorkspaceWithTTL(globalPath, absPath string, ttl time.Duration) error {
 	if globalPath == "" {
 		var err error
 		globalPath, err = GlobalConfigPath()
@@ -300,19 +308,26 @@ func RegisterWorkspace(globalPath, absPath string) error {
 		return err
 	}
 	name := filepath.Base(absPath)
+	var expiresAt *time.Time
+	if ttl > 0 {
+		at := time.Now().Add(ttl)
+		expiresAt = &at
+	}
 	found := false
 	for i := range cfg.Workspaces {
 		if cfg.Workspaces[i].Path == absPath || cfg.Workspaces[i].Name == name {
 			cfg.Workspaces[i].Path = absPath
 			cfg.Workspaces[i].Name = name
+			cfg.Workspaces[i].ExpiresAt = expiresAt
 			found = true
 			break
 		}
 	}
 	if !found {
 		cfg.Workspaces = append(cfg.Workspaces, WorkspaceEntry{
-			Name: name,
-			Path: absPath,
+			Name:      name,
+			Path:      absPath,
+			ExpiresAt: expiresAt,
 		})
 	}
 	return WriteGlobal(globalPath, cfg)
@@ -344,6 +359,40 @@ func UnregisterWorkspace(globalPath, absPath string) error {
 	}
 	cfg.Workspaces = kept
 	return WriteGlobal(globalPath, cfg)
+}
+
+// CleanupExpiredWorkspaces removes workspace entries whose lease (expires_at)
+// has passed. Permanent entries (no expires_at) are kept. Returns how many
+// entries were removed; unknown config path yields (0, nil).
+func CleanupExpiredWorkspaces(globalPath string) (int, error) {
+	if globalPath == "" {
+		var err error
+		globalPath, err = GlobalConfigPath()
+		if err != nil {
+			return 0, err
+		}
+	}
+	cfg, err := LoadGlobal(globalPath)
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now()
+	kept := cfg.Workspaces[:0]
+	removed := 0
+	for _, workspace := range cfg.Workspaces {
+		if workspace.ExpiresAt != nil && now.After(*workspace.ExpiresAt) {
+			removed++
+			continue
+		}
+		kept = append(kept, workspace)
+	}
+	if removed > 0 {
+		cfg.Workspaces = kept
+		if err := WriteGlobal(globalPath, cfg); err != nil {
+			return removed, err
+		}
+	}
+	return removed, nil
 }
 
 // WriteGlobal writes config YAML, creating parent dirs.

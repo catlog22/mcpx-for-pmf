@@ -142,6 +142,15 @@ func New(opts Options) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Drop workspace leases whose heartbeat stopped (window went offline).
+	if removed, cleanupErr := config.CleanupExpiredWorkspaces(globalPath); cleanupErr != nil {
+		return nil, fmt.Errorf("cleanup expired workspaces: %w", cleanupErr)
+	} else if removed > 0 {
+		fmt.Printf("[mcpx] cleaned %d expired workspace lease(s)\n", removed)
+		if cfg, err = config.LoadGlobal(globalPath); err != nil {
+			return nil, err
+		}
+	}
 	reg, err := workspace.NewRegistry(cfg.Workspaces)
 	if err != nil {
 		return nil, err
