@@ -30,7 +30,7 @@ func TestScreenshotResultIncludesImageContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registered, _ := rt.reg.Get("demo")
+	registered, _ := rt.reg.Load().Get("demo")
 	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
 		WorkspaceName: "demo", WorkspacePath: registered.Path,
 	})

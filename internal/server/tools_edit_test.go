@@ -21,7 +21,7 @@ import (
 
 func TestTooManyChangesResponseCarriesStructuredRecovery(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, ok := rt.reg.Get("demo")
+	workspace, ok := rt.reg.Load().Get("demo")
 	if !ok {
 		t.Fatal("demo workspace was not registered")
 	}
@@ -51,7 +51,7 @@ func TestTooManyChangesResponseCarriesStructuredRecovery(t *testing.T) {
 
 func TestStaleEditRecoveryIsExecutableReadRefresh(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	result, err := rt.editToolError(envelope.Request{RequestID: "req_stale"}, remotesession.Session{
 		ID: "session-1", WorkspaceName: "demo", WorkspacePath: workspace.Path,
 	}, &edit.ApplyError{Code: "STALE_REVISION", Path: "demo.go", Current: "sha256:current"})
@@ -75,7 +75,7 @@ func TestStaleEditRecoveryIsExecutableReadRefresh(t *testing.T) {
 
 func TestCleanCoreReadSupportsMixedFullAndWindowBatch(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, ok := rt.reg.Get("demo")
+	workspace, ok := rt.reg.Load().Get("demo")
 	if !ok {
 		t.Fatal("demo workspace missing")
 	}
@@ -125,7 +125,7 @@ func TestCleanCoreSessionDefaultsToOpenAndResumesSuppliedID(t *testing.T) {
 
 func TestCleanCoreEditAppliesIdempotentlyAndReportsStale(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	path := filepath.Join(workspace.Path, "edit.txt")
 	original := []byte("title: old\ncolor: red\n")
 	if err := os.WriteFile(path, original, 0o644); err != nil {
@@ -220,7 +220,7 @@ func TestCleanCoreObserveRejectsChangesView(t *testing.T) {
 
 func TestCleanCoreEditUsesContextualDiffForSmallChangeInLargeFile(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	lines := make([]string, 724)
 	for index := range lines {
 		lines[index] = fmt.Sprintf("line-%03d", index+1)
@@ -259,7 +259,7 @@ func TestCleanCoreEditUsesContextualDiffForSmallChangeInLargeFile(t *testing.T) 
 
 func TestCleanCoreEditBoundsLargeDiffAndPaginatesFullDiff(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	oldText := strings.Repeat("old-", 200) + "\n"
 	newText := strings.Repeat("new-", 200) + "\n"
 	old := strings.Repeat(oldText, 400)
@@ -330,7 +330,7 @@ func TestCleanCoreEditBoundsLargeDiffAndPaginatesFullDiff(t *testing.T) {
 
 func TestCleanCoreEditRejectsIdempotencyFingerprintConflict(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	path := filepath.Join(workspace.Path, "conflict.txt")
 	original := []byte("old\n")
 	if err := os.WriteFile(path, original, 0o644); err != nil {
@@ -358,7 +358,7 @@ func TestCleanCoreEditRejectsIdempotencyFingerprintConflict(t *testing.T) {
 
 func TestCleanCoreUTF16ReadEditRoundTripPreservesRawBytes(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	logical := "第一行\r\nemoji 😀\r\n第三行\r\n"
 	original := append([]byte{0xff, 0xfe}, encodeUTF16ForServerTest(logical, binary.LittleEndian)...)
 	path := filepath.Join(workspace.Path, "utf16-edit.txt")
@@ -418,7 +418,7 @@ func digestForTest(content []byte) string {
 
 func TestCleanEditApplyFalseNeverMutatesFilesystem(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	path := filepath.Join(workspace.Path, "dry-run.txt")
 	original := []byte("before\n")
 	if err := os.WriteFile(path, original, 0o600); err != nil {

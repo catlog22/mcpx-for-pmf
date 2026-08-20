@@ -121,7 +121,7 @@ func TestObservationAggregatesRemoteSessionLifecycleByWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registered, ok := rt.reg.Get("demo")
+	registered, ok := rt.reg.Load().Get("demo")
 	if !ok {
 		t.Fatal("workspace was not registered")
 	}
@@ -157,7 +157,7 @@ func TestObservationRecordsCleanEditWithFileDiff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registered, ok := rt.reg.Get("demo")
+	registered, ok := rt.reg.Load().Get("demo")
 	if !ok {
 		t.Fatal("workspace was not registered")
 	}
@@ -208,7 +208,7 @@ func TestObservationRecordsRuntimeTaskOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registered, ok := rt.reg.Get("demo")
+	registered, ok := rt.reg.Load().Get("demo")
 	if !ok {
 		t.Fatal("workspace was not registered")
 	}
@@ -282,7 +282,7 @@ func TestObservationRecordsCommandTaskRequestIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registered, ok := rt.reg.Get("demo")
+	registered, ok := rt.reg.Load().Get("demo")
 	if !ok {
 		t.Fatal("workspace was not registered")
 	}
@@ -337,7 +337,7 @@ func TestObservationSocketEndToEndDeliversToolEvents(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	socketPath := testObservationSocketPath(t)
 	rt.observerSocket = observation.NewSocketServer(socketPath, rt.observation.store, rt.observation.broker, func(name string) bool {
-		_, ok := rt.reg.Get(name)
+		_, ok := rt.reg.Load().Get(name)
 		return ok
 	})
 	if err := rt.observerSocket.Start(); err != nil {

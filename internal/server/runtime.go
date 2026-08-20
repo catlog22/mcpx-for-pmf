@@ -38,6 +38,7 @@ import (
 	"mcpx/internal/secrets"
 	"mcpx/internal/skill"
 	"mcpx/internal/state"
+	"mcpx/internal/tasks"
 	"mcpx/internal/terminal"
 	buildversion "mcpx/internal/version"
 	"mcpx/internal/workspace"
@@ -54,35 +55,38 @@ type Options struct {
 
 // Runtime is the MCPX process root.
 type Runtime struct {
-	opts            Options
-	cfg             config.Config
-	reg             atomic.Pointer[workspace.Registry]
-	approvals       *approval.Store
-	audit           *audit.Logger
-	globalCfgPath   string
-	tasks           *terminal.TaskManager
-	secrets         *secrets.Store
-	oauth           *oauth.Server
-	state           *state.Store
-	remote          *remotesession.Service
-	environment     *environment.Service
-	workspaceDiff   *workspacechanges.Service
-	fileSnapshots   *filesnapshot.Store
-	artifacts       *artifact.Service
-	plans           *plan.Service
-	deletions       *deletion.Store
-	retention       *state.RetentionService
-	retentionCancel context.CancelFunc
-	retentionDone   chan struct{}
+	opts          Options
+	cfg           config.Config
+	reg           atomic.Pointer[workspace.Registry]
+	approvals     *approval.Store
+	audit         *audit.Logger
+	globalCfgPath string
+	tasks         *terminal.TaskManager
+	// delegated is the file-backed registry of tasks dispatched to remote Pi
+	// windows (named to avoid clashing with the terminal TaskManager above).
+	delegated        *tasks.Registry
+	secrets          *secrets.Store
+	oauth            *oauth.Server
+	state            *state.Store
+	remote           *remotesession.Service
+	environment      *environment.Service
+	workspaceDiff    *workspacechanges.Service
+	fileSnapshots    *filesnapshot.Store
+	artifacts        *artifact.Service
+	plans            *plan.Service
+	deletions        *deletion.Store
+	retention        *state.RetentionService
+	retentionCancel  context.CancelFunc
+	retentionDone    chan struct{}
 	leaseSweepCancel context.CancelFunc
 	leaseSweepDone   chan struct{}
-	screenshot      screenCapturer
-	observation     *observationBridge
-	operations      *operation.Service
-	observerSocket  *observation.SocketServer
-	activityMu      sync.Mutex
-	closeOnce       sync.Once
-	closeErr        error
+	screenshot       screenCapturer
+	observation      *observationBridge
+	operations       *operation.Service
+	observerSocket   *observation.SocketServer
+	activityMu       sync.Mutex
+	closeOnce        sync.Once
+	closeErr         error
 
 	// For schema revision and capability catalog.
 	toolIndex    map[string]mcp.Tool
@@ -215,6 +219,7 @@ func New(opts Options) (*Runtime, error) {
 		audit:          logger,
 		globalCfgPath:  globalPath,
 		tasks:          taskManager,
+		delegated:      tasks.NewRegistry(home),
 		secrets:        secrets.NewPersistentStore(stateStore.DB()),
 		oauth:          oauthSrv,
 		state:          stateStore,

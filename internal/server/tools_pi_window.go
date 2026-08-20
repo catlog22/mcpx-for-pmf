@@ -21,7 +21,9 @@ import (
 	"mcpx/internal/auth"
 	"mcpx/internal/config"
 	"mcpx/internal/envelope"
+	"mcpx/internal/logging"
 	"mcpx/internal/remotesession"
+	"mcpx/internal/tasks"
 )
 
 // pi_window delivers tasks to already-running Pi agent windows through the
@@ -147,41 +149,41 @@ func (s *piOwnerSnapshot) valid() bool {
 
 // piPeerCommand mirrors WorkspacePeerCommand from the pi plugin.
 type piPeerCommand struct {
-	Version            int    `json:"version"`
-	Kind               string `json:"kind"`
-	WorkspaceID        string `json:"workspaceId"`
-	CommandID          string `json:"commandId"`
-	FromOwnerID        string `json:"fromOwnerId"`
-	FromOwnerNonce     string `json:"fromOwnerNonce"`
-	ToOwnerID          string `json:"toOwnerId"`
-	ToOwnerNonce       string `json:"toOwnerNonce"`
-	TargetCorrelation  string `json:"targetCorrelationId"`
-	Action             string `json:"action"`
-	Message            string `json:"message"`
-	Source             string `json:"source"`
-	MessageKind        string `json:"messageKind"`
-	ReplyTo            string `json:"replyTo"`
-	FromSessionName    string `json:"fromSessionName"`
-	CreatedAt          int64  `json:"createdAt"`
-	ExpiresAt          int64  `json:"expiresAt"`
+	Version           int    `json:"version"`
+	Kind              string `json:"kind"`
+	WorkspaceID       string `json:"workspaceId"`
+	CommandID         string `json:"commandId"`
+	FromOwnerID       string `json:"fromOwnerId"`
+	FromOwnerNonce    string `json:"fromOwnerNonce"`
+	ToOwnerID         string `json:"toOwnerId"`
+	ToOwnerNonce      string `json:"toOwnerNonce"`
+	TargetCorrelation string `json:"targetCorrelationId"`
+	Action            string `json:"action"`
+	Message           string `json:"message"`
+	Source            string `json:"source"`
+	MessageKind       string `json:"messageKind"`
+	ReplyTo           string `json:"replyTo"`
+	FromSessionName   string `json:"fromSessionName"`
+	CreatedAt         int64  `json:"createdAt"`
+	ExpiresAt         int64  `json:"expiresAt"`
 }
 
 type piPeerCommandResponse struct {
-	Version       int    `json:"version"`
-	Kind          string `json:"kind"`
-	WorkspaceID   string `json:"workspaceId"`
-	CommandID     string `json:"commandId"`
-	FromOwnerID   string `json:"fromOwnerId"`
-	FromOwnerNonce string `json:"fromOwnerNonce"`
-	ToOwnerID     string `json:"toOwnerId"`
-	ToOwnerNonce  string `json:"toOwnerNonce"`
+	Version           int    `json:"version"`
+	Kind              string `json:"kind"`
+	WorkspaceID       string `json:"workspaceId"`
+	CommandID         string `json:"commandId"`
+	FromOwnerID       string `json:"fromOwnerId"`
+	FromOwnerNonce    string `json:"fromOwnerNonce"`
+	ToOwnerID         string `json:"toOwnerId"`
+	ToOwnerNonce      string `json:"toOwnerNonce"`
 	TargetCorrelation string `json:"targetCorrelationId"`
-	Status        string `json:"status"`
-	Message       string `json:"message,omitempty"`
-	EffectiveAction string `json:"effectiveAction,omitempty"`
-	DeliveryStage string `json:"deliveryStage,omitempty"`
-	RespondedAt   int64  `json:"respondedAt"`
-	ExpiresAt     int64  `json:"expiresAt"`
+	Status            string `json:"status"`
+	Message           string `json:"message,omitempty"`
+	EffectiveAction   string `json:"effectiveAction,omitempty"`
+	DeliveryStage     string `json:"deliveryStage,omitempty"`
+	RespondedAt       int64  `json:"respondedAt"`
+	ExpiresAt         int64  `json:"expiresAt"`
 }
 
 func (r *piPeerCommandResponse) valid() bool {
@@ -191,14 +193,14 @@ func (r *piPeerCommandResponse) valid() bool {
 
 // piWindowListing is the model-visible window entry.
 type piWindowListing struct {
-	DisplayName    string `json:"display_name"`
-	SessionName    string `json:"session_name,omitempty"`
-	Target         string `json:"target"`
-	OwnerID        string `json:"owner_id"`
-	PID            int    `json:"pid"`
-	PublishedAt    int64  `json:"published_at"`
-	AgentCount     int    `json:"agent_count"`
-	ContextPressure *int  `json:"context_pressure,omitempty"`
+	DisplayName     string `json:"display_name"`
+	SessionName     string `json:"session_name,omitempty"`
+	Target          string `json:"target"`
+	OwnerID         string `json:"owner_id"`
+	PID             int    `json:"pid"`
+	PublishedAt     int64  `json:"published_at"`
+	AgentCount      int    `json:"agent_count"`
+	ContextPressure *int   `json:"context_pressure,omitempty"`
 }
 
 func piWindowDisplayName(sessionName, ownerID string) string {
@@ -294,12 +296,13 @@ func resolvePiWindow(snapshots []piOwnerSnapshot, selector string) (*piOwnerSnap
 }
 
 // deliverPiWindowCommand writes the command file and waits for the response.
-func deliverPiWindowCommand(workspacePath string, target piOwnerSnapshot, identity piPeerIdentity, action, message string, wait time.Duration) (piPeerCommand, *piPeerCommandResponse, error) {
+// The caller supplies the command ID so wrappers (task_delegate) can bind it
+// to their own identifiers before delivery.
+func deliverPiWindowCommand(workspacePath string, target piOwnerSnapshot, identity piPeerIdentity, commandID, action, message string, wait time.Duration) (piPeerCommand, *piPeerCommandResponse, error) {
 	root, err := resolvePiPeerRuntimeRoot(workspacePath)
 	if err != nil {
 		return piPeerCommand{}, nil, err
 	}
-	commandID := randomPiHexID()
 	now := time.Now().UnixMilli()
 	command := piPeerCommand{
 		Version: piPeerProtocolVersion, Kind: "command",
@@ -307,7 +310,7 @@ func deliverPiWindowCommand(workspacePath string, target piOwnerSnapshot, identi
 		FromOwnerID: identity.OwnerID, FromOwnerNonce: identity.OwnerNonce,
 		ToOwnerID: target.OwnerID, ToOwnerNonce: target.OwnerNonce,
 		TargetCorrelation: piPeerWindowMainSession,
-		Action: action, Message: message,
+		Action:            action, Message: message,
 		Source: piPeerMessageSource, MessageKind: piPeerMessageKindRequest,
 		ReplyTo: "owner:" + identity.OwnerID, FromSessionName: "mcpx",
 		CreatedAt: now, ExpiresAt: now + piPeerCommandTTL.Milliseconds(),
@@ -384,9 +387,55 @@ func (r *Runtime) toolPiWindow(ctx context.Context, req *mcp.CallToolRequest) (*
 
 func (r *Runtime) piWindowSend(ctx context.Context, envReq envelope.Request, principal auth.Principal, remote remotesession.Session,
 	snapshots []piOwnerSnapshot, listings []piWindowListing, now time.Time) (*mcp.CallToolResult, error) {
+	return r.deliverPiWindow(ctx, envReq, principal, remote, snapshots, listings, now, piSendOptions{})
+}
+
+// piSendOptions parameterizes the shared confirmation + delivery flow used by
+// pi_window send and task_delegate. The zero value reproduces plain pi_window
+// send semantics.
+type piSendOptions struct {
+	// toolName labels approval entries, audit events and retry hints.
+	// Defaults to "pi_window".
+	toolName string
+	// commandID pre-generates the peer command ID; when empty one is
+	// generated at delivery time. task_delegate sets it so the delegated
+	// task_id and the peer commandID are identical.
+	commandID string
+	// deliveryMessage overrides the payload message delivered to the window
+	// (task_delegate appends its result-writeback instruction). Empty uses
+	// the payload "message".
+	deliveryMessage string
+	// digestMessage is the message bound to the confirmation digest and shown
+	// in confirmation/retry payloads; empty falls back to deliveryMessage.
+	// task_delegate keeps the user-facing original message here so the
+	// confirmation digest stays stable across the user_confirmed retry even
+	// though the delivered message carries a fresh per-attempt task_id.
+	digestMessage string
+	// extraData is merged into the delivery success data.
+	extraData map[string]any
+	// confirmationNote is an additional note rendered in the confirmation
+	// payload.
+	confirmationNote string
+}
+
+// deliverPiWindow is the shared send flow: window resolution, confirmation
+// gate, peer delivery, approval consumption and delegated-task registration.
+func (r *Runtime) deliverPiWindow(ctx context.Context, envReq envelope.Request, principal auth.Principal, remote remotesession.Session,
+	snapshots []piOwnerSnapshot, listings []piWindowListing, now time.Time, opts piSendOptions) (*mcp.CallToolResult, error) {
+	toolName := opts.toolName
+	if toolName == "" {
+		toolName = "pi_window"
+	}
 	purpose := strings.TrimSpace(envReq.Intent)
 	selector := strings.TrimSpace(stringPayload(envReq.Payload, "window"))
-	message := stringPayload(envReq.Payload, "message")
+	message := opts.deliveryMessage
+	if message == "" {
+		message = stringPayload(envReq.Payload, "message")
+	}
+	digestMessage := opts.digestMessage
+	if digestMessage == "" {
+		digestMessage = message
+	}
 	action := strings.TrimSpace(stringPayload(envReq.Payload, "mode"))
 	if action == "" {
 		// Default to steer: inject into the target window's current turn so the
@@ -427,18 +476,26 @@ func (r *Runtime) piWindowSend(ctx context.Context, envReq envelope.Request, pri
 	}
 
 	// Confirmation gate: dispatch to a user's window is always user-confirmed.
-	digest := piWindowDigest(remote.ID, remote.WorkspaceName, target.OwnerID, action, message, purpose)
+	// The digest binds the user-facing message (task_delegate's per-attempt
+	// task_id lives only in the delivered message).
+	digest := piWindowDigest(remote.ID, remote.WorkspaceName, target.OwnerID, action, digestMessage, purpose)
 	userConfirmed := boolPayload(envReq.Payload, "user_confirmed")
-	pending, pendingOK := r.piWindowPendingConfirmation(remote.ID, principal.ID, digest)
+	pending, pendingOK := r.piWindowPendingConfirmation(toolName, remote.ID, principal.ID, digest)
 	if !userConfirmed || !pendingOK {
 		if !pendingOK {
+			contentKey := cleanCommandConfirmationContentKey(principal.ID, digest)
+			if toolName != "pi_window" {
+				// Scope the dedup key so a same-message pi_window pending is
+				// never folded onto a task_delegate confirmation (or back).
+				contentKey += "\x00" + toolName
+			}
 			var confirmationErr error
 			pending, confirmationErr = r.approvals.PutPending(approval.Pending{
-				Tool: "pi_window", Summary: fmt.Sprintf("dispatch to window %s: %s", target.OwnerID[:8], truncateRunes(message, 120)),
+				Tool: toolName, Summary: fmt.Sprintf("dispatch to window %s: %s", target.OwnerID[:8], truncateRunes(digestMessage, 120)),
 				Command: digest, CommandDigest: digest, Purpose: purpose, Scope: "workspace",
 				WorkDir: remote.WorkspacePath, RequestID: envReq.RequestID, Workspace: remote.WorkspaceName,
 				RemoteSessionID: remote.ID, PrincipalID: principal.ID,
-				ContentKey: cleanCommandConfirmationContentKey(principal.ID, digest),
+				ContentKey: contentKey,
 			})
 			if confirmationErr != nil {
 				return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "confirmation_store_error", confirmationErr.Error())
@@ -446,16 +503,19 @@ func (r *Runtime) piWindowSend(ctx context.Context, envReq envelope.Request, pri
 		}
 		confirmationData := map[string]any{
 			"window": piWindowDisplayName(target.SessionName, target.OwnerID), "owner_id": target.OwnerID,
-			"action": action, "message": truncateRunes(message, 400),
+			"action": action, "message": truncateRunes(digestMessage, 400),
 			"pending_digest": digest, "confirmation_required": true, "user_confirmed_required": true,
 			"summary": "将任务委派到 Pi 窗口前需要用户确认；请向用户展示目标窗口与消息摘要，确认后将 user_confirmed=true 原样重试。",
+		}
+		if opts.confirmationNote != "" {
+			confirmationData["note"] = opts.confirmationNote
 		}
 		response := envelope.Fail(envelope.StatusNeedConfirmation, envReq.RequestID, remote.WorkspaceName,
 			confirmationData, "USER_CONFIRMATION_REQUIRED", "Pi 窗口任务派发等待用户语义确认")
 		response.RemoteSessionID = remote.ID
-		addRecoveryAction(&response, "pi_window", "用户确认后使用相同 window、message、purpose 和 remote_session_id 重试，并设置 user_confirmed=true", map[string]any{
+		addRecoveryAction(&response, toolName, "用户确认后使用相同 window、message、purpose 和 remote_session_id 重试，并设置 user_confirmed=true", map[string]any{
 			"remote_session_id": remote.ID, "action": "send", "window": selector,
-			"message": message, "purpose": purpose, "user_confirmed": true,
+			"message": digestMessage, "purpose": purpose, "user_confirmed": true,
 			"plan_id": planID, "plan_task_id": planTaskID, "wait_time_ms": waitMs,
 		})
 		return r.resultJSON(response)
@@ -465,7 +525,11 @@ func (r *Runtime) piWindowSend(ctx context.Context, envReq envelope.Request, pri
 	if err != nil {
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "peer_identity_error", err.Error())
 	}
-	command, response, err := deliverPiWindowCommand(remote.WorkspacePath, *target, identity, action, message, time.Duration(waitMs)*time.Millisecond)
+	commandID := opts.commandID
+	if commandID == "" {
+		commandID = randomPiHexID()
+	}
+	command, response, err := deliverPiWindowCommand(remote.WorkspacePath, *target, identity, commandID, action, message, time.Duration(waitMs)*time.Millisecond)
 	if err != nil {
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "peer_delivery_error", err.Error())
 	}
@@ -473,10 +537,35 @@ func (r *Runtime) piWindowSend(ctx context.Context, envReq envelope.Request, pri
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "confirmation_state_error", "confirmed pi_window approval could not be consumed")
 	}
 
+	// Delivery succeeded (the command file carries the durable commandID):
+	// record the delegation so task_result_view can track it. A registry
+	// write failure must not fail an already-delivered dispatch.
+	deliveredAt := time.Now().UTC()
+	if err := r.delegated.Put(tasks.DelegatedTask{
+		TaskID:          command.CommandID,
+		RemoteSessionID: remote.ID,
+		Workspace:       remote.WorkspaceName,
+		TargetOwnerID:   target.OwnerID,
+		SpawnPID:        target.PID,
+		Action:          action,
+		Message:         message,
+		Purpose:         purpose,
+		Status:          tasks.StatusDelivered,
+		CreatedAt:       deliveredAt,
+		DeliveredAt:     &deliveredAt,
+	}); err != nil {
+		logging.With("component", "delegated_tasks").Error("register delegated task failed",
+			"task_id", command.CommandID, "remote_session_id", remote.ID, "err", err)
+	}
+
 	data := map[string]any{
-		"command_id": command.CommandID, "window": piWindowDisplayName(target.SessionName, target.OwnerID),
+		"command_id": command.CommandID, "task_id": command.CommandID,
+		"window":   piWindowDisplayName(target.SessionName, target.OwnerID),
 		"owner_id": target.OwnerID, "action": command.Action, "message_kind": command.MessageKind,
 		"expires_at": command.ExpiresAt,
+	}
+	for key, value := range opts.extraData {
+		data[key] = value
 	}
 	if response != nil {
 		data["delivery"] = response.Status
@@ -506,7 +595,7 @@ func (r *Runtime) piWindowSend(ctx context.Context, envReq envelope.Request, pri
 					}
 				}
 			}
-			r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "pi_window", Status: "ok", Detail: map[string]any{
+			r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: toolName, Status: "ok", Detail: map[string]any{
 				"command_id": command.CommandID, "owner_id": target.OwnerID, "action": command.Action, "plan_task_id": planTaskID,
 			}})
 			return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, data)
@@ -517,9 +606,9 @@ func (r *Runtime) piWindowSend(ctx context.Context, envReq envelope.Request, pri
 	}
 	data["delivered"] = false
 	data["delivery"] = "pending"
-	data["next_action"] = nextAction("pi_window", map[string]any{
+	data["next_action"] = nextAction(toolName, map[string]any{
 		"remote_session_id": remote.ID, "action": "send", "window": target.OwnerID,
-		"message": message, "user_confirmed": true, "wait_time_ms": waitMs,
+		"message": digestMessage, "user_confirmed": true, "wait_time_ms": waitMs,
 	})
 	return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, data)
 }
@@ -532,12 +621,12 @@ func piWindowDigest(remoteSessionID, workspace, ownerID, action, message, purpos
 	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
-// piWindowPendingConfirmation finds the pending pi_window approval for the
-// exact digest (the shared pendingCommandConfirmation helper is bound to the
-// command_execute tool).
-func (r *Runtime) piWindowPendingConfirmation(remoteSessionID, principalID, digest string) (approval.Pending, bool) {
+// piWindowPendingConfirmation finds the pending approval recorded under
+// toolName for the exact digest (the shared pendingCommandConfirmation helper
+// is bound to the command_execute tool).
+func (r *Runtime) piWindowPendingConfirmation(toolName, remoteSessionID, principalID, digest string) (approval.Pending, bool) {
 	for _, pending := range r.approvals.ListRemoteSession(remoteSessionID) {
-		if pending.Tool == "pi_window" && pending.PrincipalID == principalID &&
+		if pending.Tool == toolName && pending.PrincipalID == principalID &&
 			pending.Command == digest && pending.CommandDigest == digest {
 			return pending, true
 		}

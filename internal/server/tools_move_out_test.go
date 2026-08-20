@@ -82,7 +82,7 @@ mv "$last" "$MCPX_TEST_TRASH/$name"`)
 func TestMoveOutPrepareAndCommitAtomicallyMovesDirectoryWithoutScanningDescendants(t *testing.T) {
 	trashDir := installMoveOutTrashMocks(t, "linux")
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	directory := filepath.Join(workspace.Path, "move-tree")
 	outside := filepath.Join(t.TempDir(), "outside-target.txt")
 	if err := os.MkdirAll(filepath.Join(directory, "nested"), 0o755); err != nil {
@@ -182,7 +182,7 @@ func TestMoveOutPrepareAndCommitAtomicallyMovesDirectoryWithoutScanningDescendan
 
 func TestMoveOutRejectsStalePreviewAndPathEscapeWithoutMutation(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	path := filepath.Join(workspace.Path, "stale-move.txt")
 	if err := os.WriteFile(path, []byte("before\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -234,7 +234,7 @@ func TestCommitMoveOutManifestUsesSystemTrashAcrossPlatforms(t *testing.T) {
 		t.Run(testCase.platform, func(t *testing.T) {
 			trashDir := installMoveOutTrashMocks(t, testCase.platform)
 			rt := newWorkspaceRuntime(t, "demo")
-			workspace, _ := rt.reg.Get("demo")
+			workspace, _ := rt.reg.Load().Get("demo")
 			name := "platform-trash-" + testCase.platform + ".txt"
 			content := []byte(testCase.platform + "\n")
 			path := filepath.Join(workspace.Path, name)
@@ -285,7 +285,7 @@ func TestCommitMoveOutManifestLinuxFallbackWritesFreeDesktopTrashInfo(t *testing
 	t.Setenv("XDG_DATA_HOME", dataHome)
 
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	name := "fallback trash %.txt"
 	content := []byte("fallback\n")
 	path := filepath.Join(workspace.Path, name)
@@ -341,7 +341,7 @@ func TestCommitMoveOutManifestLinuxFallbackWritesFreeDesktopTrashInfo(t *testing
 func TestMoveOutMovesSymlinkEntryWithoutFollowingTarget(t *testing.T) {
 	trashDir := installMoveOutTrashMocks(t, "linux")
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	outside := filepath.Join(t.TempDir(), "external.txt")
 	if err := os.WriteFile(outside, []byte("preserve\n"), 0o600); err != nil {
 		t.Fatal(err)

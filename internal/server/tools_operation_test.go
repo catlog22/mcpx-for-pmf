@@ -21,7 +21,7 @@ func operationTestSession(t *testing.T, rt *Runtime, workspace string) remoteses
 	if err != nil {
 		t.Fatal(err)
 	}
-	registered, ok := rt.reg.Get(workspace)
+	registered, ok := rt.reg.Load().Get(workspace)
 	if !ok {
 		t.Fatalf("workspace %q was not registered", workspace)
 	}

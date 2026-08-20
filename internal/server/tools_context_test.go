@@ -10,7 +10,7 @@ import (
 
 func TestReadPathsAreHardScope(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, ok := rt.reg.Get("demo")
+	workspace, ok := rt.reg.Load().Get("demo")
 	if !ok {
 		t.Fatal("demo workspace was not registered")
 	}

@@ -37,7 +37,7 @@ func TestReadCanonicalizesUniquelyImpliedView(t *testing.T) {
 
 func TestReadWithoutViewExecutesWhenViewIsInferable(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	if err := os.WriteFile(filepath.Join(workspace.Path, "inferred.txt"), []byte("ok\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestReadPublicSchemaDoesNotRequireView(t *testing.T) {
 
 func TestReadSearchAndContextReturnRevisionByDefault(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	if err := os.WriteFile(filepath.Join(workspace.Path, "revision.txt"), []byte("alpha needle omega\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

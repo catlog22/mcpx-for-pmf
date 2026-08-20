@@ -83,7 +83,7 @@ func TestDeliverPiWindowCommandWritesProtocolFile(t *testing.T) {
 			OwnerID: strings.Repeat("1", 32), OwnerNonce: strings.Repeat("b", 32),
 		}
 		identity := piPeerIdentity{OwnerID: strings.Repeat("f", 32), OwnerNonce: strings.Repeat("e", 32)}
-		command, response, err := deliverPiWindowCommand("D:/fake", target, identity, "steer", "do the thing", 100*time.Millisecond)
+		command, response, err := deliverPiWindowCommand("D:/fake", target, identity, strings.Repeat("7", 32), "steer", "do the thing", 100*time.Millisecond)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -123,7 +123,7 @@ func TestDeliverPiWindowCommandReadsResponse(t *testing.T) {
 			OwnerID: strings.Repeat("1", 32), OwnerNonce: strings.Repeat("b", 32),
 		}
 		identity := piPeerIdentity{OwnerID: strings.Repeat("f", 32), OwnerNonce: strings.Repeat("e", 32)}
-		command, _, err := deliverPiWindowCommand("D:/fake", target, identity, "follow_up", "hi", 100*time.Millisecond)
+		command, _, err := deliverPiWindowCommand("D:/fake", target, identity, strings.Repeat("8", 32), "follow_up", "hi", 100*time.Millisecond)
 		if err != nil {
 			t.Fatal(err)
 		}

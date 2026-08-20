@@ -51,7 +51,7 @@ func clientProtocolRevision() string { return hashRevision(clientProtocolCapabil
 
 func capabilityGroups() map[string][]string {
 	return map[string][]string{
-		"core":    {"workspace", "session", "read", "edit", "move_out", "observe", "progress", "execute", "plan", "pi_execute", "pi_window", "artifact", "skill_tool", "mcp_tool"},
+		"core":    {"workspace", "session", "read", "edit", "move_out", "observe", "progress", "execute", "plan", "pi_execute", "pi_window", "task_delegate", "task_spawn", "task_result_view", "artifact", "skill_tool", "mcp_tool"},
 		"support": {"operation_batch", "operation_manage", "runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide"},
 	}
 }
@@ -80,6 +80,9 @@ var toolCapabilityDefinitions = []toolCapabilityDefinition{
 	{Name: "execute", Domain: "command", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "terminal"},
 	{Name: "pi_execute", Domain: "command", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "terminal"},
 	{Name: "pi_window", Domain: "command", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+	{Name: "task_delegate", Domain: "command", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+	{Name: "task_spawn", Domain: "command", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+	{Name: "task_result_view", Domain: "observation", RequiresRemoteSession: true},
 	{Name: "plan", Domain: "plan", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "artifact", Domain: "artifact", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "skill_tool", Domain: "extension", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "skills"},

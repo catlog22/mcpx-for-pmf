@@ -20,7 +20,7 @@ func openCompoundCommandSession(t *testing.T, rt *Runtime) (string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registered, ok := rt.reg.Get("demo")
+	registered, ok := rt.reg.Load().Get("demo")
 	if !ok {
 		t.Fatal("demo workspace was not registered")
 	}

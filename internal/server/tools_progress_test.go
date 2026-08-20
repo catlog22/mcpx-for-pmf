@@ -21,7 +21,7 @@ func TestProgressRecordsPauseStateAndPreviousResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registered, ok := rt.reg.Get("demo")
+	registered, ok := rt.reg.Load().Get("demo")
 	if !ok {
 		t.Fatal("workspace was not registered")
 	}
@@ -81,7 +81,7 @@ func TestProgressAcceptsTerminalFailedStateAndRestoresLatestModelState(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	registered, ok := rt.reg.Get("demo")
+	registered, ok := rt.reg.Load().Get("demo")
 	if !ok {
 		t.Fatal("workspace was not registered")
 	}
@@ -131,7 +131,7 @@ func TestProgressAllowsResultUpToConfiguredLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registered, ok := rt.reg.Get("demo")
+	registered, ok := rt.reg.Load().Get("demo")
 	if !ok {
 		t.Fatal("workspace was not registered")
 	}
@@ -169,7 +169,7 @@ func TestProgressRejectsLegacyFieldShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registered, _ := rt.reg.Get("demo")
+	registered, _ := rt.reg.Load().Get("demo")
 	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{WorkspaceName: "demo", WorkspacePath: registered.Path})
 	if err != nil {
 		t.Fatal(err)

@@ -412,14 +412,14 @@ func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server) {
 
 	piExecuteCommon := map[string]any{
 		"remote_session_id": remoteSession, "purpose": stringSchema("本次 Pi 委派的用户目标"),
-		"prompt":            stringSchema(fmt.Sprintf("委派给本地 Pi Agent 的任务指令；默认 companion 式直接执行，最大 %d 字节", maxPiPromptBytes)),
-		"plan_id":           stringSchema("关联的 Plan ID（可选；与 plan_task_id 成对提供）"),
-		"plan_task_id":      stringSchema("关联的 Plan Task ID（可选）；执行成功后自动 complete_task，失败自动 block_task，均记录 execute 证据"),
-		"model":             stringSchema("Pi 模型选择（可选；省略使用 Pi 全局配置）"),
-		"system":            stringSchema("附加系统提示注入（--append-system-prompt）；用于携带计划上下文、约束或背景（可选）"),
-		"yield_time_ms":     numberSchema("内联等待毫秒数；超时返回 execution_task_id 供 execute attach 延续"),
-		"timeout_seconds":   numberSchema("Pi 进程硬超时秒数"),
-		"user_confirmed":    booleanSchema("用户已确认本次委派；服务端仍会校验待确认摘要"),
+		"prompt":          stringSchema(fmt.Sprintf("委派给本地 Pi Agent 的任务指令；默认 companion 式直接执行，最大 %d 字节", maxPiPromptBytes)),
+		"plan_id":         stringSchema("关联的 Plan ID（可选；与 plan_task_id 成对提供）"),
+		"plan_task_id":    stringSchema("关联的 Plan Task ID（可选）；执行成功后自动 complete_task，失败自动 block_task，均记录 execute 证据"),
+		"model":           stringSchema("Pi 模型选择（可选；省略使用 Pi 全局配置）"),
+		"system":          stringSchema("附加系统提示注入（--append-system-prompt）；用于携带计划上下文、约束或背景（可选）"),
+		"yield_time_ms":   numberSchema("内联等待毫秒数；超时返回 execution_task_id 供 execute attach 延续"),
+		"timeout_seconds": numberSchema("Pi 进程硬超时秒数"),
+		"user_confirmed":  booleanSchema("用户已确认本次委派；服务端仍会校验待确认摘要"),
 	}
 	r.addTool(s, cleanActionTool("pi_execute", toolDesc["pi_execute"], piExecuteCommon, map[string]actionSchemaBranch{
 		"run": {Description: "将任务委派给本地 Pi Agent 执行；进程经执行 Task 持久化，可通过 execute attach/stop 延续。", Properties: map[string]any{}, Required: []string{"remote_session_id", "purpose", "prompt"}},
@@ -427,18 +427,40 @@ func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server) {
 
 	piWindowCommon := map[string]any{
 		"remote_session_id": remoteSession, "purpose": stringSchema("本次 Pi 窗口操作的用户目标"),
-		"window": stringSchema("目标 Pi 窗口：display_name、owner_id 或唯一前缀（send 用）"),
-		"message": stringSchema(fmt.Sprintf("委派给 Pi 窗口的任务消息；最大 %d 字节，不允许控制字符", piPeerMaxCommandBytes)),
-		"mode": enumSchema("投递模式；steer 注入当前 turn（默认），follow_up 排队", "steer", "follow_up"),
-		"plan_id": stringSchema("关联的 Plan ID（可选；与 plan_task_id 成对提供）"),
-		"plan_task_id": stringSchema("关联的 Plan Task ID（可选）；投递被接受后自动推进为 in_progress"),
-		"wait_time_ms": numberSchema("等待窗口回执的毫秒数；默认 30000，最大 120000"),
+		"window":         stringSchema("目标 Pi 窗口：display_name、owner_id 或唯一前缀（send 用）"),
+		"message":        stringSchema(fmt.Sprintf("委派给 Pi 窗口的任务消息；最大 %d 字节，不允许控制字符", piPeerMaxCommandBytes)),
+		"mode":           enumSchema("投递模式；steer 注入当前 turn（默认），follow_up 排队", "steer", "follow_up"),
+		"plan_id":        stringSchema("关联的 Plan ID（可选；与 plan_task_id 成对提供）"),
+		"plan_task_id":   stringSchema("关联的 Plan Task ID（可选）；投递被接受后自动推进为 in_progress"),
+		"wait_time_ms":   numberSchema("等待窗口回执的毫秒数；默认 30000，最大 120000"),
 		"user_confirmed": booleanSchema("用户已确认向该窗口派发；服务端校验目标窗口与消息摘要"),
 	}
 	r.addTool(s, cleanActionTool("pi_window", toolDesc["pi_window"], piWindowCommon, map[string]actionSchemaBranch{
 		"list": {Description: "列出当前工作区可发现的 Pi 窗口（自动注册的活跃窗口）。", Properties: map[string]any{}, Required: []string{"remote_session_id"}},
 		"send": {Description: "向指定 Pi 窗口投递任务消息；始终要求用户确认（先 list 展示窗口，用户确认后带 user_confirmed=true 重试）。", Properties: map[string]any{}, Required: []string{"remote_session_id", "purpose", "window", "message"}},
 	}, commandExecutionToolAnnotation), r.toolPiWindow)
+
+	r.addTool(s, cleanActionTool("task_delegate", toolDesc["task_delegate"], piWindowCommon, map[string]actionSchemaBranch{
+		"send": {Description: "委派任务到指定 Pi 窗口并自动注入结果回传指令；入参与 pi_window send 一致，message 末尾自动追加结果写入指引，成功后返回 task_id 与 result_path，结果用 task_result_view 查询；始终要求用户确认（先 pi_window list 展示窗口，用户确认后带 user_confirmed=true 重试）。", Properties: map[string]any{}, Required: []string{"remote_session_id", "purpose", "window", "message"}},
+	}, commandExecutionToolAnnotation), r.toolTaskDelegate)
+
+	taskSpawnCommon := map[string]any{
+		"remote_session_id": remoteSession,
+		"purpose":           stringSchema("本次 spawn 的用户目标"),
+		"message":           stringSchema(fmt.Sprintf("委派给 spawn pi 进程的任务消息；最大 %d 字节，message 末尾会自动追加结果回传指令与退出指引", piPeerMaxCommandBytes)),
+		"workspace":         stringSchema("可选目标 Workspace 名称；省略时使用 session 的 workspace"),
+	}
+	r.addTool(s, cleanActionTool("task_spawn", toolDesc["task_spawn"], taskSpawnCommon, map[string]actionSchemaBranch{
+		"spawn": {Description: "在指定 workspace 启动 detached pi 进程跑任务；message 末尾自动注入结果回传指令（完成后用 write 工具写入结果文件并退出）；返回 task_id/result_path/pid/log_path，结果用 task_result_view 查询。", Properties: map[string]any{}, Required: []string{"remote_session_id", "purpose", "message"}},
+	}, commandExecutionToolAnnotation), r.toolTaskSpawn)
+
+	taskViewCommon := map[string]any{
+		"remote_session_id": remoteSession,
+		"delegated_task_id": stringSchema("委派任务 ID（pi_window send 成功返回的 task_id）；提供时查询单个任务，否则列出该 session 的全部委派任务"),
+	}
+	r.addTool(s, cleanActionTool("task_result_view", toolDesc["task_result_view"], taskViewCommon, map[string]actionSchemaBranch{
+		"view": {Description: "只读查询委派任务的状态与结果；delegated_task_id 查询单个任务，省略时列出当前 session 的全部委派任务；已结算的结果文件会合并为 status/result/result_summary。", Properties: map[string]any{}, Required: []string{"remote_session_id"}},
+	}, readOnlyToolAnnotation), r.toolTaskView)
 
 	artifactCommon := map[string]any{"remote_session_id": remoteSession, "purpose": stringSchema("本次产物操作的用户目标"), "idempotency_key": stringSchema("同一登记操作重试时复用的幂等键"), "execution_mode": enumSchema("执行模式", "sync", "async")}
 	artifactBranches := map[string]actionSchemaBranch{

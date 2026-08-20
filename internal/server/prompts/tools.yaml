@@ -11,6 +11,9 @@ tools:
   plan: 创建、读取、推进、阻塞、重规划或交付持久化计划。
   pi_execute: 将任务委派给本地 Pi Agent 执行（默认 companion 式直接执行），支持 system 提示注入；关联 plan 任务时自动推进状态并记录 execute 证据，长任务返回 execution_task_id 供 execute attach/stop。
   pi_window: 发现并消息投递到已运行的 Pi 窗口（workspace-peer 文件协议，同 teammate-send 通道）；send 前必须先 list，且始终要求用户语义确认。
+  task_delegate: 委派任务到 Pi 窗口并注入结果回传指令；入参与 pi_window send 一致，message 末尾会自动追加结果写入指引，返回 task_id 与 result_path，后续用 task_result_view 查询。
+  task_spawn: 在指定 workspace 启动 detached 新 pi 进程跑任务；message 末尾自动注入结果回传指令（完成后用 write 工具写入结果文件并退出）；返回 task_id/result_path/pid/log_path，结果用 task_result_view 查询。
+  task_result_view: 查询委派任务的状态与结果；delegated_task_id 查询单个任务，省略时列出 remote_session_id 的全部委派任务，已结算的结果文件合并为 status/result/result_summary。
   operation_batch: 按 DAG 提交多个公开工具操作；无依赖步骤可并发。
   operation_manage: 查询、等待、读取结果、取消或恢复异步 Operation。
   runtime_read: 读取 MCPX 运行时能力、项目摘要或适用指令。

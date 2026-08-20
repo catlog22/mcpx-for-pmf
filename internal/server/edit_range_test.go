@@ -10,7 +10,7 @@ import (
 
 func TestCleanCoreEditRangeUpdatePreservesFormat(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	original := []byte("one\r\ntwo\r\nthree\r\nfour\r\n")
 	path := filepath.Join(workspace.Path, "range.txt")
 	if err := os.WriteFile(path, original, 0o644); err != nil {
@@ -57,7 +57,7 @@ func TestEditRangeSchemaAndOutOfBoundsRecovery(t *testing.T) {
 		t.Fatalf("edit range schema missing: %s", encoded)
 	}
 
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	original := []byte("one\ntwo\n")
 	if err := os.WriteFile(filepath.Join(workspace.Path, "bounds.txt"), original, 0o644); err != nil {
 		t.Fatal(err)

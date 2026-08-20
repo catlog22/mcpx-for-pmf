@@ -33,7 +33,7 @@ func TestEphemeralSQLiteRuntimeValidatesModeAndRedactsObservation(t *testing.T) 
 
 func TestEphemeralSQLiteRuntimeQueriesWorkspaceDatabaseReadonly(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	databasePath := filepath.Join(workspace.Path, "sample.db")
 	db, err := sql.Open("sqlite", databasePath)
 	if err != nil {

@@ -17,7 +17,7 @@ import (
 func TestMCPToolCallPassesContextAndReplaysFullUpstreamResult(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	rt.cfg.Discovery.MCP.Enabled = true
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	tmp := t.TempDir()
 	script := filepath.Join(tmp, "passthrough_mcp.py")
 	callLog := filepath.Join(tmp, "calls.log")
@@ -147,7 +147,7 @@ for line in sys.stdin:
 func TestMCPToolUpstreamIsErrorPassesThroughConsumesConfirmationAndReplays(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	rt.cfg.Discovery.MCP.Enabled = true
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	tmp := t.TempDir()
 	script := filepath.Join(tmp, "failing_mcp.py")
 	startLog := filepath.Join(tmp, "starts.log")

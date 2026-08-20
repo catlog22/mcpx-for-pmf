@@ -42,7 +42,7 @@ func TestSourceErrorClassifiesMissingPathWithoutStatatLeak(t *testing.T) {
 
 func TestReadFullLimitIsStructuredAndWindowReadsLargeSource(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	content := append(bytes.Repeat([]byte("x\n"), int(file.MaxSourceBytes/2)), 'z')
 	if int64(len(content)) <= file.MaxSourceBytes {
 		content = append(content, bytes.Repeat([]byte("x"), int(file.MaxSourceBytes-int64(len(content))+1))...)
@@ -81,7 +81,7 @@ func TestReadFullLimitIsStructuredAndWindowReadsLargeSource(t *testing.T) {
 
 func TestReadItemsLimitAndListPathAreStructured(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	if err := os.MkdirAll(filepath.Join(workspace.Path, "scoped"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestFileReadFullReturnsHTMLAndDirectImageContent(t *testing.T) {
 	if remoteSessionID == "" {
 		t.Fatalf("session=%+v", created)
 	}
-	registered, ok := rt.reg.Get("demo")
+	registered, ok := rt.reg.Load().Get("demo")
 	if !ok {
 		t.Fatal("demo workspace was not registered")
 	}
@@ -303,7 +303,7 @@ func TestFileReadDecodesUTF16ForModelAndWindow(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	created := callEnvelope(t, rt.toolSessionOpen, context.Background(), map[string]any{"workspace": "demo"})
 	remoteSessionID, _ := created["remote_session_id"].(string)
-	registered, ok := rt.reg.Get("demo")
+	registered, ok := rt.reg.Load().Get("demo")
 	if !ok {
 		t.Fatal("demo workspace was not registered")
 	}
@@ -341,7 +341,7 @@ func TestSourceReadWindowAndBatchExposeSameFormat(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	created := callEnvelope(t, rt.toolSessionOpen, context.Background(), map[string]any{"workspace": "demo"})
 	remoteSessionID, _ := created["remote_session_id"].(string)
-	registered, ok := rt.reg.Get("demo")
+	registered, ok := rt.reg.Load().Get("demo")
 	if !ok {
 		t.Fatal("demo workspace was not registered")
 	}

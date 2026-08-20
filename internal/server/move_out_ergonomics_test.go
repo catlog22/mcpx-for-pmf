@@ -10,7 +10,7 @@ import (
 
 func TestMoveOutPrepareInfersWorkspaceKindAndIdempotency(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	fileContent := []byte("remove me\n")
 	if err := os.WriteFile(filepath.Join(workspace.Path, "remove.txt"), fileContent, 0o600); err != nil {
 		t.Fatal(err)
@@ -83,7 +83,7 @@ func TestMoveOutSimplifiedSchemaKeepsFileRevisionGuard(t *testing.T) {
 		t.Fatalf("move_out target schema must infer kind and retain expected_sha256: %s", encoded)
 	}
 
-	workspace, _ := rt.reg.Get("demo")
+	workspace, _ := rt.reg.Load().Get("demo")
 	if err := os.WriteFile(filepath.Join(workspace.Path, "guard.txt"), []byte("guard\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
