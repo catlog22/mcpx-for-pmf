@@ -64,29 +64,33 @@ type Runtime struct {
 	tasks         *terminal.TaskManager
 	// delegated is the file-backed registry of tasks dispatched to remote Pi
 	// windows (named to avoid clashing with the terminal TaskManager above).
-	delegated        *tasks.Registry
-	secrets          *secrets.Store
-	oauth            *oauth.Server
-	state            *state.Store
-	remote           *remotesession.Service
-	environment      *environment.Service
-	workspaceDiff    *workspacechanges.Service
-	fileSnapshots    *filesnapshot.Store
-	artifacts        *artifact.Service
-	plans            *plan.Service
-	deletions        *deletion.Store
-	retention        *state.RetentionService
-	retentionCancel  context.CancelFunc
-	retentionDone    chan struct{}
-	leaseSweepCancel context.CancelFunc
-	leaseSweepDone   chan struct{}
-	screenshot       screenCapturer
-	observation      *observationBridge
-	operations       *operation.Service
-	observerSocket   *observation.SocketServer
-	activityMu       sync.Mutex
-	closeOnce        sync.Once
-	closeErr         error
+	delegated          *tasks.Registry
+	secrets            *secrets.Store
+	oauth              *oauth.Server
+	state              *state.Store
+	remote             *remotesession.Service
+	environment        *environment.Service
+	workspaceDiff      *workspacechanges.Service
+	fileSnapshots      *filesnapshot.Store
+	artifacts          *artifact.Service
+	plans              *plan.Service
+	deletions          *deletion.Store
+	retention          *state.RetentionService
+	retentionCancel    context.CancelFunc
+	retentionDone      chan struct{}
+	leaseSweepCancel   context.CancelFunc
+	leaseSweepDone     chan struct{}
+	configWatchCancel  context.CancelFunc
+	configWatchDone    chan struct{}
+	configWatchModTime time.Time
+	configWatchSize    int64
+	screenshot         screenCapturer
+	observation        *observationBridge
+	operations         *operation.Service
+	observerSocket     *observation.SocketServer
+	activityMu         sync.Mutex
+	closeOnce          sync.Once
+	closeErr           error
 
 	// For schema revision and capability catalog.
 	toolIndex    map[string]mcp.Tool
@@ -372,6 +376,7 @@ func (r *Runtime) Start() error {
 	}
 	r.startRetention()
 	r.startLeaseSweeper()
+	r.startConfigWatcher()
 	// toolIndex is filled by addTool during registerTools.
 
 	addr := r.opts.AddrOverride
@@ -440,6 +445,7 @@ func (r *Runtime) Close() error {
 	r.closeOnce.Do(func() {
 		r.stopRetention()
 		r.stopLeaseSweeper()
+		r.stopConfigWatcher()
 		if r.observation != nil && r.observation.async != nil {
 			r.observation.async.Close(2 * time.Second)
 		}
@@ -592,6 +598,78 @@ func (r *Runtime) runLeaseSweep() {
 	if newReg, err := workspace.NewRegistry(cfg.Workspaces); err == nil {
 		r.reg.Store(newReg)
 	}
+}
+
+// startConfigWatcher polls the global config file and hot-reloads the
+// workspace registry when it changes on disk. The CLI (`mcpx workspace
+// register/remove`) edits the file while the service runs; without this the
+// in-memory registry would stay stale until a restart or a lease sweep.
+func (r *Runtime) startConfigWatcher() {
+	if r == nil || r.configWatchDone != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	r.configWatchCancel = cancel
+	r.configWatchDone = done
+	if info, err := os.Stat(r.globalCfgPath); err == nil {
+		r.configWatchModTime = info.ModTime()
+		r.configWatchSize = info.Size()
+	}
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				r.reloadConfigIfChanged()
+			}
+		}
+	}()
+}
+
+func (r *Runtime) stopConfigWatcher() {
+	if r == nil || r.configWatchCancel == nil {
+		return
+	}
+	r.configWatchCancel()
+	if r.configWatchDone != nil {
+		<-r.configWatchDone
+	}
+	r.configWatchCancel = nil
+	r.configWatchDone = nil
+}
+
+func (r *Runtime) reloadConfigIfChanged() {
+	if r == nil {
+		return
+	}
+	info, err := os.Stat(r.globalCfgPath)
+	if err != nil {
+		return // config transiently unavailable — keep the current registry
+	}
+	if info.ModTime().Equal(r.configWatchModTime) && info.Size() == r.configWatchSize {
+		return
+	}
+	cfg, err := config.LoadGlobal(r.globalCfgPath)
+	if err != nil {
+		// Keep the old baseline so the next tick retries the changed file
+		// (a torn read mid-write must not be latched as "handled").
+		logging.With("component", "config_watch").Error("reload config failed", "err", err)
+		return
+	}
+	r.configWatchModTime = info.ModTime()
+	r.configWatchSize = info.Size()
+	newReg, err := workspace.NewRegistry(cfg.Workspaces)
+	if err != nil {
+		logging.With("component", "config_watch").Error("rebuild workspace registry failed", "err", err)
+		return
+	}
+	r.reg.Store(newReg)
+	fmt.Printf("[mcpx] config changed: hot-reloaded %d workspace(s)\n", len(cfg.Workspaces))
 }
 
 func (r *Runtime) runRetention(ctx context.Context) {

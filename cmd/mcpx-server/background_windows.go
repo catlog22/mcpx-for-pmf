@@ -66,14 +66,19 @@ func windowsBackgroundProcessState(pid int, executable string) (bool, bool, erro
 	if err != nil {
 		return false, false, err
 	}
-	line := strings.TrimSpace(string(output))
-	if line == "" || strings.HasPrefix(line, "INFO:") {
-		return false, false, nil
+	// CSV format: "Image","PID","Session Name","Session#","Mem Usage".
+	// Localized Windows emits a translated info line when nothing matches
+	// (e.g. zh-CN “信息: …”), so only an exact PID-column hit counts as
+	// alive — same contract as the TUI tunnel alive check.
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		fields := strings.Split(strings.TrimSpace(line), ",")
+		if len(fields) < 2 {
+			continue
+		}
+		if strings.Trim(fields[1], "\" ") == strconv.Itoa(pid) {
+			image := strings.Trim(fields[0], "\" ")
+			return true, strings.EqualFold(image, filepath.Base(executable)), nil
+		}
 	}
-	first := line
-	if index := strings.Index(first, ","); index >= 0 {
-		first = first[:index]
-	}
-	image := strings.Trim(first, "\" ")
-	return true, strings.EqualFold(image, filepath.Base(executable)), nil
+	return false, false, nil
 }

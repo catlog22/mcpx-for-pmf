@@ -35,6 +35,51 @@ func TestConfigRoundTripInNew(t *testing.T) {
 	}
 }
 
+func TestReloadConfigIfChangedHotSwapsWorkspaceRegistry(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("MCPX_HOME", home)
+	ws := filepath.Join(home, "p")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Workspaces = []config.WorkspaceEntry{{Name: "p", Path: ws}}
+	cfgPath := filepath.Join(home, "config.yaml")
+	if err := config.WriteGlobal(cfgPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	rt, err := New(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close() // release the state DB so TempDir cleanup succeeds on Windows
+	if got := len(rt.reg.Load().List()); got != 1 {
+		t.Fatalf("expected 1 workspace after New, got %d", got)
+	}
+
+	// Baseline matches the current file: reload is a no-op.
+	info, err := os.Stat(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.configWatchModTime = info.ModTime()
+	rt.configWatchSize = info.Size()
+	rt.reloadConfigIfChanged()
+	if got := len(rt.reg.Load().List()); got != 1 {
+		t.Fatalf("no-op reload must keep 1 workspace, got %d", got)
+	}
+
+	// Simulate `mcpx workspace remove` editing the file while running.
+	cfg.Workspaces = nil
+	if err := config.WriteGlobal(cfgPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	rt.reloadConfigIfChanged()
+	if got := len(rt.reg.Load().List()); got != 0 {
+		t.Fatalf("expected 0 workspaces after hot reload, got %d", got)
+	}
+}
+
 func TestExecPipelineAllowConfirmDeny(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("MCPX_HOME", home)
