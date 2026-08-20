@@ -4,9 +4,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 
+	"mcpx/internal/config"
 	"mcpx/internal/logging"
 	"mcpx/internal/server"
 	buildversion "mcpx/internal/version"
@@ -133,10 +136,29 @@ func main() {
 		logging.Error("startup failed", "err", err)
 		os.Exit(1)
 	}
+	cleanupPID := writeServerPIDFile()
+	defer cleanupPID()
 	if err := rt.Start(); err != nil {
 		logging.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
+}
+
+// writeServerPIDFile persists the running server's PID to {home}/mcpx-server.pid
+// so external tools (e.g. the pi-maestro-flow TUI) can stop the process no
+// matter how it was launched (TUI, shell, npm). The returned func removes the
+// file on graceful shutdown.
+func writeServerPIDFile() func() {
+	home, err := config.HomeDir()
+	if err != nil {
+		return func() {}
+	}
+	path := filepath.Join(home, "mcpx-server.pid")
+	if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		logging.Warn("pid file write failed", "err", err)
+		return func() {}
+	}
+	return func() { _ = os.Remove(path) }
 }
 
 func backgroundStopMessage(stoppedPIDs []int) string {
