@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"mcpx/internal/config"
 	"mcpx/internal/observation"
 )
 
@@ -50,6 +53,37 @@ func TestParseWorkspaceRegisterArgs(t *testing.T) {
 	}
 	if _, err := parseWorkspaceRegisterArgs([]string{"one", "two"}); err == nil {
 		t.Fatal("multiple workspace paths should fail")
+	}
+}
+
+func TestRunWorkspaceRegisterValidatesPath(t *testing.T) {
+	t.Setenv("MCPX_HOME", t.TempDir())
+	if code := runWorkspaceRegister([]string{filepath.Join(t.TempDir(), "missing")}); code == 0 {
+		t.Fatal("registering a missing path should fail")
+	}
+	filePath := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(filePath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code := runWorkspaceRegister([]string{filePath}); code == 0 {
+		t.Fatal("registering a plain file should fail")
+	}
+	dir := t.TempDir()
+	if code := runWorkspaceRegister([]string{dir}); code != 0 {
+		t.Fatalf("registering a real directory should succeed, got exit %d", code)
+	}
+	cfg, err := config.LoadGlobal("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, workspace := range cfg.Workspaces {
+		if workspace.Path == dir {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("registered workspace missing from config: %+v", cfg.Workspaces)
 	}
 }
 

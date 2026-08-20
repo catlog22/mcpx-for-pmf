@@ -147,6 +147,17 @@ func runWorkspaceRegister(args []string) int {
 		fmt.Fprintf(os.Stderr, "workspace register: resolve path: %v\n", err)
 		return 1
 	}
+	// Liveness check: refuse to register a path that does not exist or is
+	// not a directory — a stale registration would silently linger forever.
+	info, err := os.Stat(absPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "workspace register: path unavailable: %v\n", err)
+		return 1
+	}
+	if !info.IsDir() {
+		fmt.Fprintf(os.Stderr, "workspace register: not a directory: %s\n", absPath)
+		return 1
+	}
 	if _, err := config.CleanupExpiredWorkspaces(""); err != nil {
 		fmt.Fprintf(os.Stderr, "workspace register: cleanup: %v\n", err)
 	}
